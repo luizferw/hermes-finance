@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kosh
+      POSTGRES_USER: kosh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kosh -d kosh"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      target: builder
+    command: pnpm db:migrate:safe
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET}
+      APP_URL: ${APP_URL:?set APP_URL}
+      KOSH_ENCRYPTION_KEY: ${KOSH_ENCRYPTION_KEY:-}
+      KOSH_ALLOW_DEDUPLICATION: ${KOSH_ALLOW_DEDUPLICATION:-false}
+      KOSH_BACKUP_RETENTION_COUNT: ${KOSH_BACKUP_RETENTION_COUNT:-10}
+    volumes:
+      - ./backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      target: runner
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET}
+      APP_URL: ${APP_URL:?set APP_URL}
+      KOSH_ENCRYPTION_KEY: ${KOSH_ENCRYPTION_KEY:-}
+      KOSH_STORAGE_DIR: /app/data/storage
+      KOSH_DISABLE_JOBS: ${KOSH_DISABLE_JOBS:-false}
+      KOSH_AI_ENABLED: ${KOSH_AI_ENABLED:-false}
+      KOSH_MCP_ENABLED: ${KOSH_MCP_ENABLED:-false}
+      KOSH_MCP_BASE_URL: ${KOSH_MCP_BASE_URL:-}
+      KOSH_MCP_AUTH_SECRET: ${KOSH_MCP_AUTH_SECRET:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+    ports:
+      - "${KOSH_BIND_ADDRESS:-127.0.0.1}:3000:3000"
+    volumes:
+      - kosh-storage:/app/data/storage
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/api/system/health',{method:'HEAD'}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  kosh-storage:

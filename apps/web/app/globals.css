@@ -1,0 +1,420 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-instrument-sans);
+  --font-serif: var(--font-instrument-serif);
+  --font-mono: var(--font-plex-mono);
+  --font-heading: var(--font-instrument-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/*
+ * Kosh "golden hour" palette.
+ * Warm cream paper, bronze-amber lead, a sunset spectrum (terracotta, rose,
+ * dusk-violet) for mood and charts; fern-green demoted to a single supporting
+ * voice (true success / positive balance). The luminous sunset itself lives in
+ * --atmosphere, not the interactive tokens, so amounts stay legible while the
+ * room stays warm. Mono tabular amounts throughout.
+ */
+:root {
+  --background: oklch(0.985 0.012 78);
+  --foreground: oklch(0.22 0.02 60);
+  --card: oklch(0.995 0.006 80);
+  --card-foreground: oklch(0.22 0.02 60);
+  --popover: oklch(0.995 0.006 80);
+  --popover-foreground: oklch(0.22 0.02 60);
+  --primary: oklch(0.5 0.115 68);
+  --primary-foreground: oklch(0.985 0.01 80);
+  --secondary: oklch(0.955 0.009 75);
+  --secondary-foreground: oklch(0.26 0.014 64);
+  --muted: oklch(0.955 0.008 78);
+  --muted-foreground: oklch(0.49 0.025 65);
+  --accent: oklch(0.95 0.02 68);
+  --accent-foreground: oklch(0.3 0.035 60);
+  --destructive: oklch(0.55 0.2 26);
+  --success: oklch(0.49 0.11 156);
+  --success-foreground: oklch(0.985 0.01 80);
+  --warning: oklch(0.64 0.14 54);
+  --warning-foreground: oklch(0.985 0.01 80);
+  --border: oklch(0.9 0.009 75);
+  --input: oklch(0.9 0.009 75);
+  --ring: oklch(0.6 0.1 68);
+  --chart-1: oklch(0.66 0.13 70);
+  --chart-2: oklch(0.62 0.16 34);
+  --chart-3: oklch(0.6 0.13 12);
+  --chart-4: oklch(0.55 0.11 320);
+  --chart-5: oklch(0.55 0.1 156);
+  --radius: 0.55rem;
+  /*
+   * Motion — "Living Ledger": fluid & spatial. Exponential ease-out, no
+   * overshoot. Single source for both CSS and Tailwind (`ease-[var(--ease-out-expo)]`,
+   * `duration-[var(--duration-state)]`).
+   */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-micro: 120ms;
+  --duration-state: 220ms;
+  --duration-spatial: 320ms;
+  --sidebar: oklch(0.97 0.009 78);
+  --sidebar-foreground: oklch(0.28 0.014 64);
+  --sidebar-primary: oklch(0.5 0.115 68);
+  --sidebar-primary-foreground: oklch(0.985 0.01 80);
+  --sidebar-accent: oklch(0.93 0.014 72);
+  --sidebar-accent-foreground: oklch(0.26 0.02 60);
+  --sidebar-border: oklch(0.9 0.009 75);
+  --sidebar-ring: oklch(0.6 0.1 68);
+
+  /*
+   * Atmosphere — golden hour, as light. Four overlapping radial pools you feel
+   * before you notice: a peach dawn falls from the top-left, a terracotta-rose
+   * breath warms the top-right, a dusk-violet pool grounds the floor, and a
+   * faint amber wash lifts the centre. Opacities sit in the 3–10% range — rich
+   * enough to read as a lit room, restrained enough that the cream paper stays
+   * the hero and the amounts never fight it. Painted fixed behind the content.
+   */
+  --atmosphere:
+    radial-gradient(120% 82% at 6% -14%, oklch(0.82 0.11 62 / 0.1), transparent 56%),
+    radial-gradient(92% 62% at 106% 4%, oklch(0.72 0.13 28 / 0.08), transparent 56%),
+    radial-gradient(118% 84% at 50% 118%, oklch(0.6 0.1 326 / 0.06), transparent 60%),
+    radial-gradient(80% 52% at 50% 46%, oklch(0.85 0.08 76 / 0.035), transparent 72%);
+
+  /* Spine identity — a warm amber pool falling from the very top of the sidebar,
+     behind the wordmark and the first nav entries, fading out by a third down. */
+  --sidebar-atmosphere:
+    radial-gradient(82% 32% at 50% 0%, oklch(0.7 0.12 62 / 0.1), transparent 72%);
+}
+
+.dark {
+  --background: oklch(0.17 0.012 58);
+  --foreground: oklch(0.95 0.008 82);
+  --card: oklch(0.212 0.013 58);
+  --card-foreground: oklch(0.95 0.008 82);
+  --popover: oklch(0.224 0.013 58);
+  --popover-foreground: oklch(0.95 0.008 82);
+  --primary: oklch(0.78 0.12 70);
+  --primary-foreground: oklch(0.2 0.04 64);
+  --secondary: oklch(0.27 0.013 58);
+  --secondary-foreground: oklch(0.95 0.008 82);
+  --muted: oklch(0.262 0.013 58);
+  --muted-foreground: oklch(0.72 0.016 76);
+  --accent: oklch(0.3 0.022 60);
+  --accent-foreground: oklch(0.95 0.01 76);
+  --destructive: oklch(0.66 0.18 25);
+  --success: oklch(0.72 0.125 156);
+  --success-foreground: oklch(0.16 0.02 156);
+  --warning: oklch(0.79 0.14 60);
+  --warning-foreground: oklch(0.2 0.04 60);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 13%);
+  --ring: oklch(0.7 0.12 70);
+  --chart-1: oklch(0.78 0.12 70);
+  --chart-2: oklch(0.7 0.15 34);
+  --chart-3: oklch(0.68 0.13 12);
+  --chart-4: oklch(0.65 0.12 322);
+  --chart-5: oklch(0.72 0.12 156);
+  --sidebar: oklch(0.15 0.012 58);
+  --sidebar-foreground: oklch(0.9 0.008 82);
+  --sidebar-primary: oklch(0.78 0.12 70);
+  --sidebar-primary-foreground: oklch(0.2 0.04 64);
+  --sidebar-accent: oklch(0.25 0.016 60);
+  --sidebar-accent-foreground: oklch(0.95 0.01 76);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.7 0.12 70);
+
+  /*
+   * Dark atmosphere runs warmer and a touch stronger — ambient light is what
+   * keeps a dark surface from reading as a flat black sheet. Embers of the same
+   * sunset glow in a night room: amber from the top-left, a terracotta breath
+   * top-right, a dusk-violet pool at the floor.
+   */
+  --atmosphere:
+    radial-gradient(120% 82% at 6% -14%, oklch(0.7 0.14 56 / 0.14), transparent 56%),
+    radial-gradient(92% 62% at 106% 2%, oklch(0.6 0.15 26 / 0.12), transparent 56%),
+    radial-gradient(118% 84% at 50% 118%, oklch(0.5 0.12 322 / 0.1), transparent 60%);
+
+  --sidebar-atmosphere:
+    radial-gradient(82% 32% at 50% 0%, oklch(0.72 0.13 62 / 0.14), transparent 72%);
+}
+
+/* Ledger amounts: mono, tabular, slightly tightened. */
+@utility font-amount {
+  font-family: var(--font-plex-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Uppercase micro-labels used for card eyebrows and section headers. */
+@utility micro-label {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
+}
+
+/*
+ * Frosted surface — a translucent, blurred panel that lets the warm atmosphere
+ * read through it. Used for the ask bar, quick-add preview, mobile sheet, and
+ * other floating surfaces that should feel lifted off the paper rather than
+ * painted on it. Falls back to an opaque card where backdrop-filter is absent.
+ */
+@utility glass-panel {
+  background-color: color-mix(in oklch, var(--card) 72%, transparent);
+  border: 1px solid color-mix(in oklch, var(--border) 80%, transparent);
+  box-shadow:
+    0 1px 2px oklch(0 0 0 / 0.04),
+    0 8px 28px -12px oklch(0 0 0 / 0.12);
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+}
+@supports not (backdrop-filter: blur(1px)) {
+  .glass-panel {
+    background-color: var(--card);
+  }
+}
+
+/* Dashed hairline — the ledger-paper separator. */
+@utility border-ledger {
+  border-style: dashed;
+  border-color: var(--border);
+}
+
+/*
+ * Staggered list entrance. Rows settle in from just below; the per-row delay is
+ * capped (min(--i, 12)) so a 50-row page finishes in ~300ms, not seconds.
+ * Set `style={{ "--i": index }}` on each row. `backwards` holds the hidden
+ * start state until the row's turn. The global reduced-motion guard collapses
+ * this to instant.
+ */
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility row-in {
+  animation: row-in 0.28s var(--ease-out-quint) backwards;
+  animation-delay: calc(min(var(--i, 0), 8) * 16ms);
+}
+
+/* Panel reveal — the filter row expanding open. Entrance only. */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    clip-path: inset(0 0 0 0);
+  }
+}
+@utility panel-in {
+  animation: panel-in 0.24s var(--ease-out-quint);
+  transform-origin: top;
+}
+
+/* Pop-in for transient controls (bulk-action buttons appearing). */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility pop-in {
+  animation: pop-in 0.18s var(--ease-out-quint) backwards;
+}
+
+/*
+ * Page transition. (app)/template.tsx re-mounts on every route change, so this
+ * fires once per navigation: content rises a hair and fades up. Subtle enough
+ * to never feel like waiting. Collapsed to instant under reduced-motion.
+ */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@utility page-in {
+  animation: page-in 0.16s var(--ease-out-quint);
+}
+
+/*
+ * Magnitude fill — bars/meters grow from their leading edge on mount, so width
+ * reads as quantity settling into place (state, not decoration). Transform-only
+ * (composited); the empty fill element scales, never its text. Collapsed to
+ * instant under the global reduced-motion guard.
+ */
+@keyframes grow-x {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+@utility grow-x {
+  animation: grow-x 0.62s var(--ease-out-expo) backwards;
+  animation-delay: calc(min(var(--i, 0), 10) * 35ms);
+  transform-origin: left center;
+}
+
+/*
+ * Magnitude fill, vertical — the confidence "shape" bars rising from their base
+ * on mount, so height reads as the factor settling into place. Transform-only
+ * (composited); collapsed to instant under the global reduced-motion guard.
+ */
+@keyframes grow-y {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+@utility grow-y {
+  animation: grow-y 0.66s var(--ease-out-expo) backwards;
+  animation-delay: calc(min(var(--i, 0), 8) * 45ms);
+  transform-origin: bottom center;
+}
+
+/* Active-nav indicator: the fern marker growing into place. */
+@keyframes nav-marker-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) scaleY(0.3);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) scaleY(1);
+  }
+}
+@utility nav-marker {
+  animation: nav-marker-in 0.24s var(--ease-out-expo);
+}
+
+/*
+ * The ambient light surface. Paints --atmosphere over a surface's own colour
+ * (background-image leaves background-color intact), fixed to the viewport so
+ * the light stays put while content scrolls through it. Used on the main
+ * content plane so every screen sits inside the same room.
+ */
+@utility app-atmosphere {
+  background-image: var(--atmosphere);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+}
+
+/* Sidebar's own top-anchored ambient light — painted over bg-sidebar. */
+@utility app-sidebar-atmosphere {
+  background-image: var(--sidebar-atmosphere);
+  background-repeat: no-repeat;
+}
+
+/*
+ * Film grain — the material the brief asks for, dialled to a whisper. A tiled
+ * fractal-noise tile at ~2.5% gives paper its tooth and keeps large flat fields
+ * from looking like dead pixels, without ever reading as a "noise gimmick".
+ * Fixed, pointer-events-none; sits above the page but below portalled overlays.
+ * Collapsed away for anyone who'd rather not have it (reduced data/contrast is
+ * handled by the value itself being imperceptible).
+ */
+@utility app-grain {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.dark .app-grain {
+  opacity: 0.04;
+  mix-blend-mode: overlay;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+  ::selection {
+    background: oklch(from var(--primary) l c h / 22%);
+  }
+  /*
+   * Reduced-motion safety net: collapse every animation/transition to instant.
+   * Per-component crossfade fallbacks may still opt back in inside this query.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

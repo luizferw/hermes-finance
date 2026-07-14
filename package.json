@@ -1,0 +1,40 @@
+{
+  "name": "kosh",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A beautiful, self-hosted personal finance app for budgets, cashflow, net worth, imports, automation, and privacy-first money management.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.5.3",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "test:operations": "./scripts/test-operations.sh",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:backup": "./scripts/db-backup.sh",
+    "db:backup:prune": "./scripts/db-prune-backups.sh",
+    "db:restore:fresh": "./scripts/db-restore-fresh.sh",
+    "db:migrate:safe": "./scripts/db-migrate-after-backup.sh",
+    "db:verify": "./scripts/db-verify-schema.sh",
+    "db:forensics:duplicates": "./scripts/db-forensics-duplicate-import-hashes.sh",
+    "db:dedupe-imports": "./scripts/db-dedupe-imported-transactions.sh",
+    "db:seed": "pnpm --filter @kosh/db seed",
+    "db:encrypt": "pnpm --filter @kosh/db encrypt",
+    "db:studio": "drizzle-kit studio"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "dotenv": "^17.4.2",
+    "drizzle-kit": "^0.31.5",
+    "eslint": "^9.39.4",
+    "turbo": "^2.5.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.48.1"
+  }
+}

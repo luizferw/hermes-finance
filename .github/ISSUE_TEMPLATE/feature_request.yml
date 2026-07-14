@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a small, privacy-preserving improvement to Kosh.
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the user problem, not only a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Smallest useful proposal
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy, security, and self-hosting impact
+      description: Explain any new data, external service, configuration, or operational burden.
+    validations:
+      required: true

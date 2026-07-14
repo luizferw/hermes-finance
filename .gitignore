@@ -1,0 +1,51 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# next.js
+apps/web/.next/
+apps/web/out/
+next-env.d.ts
+
+# builds
+dist/
+*.tsbuildinfo
+
+# turbo
+.turbo/
+
+# secrets and local environment overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# local data and backups
+data/
+backups/
+uploads/
+storage/
+*.dump
+*.bak
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.log
+logs/
+coverage/
+
+# os/editor
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.impeccable/
+.impeccable.md
+PRODUCT.md
+tmp/
+temp/
+.tmp/

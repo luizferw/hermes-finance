@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: kosh
+          POSTGRES_USER: kosh
+          POSTGRES_PASSWORD: kosh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kosh -d kosh"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://kosh:kosh@localhost:5432/kosh
+      BETTER_AUTH_SECRET: ci-secret-0123456789abcdef0123456789
+      APP_URL: http://localhost:3000
+      KOSH_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      KOSH_AI_ENABLED: "false"
+      KOSH_MCP_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12
+          cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:migrate && pnpm db:seed
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm test:operations
+      - run: pnpm build
+      - run: ./scripts/ci-migrations.sh
+        env:
+          KOSH_CI_ALLOW_DATABASE_RESET: "true"
+      - run: ./scripts/ci-container.sh
