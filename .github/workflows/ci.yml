@@ -38,7 +38,7 @@ jobs:
           version: 11.5.3
       - uses: actions/setup-node@v4
         with:
-          node-version: 22.12
+          node-version: 22.13
           cache: pnpm
       - run: sudo apt-get update && sudo apt-get install --yes postgresql-client
       - run: pnpm install --frozen-lockfile

@@ -36,7 +36,7 @@ does not currently persist uploaded attachments to the storage volume.
 
 ## Requirements
 
-- Node.js 22.12 or newer
+- Node.js 22.13 or newer
 - pnpm 11 (`corepack enable` is the simplest installation path)
 - PostgreSQL 16 or compatible
 - Docker and Docker Compose, optional
