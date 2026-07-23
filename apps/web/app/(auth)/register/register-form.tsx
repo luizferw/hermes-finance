@@ -3,30 +3,37 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { signUp } from "@/lib/auth-client";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import { Field, FieldError, FieldGroup } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  AuthError,
+  AuthHeader,
+  AuthInput,
+  AuthLabel,
+  PasswordInput,
+} from "@/components/auth/auth-ui";
+
+const MIN_PASSWORD = 8;
 
 const schema = z
   .object({
     name: z.string().min(2, "Tell us what to call you"),
     email: z.string().email("Enter a valid email"),
-    password: z.string().min(8, "At least 8 characters"),
+    password: z.string().min(
+      MIN_PASSWORD,
+      `At least ${MIN_PASSWORD} characters`,
+    ),
     confirm: z.string(),
   })
-  .refine((v) => v.password === v.confirm, {
+  .refine((values) => values.password === values.confirm, {
     path: ["confirm"],
     message: "Passwords do not match",
   });
@@ -40,6 +47,10 @@ export function RegisterForm() {
     resolver: zodResolver(schema),
     defaultValues: { name: "", email: "", password: "", confirm: "" },
   });
+  const errors = form.formState.errors;
+
+  const password = useWatch({ control: form.control, name: "password" });
+  const passwordMet = password.length >= MIN_PASSWORD;
 
   const onSubmit = form.handleSubmit(async (values) => {
     setServerError(null);
@@ -56,86 +67,106 @@ export function RegisterForm() {
     router.refresh();
   });
 
-  const errors = form.formState.errors;
-
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="font-serif text-2xl font-normal">
-          Create your account
-        </CardTitle>
-        <CardDescription>
-          One account per household member. Everything stays on this server.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={onSubmit} noValidate>
-          <FieldGroup>
-            <Field data-invalid={!!errors.name}>
-              <FieldLabel htmlFor="name">Name</FieldLabel>
-              <Input id="name" autoComplete="name" {...form.register("name")} />
-              {errors.name && <FieldError>{errors.name.message}</FieldError>}
-            </Field>
-            <Field data-invalid={!!errors.email}>
-              <FieldLabel htmlFor="email">Email</FieldLabel>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                {...form.register("email")}
-              />
-              {errors.email && <FieldError>{errors.email.message}</FieldError>}
-            </Field>
-            <Field data-invalid={!!errors.password}>
-              <FieldLabel htmlFor="password">Password</FieldLabel>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="new-password"
-                {...form.register("password")}
-              />
-              {errors.password && (
-                <FieldError>{errors.password.message}</FieldError>
-              )}
-            </Field>
-            <Field data-invalid={!!errors.confirm}>
-              <FieldLabel htmlFor="confirm">Confirm password</FieldLabel>
-              <Input
-                id="confirm"
-                type="password"
-                autoComplete="new-password"
-                {...form.register("confirm")}
-              />
-              {errors.confirm && (
-                <FieldError>{errors.confirm.message}</FieldError>
-              )}
-            </Field>
-            {serverError && (
-              <p role="alert" className="text-sm text-destructive">
-                {serverError}
+    <div className="space-y-8">
+      <AuthHeader
+        title="Create account"
+        description="Your account is stored on this server, not a Kosh cloud."
+      />
+
+      <form onSubmit={onSubmit} noValidate>
+        <FieldGroup>
+          <Field data-invalid={!!errors.name}>
+            <AuthLabel htmlFor="name">Name</AuthLabel>
+            <AuthInput
+              id="name"
+              autoComplete="name"
+              autoFocus
+              aria-invalid={!!errors.name}
+              {...form.register("name")}
+            />
+            {errors.name && <FieldError>{errors.name.message}</FieldError>}
+          </Field>
+
+          <Field data-invalid={!!errors.email}>
+            <AuthLabel htmlFor="email">Email</AuthLabel>
+            <AuthInput
+              id="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              aria-invalid={!!errors.email}
+              {...form.register("email")}
+            />
+            {errors.email && <FieldError>{errors.email.message}</FieldError>}
+          </Field>
+
+          <Field data-invalid={!!errors.password}>
+            <AuthLabel htmlFor="password">Password</AuthLabel>
+            <PasswordInput
+              id="password"
+              autoComplete="new-password"
+              aria-invalid={!!errors.password}
+              aria-describedby="password-hint"
+              {...form.register("password")}
+            />
+            {errors.password ? (
+              <FieldError>{errors.password.message}</FieldError>
+            ) : (
+              <p
+                id="password-hint"
+                className={cn(
+                  "flex items-center gap-1.5 text-xs/relaxed transition-colors",
+                  passwordMet ? "text-success" : "text-muted-foreground",
+                )}
+              >
+                <HugeiconsIcon
+                  icon={Tick02Icon}
+                  className={cn(
+                    "size-3.5 transition-opacity",
+                    passwordMet ? "opacity-100" : "opacity-30",
+                  )}
+                />
+                At least {MIN_PASSWORD} characters
               </p>
             )}
-            <Button
-              type="submit"
-              className="w-full"
-              disabled={form.formState.isSubmitting}
-            >
-              {form.formState.isSubmitting && <Spinner />}
-              Create account
-            </Button>
-          </FieldGroup>
-        </form>
-        <p className="mt-6 text-center text-sm text-muted-foreground">
-          Already have an account?{" "}
-          <Link
-            href="/login"
-            className="font-medium text-foreground underline-offset-4 hover:underline"
+          </Field>
+
+          <Field data-invalid={!!errors.confirm}>
+            <AuthLabel htmlFor="confirm">Confirm password</AuthLabel>
+            <PasswordInput
+              id="confirm"
+              autoComplete="new-password"
+              aria-invalid={!!errors.confirm}
+              {...form.register("confirm")}
+            />
+            {errors.confirm && (
+              <FieldError>{errors.confirm.message}</FieldError>
+            )}
+          </Field>
+
+          {serverError && <AuthError>{serverError}</AuthError>}
+
+          <Button
+            type="submit"
+            className="h-11 w-full text-sm"
+            disabled={form.formState.isSubmitting}
           >
-            Sign in
-          </Link>
-        </p>
-      </CardContent>
-    </Card>
+            {form.formState.isSubmitting && <Spinner />}
+            Create account
+          </Button>
+        </FieldGroup>
+      </form>
+
+      <p className="text-sm text-muted-foreground">
+        Already have an account?{" "}
+        <Link
+          href="/login"
+          className="rounded-sm font-medium text-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          Sign in
+        </Link>
+      </p>
+    </div>
   );
 }

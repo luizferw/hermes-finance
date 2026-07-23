@@ -4,5 +4,6 @@ import { LoginForm } from "./login-form";
 export const metadata: Metadata = { title: "Sign in" };
 
 export default function LoginPage() {
-  return <LoginForm />;
+  const showDemo = process.env.NODE_ENV !== "production";
+  return <LoginForm showDemo={showDemo} />;
 }

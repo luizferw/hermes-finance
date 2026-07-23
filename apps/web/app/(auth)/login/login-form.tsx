@@ -8,16 +8,15 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { signIn } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
+import { Field, FieldError, FieldGroup } from "@/components/ui/field";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  AuthError,
+  AuthHeader,
+  AuthInput,
+  AuthLabel,
+  PasswordInput,
+} from "@/components/auth/auth-ui";
 
 const schema = z.object({
   email: z.string().email("Enter a valid email"),
@@ -26,13 +25,14 @@ const schema = z.object({
 
 type FormValues = z.infer<typeof schema>;
 
-export function LoginForm() {
+export function LoginForm({ showDemo = false }: { showDemo?: boolean }) {
   const router = useRouter();
   const [serverError, setServerError] = useState<string | null>(null);
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: { email: "", password: "" },
   });
+  const errors = form.formState.errors;
 
   const onSubmit = form.handleSubmit(async (values) => {
     setServerError(null);
@@ -41,9 +41,7 @@ export function LoginForm() {
       password: values.password,
     });
     if (error) {
-      setServerError(
-        error.message ?? "Could not sign in. Check your credentials.",
-      );
+      setServerError("Could not sign in. Check your email and password.");
       return;
     }
     router.push("/overview");
@@ -51,70 +49,68 @@ export function LoginForm() {
   });
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="font-serif text-2xl font-normal">
-          Welcome back
-        </CardTitle>
-        <CardDescription>
-          Sign in to your Kosh instance. Your data never leaves your server.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={onSubmit} noValidate>
-          <FieldGroup>
-            <Field data-invalid={!!form.formState.errors.email}>
-              <FieldLabel htmlFor="email">Email</FieldLabel>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="you@example.com"
-                {...form.register("email")}
-              />
-              {form.formState.errors.email && (
-                <FieldError>{form.formState.errors.email.message}</FieldError>
-              )}
-            </Field>
-            <Field data-invalid={!!form.formState.errors.password}>
-              <FieldLabel htmlFor="password">Password</FieldLabel>
-              <Input
-                id="password"
-                type="password"
-                autoComplete="current-password"
-                {...form.register("password")}
-              />
-              {form.formState.errors.password && (
-                <FieldError>
-                  {form.formState.errors.password.message}
-                </FieldError>
-              )}
-            </Field>
-            {serverError && (
-              <p role="alert" className="text-sm text-destructive">
-                {serverError}
-              </p>
+    <div className="space-y-8">
+      <AuthHeader title="Sign in" description="Enter your credentials to continue." />
+
+      <form onSubmit={onSubmit} noValidate>
+        <FieldGroup>
+          <Field data-invalid={!!errors.email}>
+            <AuthLabel htmlFor="email">Email</AuthLabel>
+            <AuthInput
+              id="email"
+              type="email"
+              autoComplete="email"
+              autoFocus
+              placeholder="you@example.com"
+              aria-invalid={!!errors.email}
+              {...form.register("email")}
+            />
+            {errors.email && <FieldError>{errors.email.message}</FieldError>}
+          </Field>
+
+          <Field data-invalid={!!errors.password}>
+            <AuthLabel htmlFor="password">Password</AuthLabel>
+            <PasswordInput
+              id="password"
+              autoComplete="current-password"
+              aria-invalid={!!errors.password}
+              {...form.register("password")}
+            />
+            {errors.password && (
+              <FieldError>{errors.password.message}</FieldError>
             )}
-            <Button
-              type="submit"
-              className="w-full"
-              disabled={form.formState.isSubmitting}
-            >
-              {form.formState.isSubmitting && <Spinner />}
-              Sign in
-            </Button>
-          </FieldGroup>
-        </form>
-        <p className="mt-6 text-center text-sm text-muted-foreground">
-          New here?{" "}
-          <Link
-            href="/register"
-            className="font-medium text-foreground underline-offset-4 hover:underline"
+          </Field>
+
+          {serverError && <AuthError>{serverError}</AuthError>}
+
+          <Button
+            type="submit"
+            className="h-11 w-full text-sm"
+            disabled={form.formState.isSubmitting}
           >
-            Create an account
-          </Link>
+            {form.formState.isSubmitting && <Spinner />}
+            Sign in
+          </Button>
+        </FieldGroup>
+      </form>
+
+      {showDemo && (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Demo —{" "}
+          <span className="font-amount text-foreground">demo@kosh.local</span> /{" "}
+          <span className="font-amount text-foreground">demo1234</span>
         </p>
-      </CardContent>
-    </Card>
+      )}
+
+      <p className="text-sm text-muted-foreground">
+        No account?{" "}
+        <Link
+          href="/register"
+          className="rounded-sm font-medium text-foreground underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/40"
+        >
+          Create an account
+        </Link>
+      </p>
+    </div>
   );
 }
