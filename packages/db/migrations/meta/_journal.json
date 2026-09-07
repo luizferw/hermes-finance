@@ -57,6 +57,13 @@
       "when": 1784022302506,
       "tag": "0007_tenant_ownership",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788783142810,
+      "tag": "0008_illegal_shinobi_shaw",
+      "breakpoints": true
     }
   ]
 }

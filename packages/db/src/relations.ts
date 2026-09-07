@@ -20,11 +20,26 @@ import {
   transactionSplits,
   transactionTags,
   transactions,
+  balanceSnapshots,
+  creditCards,
+  creditCardBillingCycles,
+  creditCardPurchases,
+  installmentPlans,
+  installments,
+  financialReserves,
+  projectedEvents,
+  purchasePlans,
+  purchaseItems,
+  paymentOptions,
+  purchaseSimulations,
 } from "./schema";
 
 export const accountsRelations = relations(accounts, ({ many }) => ({
   transactions: many(transactions),
   balances: many(accountBalances),
+  balanceSnapshots: many(balanceSnapshots),
+  creditCardProfiles: many(creditCards, { relationName: "cardAccount" }),
+  creditCardPaymentProfiles: many(creditCards, { relationName: "paymentAccount" }),
 }));
 
 export const accountBalancesRelations = relations(
@@ -241,4 +256,52 @@ export const automationRunsRelations = relations(automationRuns, ({ one }) => ({
     fields: [automationRuns.ruleId],
     references: [automationRules.id],
   }),
+}));
+
+export const balanceSnapshotsRelations = relations(balanceSnapshots, ({ one }) => ({
+  account: one(accounts, { fields: [balanceSnapshots.accountId], references: [accounts.id] }),
+}));
+
+export const creditCardsRelations = relations(creditCards, ({ one, many }) => ({
+  account: one(accounts, { fields: [creditCards.accountId], references: [accounts.id], relationName: "cardAccount" }),
+  paymentAccount: one(accounts, { fields: [creditCards.paymentAccountId], references: [accounts.id], relationName: "paymentAccount" }),
+  billingCycles: many(creditCardBillingCycles),
+  purchases: many(creditCardPurchases),
+}));
+
+export const creditCardBillingCyclesRelations = relations(creditCardBillingCycles, ({ one, many }) => ({
+  creditCard: one(creditCards, { fields: [creditCardBillingCycles.creditCardId], references: [creditCards.id] }),
+  installments: many(installments),
+}));
+
+export const creditCardPurchasesRelations = relations(creditCardPurchases, ({ one, many }) => ({
+  creditCard: one(creditCards, { fields: [creditCardPurchases.creditCardId], references: [creditCards.id] }),
+  transaction: one(transactions, { fields: [creditCardPurchases.transactionId], references: [transactions.id] }),
+  installmentPlans: many(installmentPlans),
+}));
+
+export const installmentPlansRelations = relations(installmentPlans, ({ one, many }) => ({
+  creditCardPurchase: one(creditCardPurchases, { fields: [installmentPlans.creditCardPurchaseId], references: [creditCardPurchases.id] }),
+  installments: many(installments),
+}));
+
+export const installmentsRelations = relations(installments, ({ one }) => ({
+  installmentPlan: one(installmentPlans, { fields: [installments.installmentPlanId], references: [installmentPlans.id] }),
+  billingCycle: one(creditCardBillingCycles, { fields: [installments.billingCycleId], references: [creditCardBillingCycles.id] }),
+  transaction: one(transactions, { fields: [installments.transactionId], references: [transactions.id] }),
+}));
+
+export const purchasePlansRelations = relations(purchasePlans, ({ many }) => ({ items: many(purchaseItems) }));
+export const purchaseItemsRelations = relations(purchaseItems, ({ one, many }) => ({
+  purchasePlan: one(purchasePlans, { fields: [purchaseItems.purchasePlanId], references: [purchasePlans.id] }),
+  paymentOptions: many(paymentOptions),
+  simulations: many(purchaseSimulations),
+}));
+export const paymentOptionsRelations = relations(paymentOptions, ({ one, many }) => ({
+  purchaseItem: one(purchaseItems, { fields: [paymentOptions.purchaseItemId], references: [purchaseItems.id] }),
+  simulations: many(purchaseSimulations),
+}));
+export const purchaseSimulationsRelations = relations(purchaseSimulations, ({ one }) => ({
+  purchaseItem: one(purchaseItems, { fields: [purchaseSimulations.purchaseItemId], references: [purchaseItems.id] }),
+  paymentOption: one(paymentOptions, { fields: [purchaseSimulations.paymentOptionId], references: [paymentOptions.id] }),
 }));

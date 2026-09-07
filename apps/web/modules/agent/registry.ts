@@ -23,6 +23,7 @@ import { listRecurring } from "@/modules/recurring/queries";
 import { listGoals } from "@/modules/goals/queries";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { getPatternsView } from "@/modules/patterns/queries";
+import { buildUserForecast, getSafeToSpend } from "@/modules/finance/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
 import {
   createTransactionCore,
@@ -266,44 +267,34 @@ const readTools: ReadTool[] = [
   read({
     name: "get_safe_to_spend",
     title: "Safe to spend",
-    description:
-      "How much is free to spend this month after income, spending, and bills still due.",
+    description: "Deterministic safe-to-spend from the consolidated daily cash forecast and configured hard reserves.",
     requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const [month, bills] = await Promise.all([
-        getMonthSummary(ctx.userId),
-        listBills(ctx.userId),
-      ]);
-      const monthEnd = monthRange(todayIso()).end;
-      const committedMinor = bills
-        .filter(
-          (b) =>
-            b.bill.isActive &&
-            b.bill.currencyCode === ctx.currency &&
-            b.bill.nextDueDate <= monthEnd,
-        )
-        .reduce((s, b) => s + b.bill.expectedAmountMinor, 0);
-      const safeMinor = month.incomeMinor - month.expenseMinor - committedMinor;
-      const period = monthLabel(todayIso());
+    input: z.object({
+      horizonDays: z.number().int().min(1).max(365).default(30),
+    }),
+    async execute(ctx, args) {
+      const result = await getSafeToSpend(ctx.userId, args.horizonDays);
+      const committedMinor = result.forecast.events.filter((event) => event.amountMinor < 0).reduce((total, event) => total + -event.amountMinor, 0);
       return {
         forModel: {
-          safeMinor,
-          incomeMinor: month.incomeMinor,
-          expenseMinor: month.expenseMinor,
-          committedMinor,
+          safeToSpendMinor: result.safeToSpendMinor,
+          minimumBalanceMinor: result.minimumBalanceMinor,
+          minimumBalanceDate: result.minimumBalanceDate,
+          hardReserveViolated: result.hardReserveViolated,
+          hardReserveMinor: result.forecast.minimumBalanceMinor - result.safeToSpendMinor,
+          horizonEnd: result.forecast.horizonEnd,
           currency: ctx.currency,
         },
         block: {
           type: "safeToSpend",
           title: "Safe to spend",
-          period,
-          safeMinor,
-          incomeMinor: month.incomeMinor,
-          expenseMinor: month.expenseMinor,
+          period: `${result.forecast.asOf} to ${result.forecast.horizonEnd}`,
+          safeMinor: result.safeToSpendMinor,
+          incomeMinor: result.forecast.events.filter((event) => event.amountMinor > 0).reduce((total, event) => total + event.amountMinor, 0),
+          expenseMinor: committedMinor,
           committedMinor,
           currency: ctx.currency,
-          note: "Recorded income minus recorded spending and active bills due by month-end. This is an estimate, not a bank-balance forecast.",
+          note: `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}.`,
         },
       };
     },

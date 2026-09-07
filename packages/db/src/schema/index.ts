@@ -4,6 +4,7 @@ export * from "./accounts";
 export * from "./taxonomy";
 export * from "./imports";
 export * from "./planning";
+export * from "./finance";
 export * from "./transactions";
 export * from "./import-rows";
 export * from "./automation";
