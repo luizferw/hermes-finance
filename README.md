@@ -1,4 +1,6 @@
-# Kosh
+# Hermes Finance
+
+Hermes Finance é um fork do Kosh estendido com um motor determinístico de posição financeira, forecast e planejamento de decisões. A infraestrutura do Kosh continua sendo a base; veja [a arquitetura](docs/ARCHITECTURE.md), [o domínio](docs/DOMAIN.md) e [a política de upstream](docs/UPSTREAM.md).
 
 Kosh is a self-hosted personal-finance app for people who want to manage their
 own accounts, transactions, budgets, bills, recurring commitments, goals, CSV
