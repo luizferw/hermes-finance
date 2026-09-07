@@ -26,7 +26,7 @@ application adapters
 
 | Pacote | API pública | Garantia |
 | --- | --- | --- |
-| `@hermes-finance/forecast` | `buildForecast()` | Trajetória diária, precedência por confidence, projeção resolvida excluída, saldo mínimo. |
+| `@hermes-finance/forecast` | `buildForecast()` | Trajetória diária, precedência por confidence, projeção resolvida excluída, saldo mínimo e validação de datas/minor units. Snapshots devem ser normalizados para o mesmo `asOf`. |
 | `@hermes-finance/planning` | `calculateSafeToSpend()` | Safe-to-spend pelo menor ponto da curva, respeitando reserva HARD. |
 | `@hermes-finance/planning` | `comparePaymentOptions()` | Recalcula cada alternativa no mesmo snapshot; inviáveis por reserva não são recomendadas. |
 

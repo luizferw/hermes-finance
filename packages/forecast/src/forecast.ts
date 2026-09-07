@@ -55,8 +55,44 @@ const confidenceRank: Record<Confidence, number> = {
 };
 
 function utcDate(value: DateString): Date {
+  assertValidDate(value, "date");
   const [year, month, day] = value.split("-").map(Number);
   return new Date(Date.UTC(year!, month! - 1, day!));
+}
+
+function assertValidDate(value: string, label: string): asserts value is DateString {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    throw new Error(`${label} must be a valid ISO date (YYYY-MM-DD)`);
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year!, month! - 1, day!));
+  if (Number.isNaN(parsed.getTime()) || dateString(parsed) !== value) {
+    throw new Error(`${label} must be a valid ISO date (YYYY-MM-DD)`);
+  }
+}
+
+function assertMinorUnits(value: number, label: string): void {
+  if (!Number.isFinite(value) || !Number.isInteger(value)) {
+    throw new Error(`${label} must use finite integer minor units`);
+  }
+}
+
+function validateInput(input: BuildForecastInput): void {
+  assertValidDate(input.asOf, "asOf");
+  assertValidDate(input.horizonEnd, "horizonEnd");
+  for (const balance of input.balances) {
+    assertValidDate(balance.observedAt, "balance.observedAt");
+    assertMinorUnits(balance.amountMinor, "balance.amountMinor");
+    if (balance.observedAt !== input.asOf) {
+      throw new Error("balance.observedAt must equal asOf; normalize snapshots before forecasting");
+    }
+  }
+  for (const event of input.events) {
+    assertValidDate(event.expectedAt, "event.expectedAt");
+    assertMinorUnits(event.amountMinor, "event.amountMinor");
+    if (event.logicalKey.length === 0) throw new Error("event.logicalKey must not be empty");
+    if (!(event.confidence in confidenceRank)) throw new Error("event.confidence is invalid");
+  }
 }
 
 function dateString(value: Date): DateString {
@@ -93,6 +129,7 @@ function selectActiveEvents(events: ForecastEvent[]): ForecastEvent[] {
  * boundary. For a shared logical commitment, the highest-confidence event wins.
  */
 export function buildForecast(input: BuildForecastInput): Forecast {
+  validateInput(input);
   if (input.horizonEnd < input.asOf) {
     throw new Error("horizonEnd must be on or after asOf");
   }

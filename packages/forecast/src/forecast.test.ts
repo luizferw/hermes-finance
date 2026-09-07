@@ -55,4 +55,18 @@ describe("buildForecast", () => {
 
     expect(forecast.days.at(-1)?.closingBalanceMinor).toBe(750_000);
   });
+
+  it("rejects non-canonical dates and values that are not finite integer minor units", () => {
+    expect(() => buildForecast({ ...baseInput, asOf: "2026-02-30", events: [] })).toThrow("valid ISO date");
+    expect(() => buildForecast({ ...baseInput, events: [{ id: "fraction", logicalKey: "fraction", expectedAt: "2026-09-08", amountMinor: 12.5, sourceType: "manual", confidence: "LOW" }] })).toThrow("integer minor units");
+    expect(() => buildForecast({ ...baseInput, balances: [{ accountId: "cash", amountMinor: Number.NaN, observedAt: "2026-09-07" }], events: [] })).toThrow("integer minor units");
+  });
+
+  it("requires every balance snapshot to represent the requested as-of date", () => {
+    expect(() => buildForecast({
+      ...baseInput,
+      balances: [{ accountId: "cash", amountMinor: 100_000, observedAt: "2026-09-06" }],
+      events: [],
+    })).toThrow("observedAt must equal asOf");
+  });
 });

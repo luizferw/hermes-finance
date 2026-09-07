@@ -62,4 +62,21 @@ describe("comparePaymentOptions", () => {
     expect(result.options.find((option) => option.id === "pix")?.hardReserveViolated).toBe(true);
     expect(result.options.find((option) => option.id === "five-installments")?.hardReserveViolated).toBe(false);
   });
+
+  it("rejects an option whose simulated event could replace a base commitment", () => {
+    expect(() => comparePaymentOptions({
+      forecastInput,
+      hardReserveMinor: 150_000,
+      options: [{
+        id: "collision",
+        label: "collision",
+        totalCostMinor: 1,
+        cashEvents: [{ id: "collision", logicalKey: "rent:2026-09", expectedAt: "2026-09-07", amountMinor: -1, sourceType: "purchase_simulation", confidence: "CONFIRMED" }],
+      }],
+    })).toThrow("logicalKey collides");
+  });
+
+  it("rejects a non-integer hard reserve", () => {
+    expect(() => calculateSafeToSpend({ forecastInput, hardReserveMinor: 150_000.5 })).toThrow("integer minor units");
+  });
 });
