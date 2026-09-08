@@ -10,13 +10,13 @@ import {
   Copy01Icon,
   FileImportIcon,
 } from "@hugeicons/core-free-icons";
-import { IMPORT_FIELDS, formatMoney, type ImportField } from "@kosh/domain";
+import { IMPORT_FIELDS, type ImportField } from "@kosh/domain";
 import {
   applyImportMapping,
   commitImport,
   uploadImport,
 } from "@/modules/imports/mutations";
-import { formatDateShort } from "@/lib/format";
+import { formatDateShort, formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";

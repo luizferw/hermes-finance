@@ -7,8 +7,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { formatMoney } from "@kosh/domain";
-import { formatDateShort } from "@/lib/format";
+import { formatDateShort, formatMoney } from "@/lib/format";
 
 const config = {
   netMinor: { label: "Net" },

@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "node scripts/with-root-env.mjs node_modules/next/dist/bin/next dev",
     "build": "node scripts/with-root-env.mjs node_modules/next/dist/bin/next build",
-    "start": "node scripts/with-root-env.mjs node_modules/next/dist/bin/next start",
+    "start": "node scripts/serve-standalone.mjs",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/with-root-env.mjs node_modules/vitest/vitest.mjs run"

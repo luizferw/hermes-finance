@@ -13,6 +13,8 @@ decisions independently.
 
 ## Features
 
+Inherited from Kosh:
+
 - Accounts, transactions, transfers, categories, tags, and CSV imports.
 - Budgets, bills, recurring transaction drafts, savings goals, and reports.
 - Exact integer-minor-unit money math; no invented foreign-exchange rates.
@@ -20,17 +22,45 @@ decisions independently.
 - Optional, read-only external MCP access with per-user tokens.
 - PostgreSQL backups, migration verification, and deployment health checks.
 
+Added by Hermes Finance:
+
+- **Forecast engine** — a reproducible daily cash trajectory. Every event
+  carries provenance and a confidence level, and the best-known fact for a
+  commitment supersedes every weaker estimate of it.
+- **Safe-to-spend** — the largest amount you can spend now without ever
+  breaching a protected reserve, measured at the *trough* of the curve rather
+  than at the end of the horizon.
+- **Brazilian credit-card domain** — real billing cycles, statement
+  reconciliation, and installment plans. A purchase is an economic expense on
+  its purchase date; the only cash movement is the statement settlement.
+- **Purchase planner** — plans, items, payment options, and deterministic
+  simulation of what a purchase does to your cash.
+- **Payment comparator** — ranks à vista against installment plans under hard
+  constraints (balance floor, hard reserve, card limit, deadline) and explains
+  every verdict. When no option is viable it says so instead of inventing one.
+- **OFX and CSV imports**, idempotent by external id or fingerprint.
+- **MCP finance tools** so an agent can query the engine — never the tables.
+
 ## Architecture
 
 ```text
-Next.js web app (apps/web)
+Next.js web app (apps/web)          MCP / Hermes agent
+        |                                   |
+        +--------------- adapters ----------+
         |
         +-- Better Auth sessions, API routes, in-process jobs
         |
 PostgreSQL <---- Drizzle schema and migrations (packages/db)
         |
 Domain rules and calculations (packages/domain)
+Forecast engine, pure (packages/forecast)
+Safe-to-spend and planning, pure (packages/planning)
 ```
+
+`packages/forecast` and `packages/planning` are pure domain: no React, Next.js,
+PostgreSQL, MCP, or model provider. They take normalized integer-minor-unit
+facts and return deterministic results. The model may explain those results; it
+never produces them.
 
 Kosh is a pnpm/Turborepo workspace. Normal finance data stays in your
 PostgreSQL database. CSV imports are parsed and stored in that database; Kosh
@@ -188,12 +218,25 @@ the PostgreSQL archive is the data backup that matters today.
 ### Troubleshooting
 
 - `ECONNREFUSED` locally usually means PostgreSQL is not running; use
-  `docker compose up -d db` and keep `.env` pointing at `localhost`.
+  `docker compose up -d db` and keep `.env` pointing at `localhost`. The
+  container publishes 5432 on the loopback interface only.
+- If host port 5432 is already taken by another project, set
+  `POSTGRES_HOST_PORT` to a free port and point `DATABASE_URL` at it; the
+  in-network URL used by Compose (`db:5432`) is unaffected.
 - Compose migration failures caused by a `localhost` database URL mean the
   container cannot reach the host. Export the Compose-only URL shown above,
   using host `db`.
 - A port-3000 conflict can be resolved by stopping the other service or setting
   a different host mapping in `docker-compose.yml`.
+- If Next.js falls back to another port because 3000 is taken, set `APP_URL` to
+  the port actually in use and restart. Better Auth validates the browser's
+  `Origin` against `APP_URL`, so a mismatch makes sign-in fail with a bare 403
+  and `[Better Auth]: Invalid origin` in the server log — the login form itself
+  gives no hint. The check only runs once the request carries a cookie, so a
+  bare `curl` will succeed against a misconfigured server while a browser fails.
+- Two servers can both hold "port 3000" if one binds IPv4 and the other IPv6;
+  `localhost` then resolves to whichever the client prefers. Pick a port nothing
+  else uses rather than relying on that.
 - Production configuration errors identify the missing or unsafe environment
   value at startup. Do not weaken those checks with example secrets.
 
@@ -202,6 +245,9 @@ the PostgreSQL archive is the data backup that matters today.
 - Keep the ledger, imports, planning, and reporting flows dependable.
 - Improve self-hosted deployment and recovery ergonomics.
 - Add integrations only when they preserve the self-hosted, privacy-first model.
+- Next up: credit-card statement PDF parsing, global purchase optimization,
+  suggested purchase dates, and recurring detection. Open Finance stays behind
+  a provider interface so adding it never touches the forecast engine.
 
 ## Contributing
 

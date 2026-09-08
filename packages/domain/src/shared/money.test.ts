@@ -44,15 +44,33 @@ describe("parseAmountToMinor", () => {
 });
 
 describe("formatMoney", () => {
-  it("formats INR with lakh grouping", () => {
-    expect(formatMoney(12345678, "INR")).toBe("₹1,23,456.78");
+  it("formats INR with lakh grouping when locale is en-IN", () => {
+    expect(formatMoney(12345678, "INR", { locale: "en-IN" })).toBe("₹1,23,456.78");
   });
   it("drops decimals for whole amounts", () => {
-    expect(formatMoney(120000, "INR")).toBe("₹1,200");
+    expect(formatMoney(120000, "INR", { locale: "en-IN" })).toBe("₹1,200");
   });
   it("can force a sign", () => {
-    expect(formatMoney(50000, "INR", { signDisplay: "always" })).toBe("+₹500");
-    expect(formatMoney(-50000, "INR")).toBe("-₹500");
+    expect(formatMoney(50000, "INR", { locale: "en-IN", signDisplay: "always" })).toBe(
+      "+₹500",
+    );
+    expect(formatMoney(-50000, "INR", { locale: "en-IN" })).toBe("-₹500");
+  });
+
+  it("defaults to a neutral en-US locale when none is given", () => {
+    // Western 3-digit grouping, not Indian lakh grouping.
+    expect(formatMoney(12345678, "INR")).toBe("₹123,456.78");
+  });
+
+  it("respects the user's locale for currency formatting (pt-BR)", () => {
+    // Symbol after a non-breaking space, comma decimal separator, dot grouping.
+    expect(formatMoney(750000, "BRL", { locale: "pt-BR", compactDecimals: false })).toBe(
+      "R$ 7.500,00",
+    );
+  });
+
+  it("respects the user's locale for currency formatting (en-IN)", () => {
+    expect(formatMoney(750000, "INR", { locale: "en-IN" })).toBe("₹7,500");
   });
 });
 

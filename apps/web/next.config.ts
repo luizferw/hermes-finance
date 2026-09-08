@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 // Tight, app-compatible CSP. script/style need 'unsafe-inline' because Next
@@ -34,6 +35,10 @@ const nextConfig: NextConfig = {
   transpilePackages: ["@kosh/db", "@kosh/domain"],
   serverExternalPackages: ["pg", "pg-boss"],
   output: "standalone",
+  // Pin the monorepo root. Without this Next infers it by walking up looking
+  // for a lockfile, so an unrelated lockfile in a parent directory silently
+  // changes the standalone output layout and breaks `node apps/web/server.js`.
+  outputFileTracingRoot: fileURLToPath(new URL("../..", import.meta.url)),
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
   },

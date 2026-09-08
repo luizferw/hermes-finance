@@ -32,4 +32,8 @@ Antes de absorver upstream:
 | IA externa | `KOSH_AI_ENABLED=false` por padrão; cálculos são código determinístico. |
 | Forecast | Novo pacote puro, sem Next.js, PostgreSQL ou MCP. |
 | Planning | Novo pacote que depende apenas do Forecast. |
-| Cartões BR | Será modelado em tabelas explícitas; cartão não será somente uma conta genérica. |
+| Cartões BR | Modelado em tabelas explícitas (`credit_cards`, `credit_card_billing_cycles`, `credit_card_purchases`, `installment_plans`, `installments`); cartão não é somente uma conta genérica. |
+| Domínio aditivo | Migration `0008` acrescenta as tabelas de finance/planning. Nenhuma tabela do Kosh foi alterada, o que mantém o merge de upstream previsível. |
+| Imports | `packages/domain/src/imports/ofx.ts` é aditivo e reutiliza o `dedupe.ts` do Kosh. |
+| MCP | Tools financeiras entram em `readTools` do registry existente, sob o scope `finance:read` já presente. |
+| Compose | O serviço `db` passa a publicar a porta em `127.0.0.1` para permitir migrations e testes a partir do host. |

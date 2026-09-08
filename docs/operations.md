@@ -166,6 +166,49 @@ pnpm db:restore:fresh
 
 `KOSH_ENCRYPTION_KEY` is a base64 32-byte AES-256-GCM key. Store it separately from database backups. Key rotation is currently manual: add a new key variable, write a one-time decrypt-with-old/encrypt-with-new backfill, verify restore, then deploy. Until that exists, treat key loss as permanent loss of encrypted fields.
 
+## Always-On Local Service (systemd --user)
+
+For a single-machine install that should survive reboots without Docker for the
+app itself, run the standalone build under a user unit. `~/.config/systemd/user/hermes-finance.service`:
+
+```ini
+[Unit]
+Description=Hermes Finance
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/hermes-finance/apps/web
+ExecStartPre=/usr/bin/docker compose --project-directory /path/to/hermes-finance up -d db
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do /usr/bin/docker compose --project-directory /path/to/hermes-finance exec -T db pg_isready -U kosh -d kosh >/dev/null 2>&1 && exit 0; sleep 2; done; exit 1'
+ExecStart=/usr/bin/node /path/to/hermes-finance/apps/web/scripts/serve-standalone.mjs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-finance.service
+loginctl enable-linger "$USER"   # start at boot without an interactive login
+```
+
+Notes:
+
+- The unit deliberately carries no secrets. `serve-standalone.mjs` loads the
+  repo's `.env`, so `PORT`, `APP_URL`, `DATABASE_URL` and the keys live in one
+  place.
+- Docker is usually socket-activated rather than enabled at boot, so a
+  container's own `restart: unless-stopped` is not enough on a cold start. The
+  first `ExecStartPre` wakes the daemon; the second waits for `pg_isready`
+  instead of racing it.
+- Run `pnpm build` after changing code — the service serves a build, not sources.
+- Logs: `journalctl --user -u hermes-finance -f`.
+
 ## Health Checks
 
 ```bash

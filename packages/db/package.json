@@ -10,6 +10,7 @@
   },
   "scripts": {
     "seed": "tsx src/seed.ts",
+    "seed:prd-scenario": "tsx src/seed-prd-scenario.ts",
     "encrypt": "tsx src/encrypt-existing.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
@@ -20,6 +21,7 @@
     "pg": "^8.16.0"
   },
   "devDependencies": {
+    "@hermes-finance/forecast": "workspace:*",
     "@kosh/config": "workspace:*",
     "@kosh/domain": "workspace:*",
     "@types/node": "^20",

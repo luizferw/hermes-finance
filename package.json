@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
+    "start": "PORT=3119 pnpm --filter web start",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",

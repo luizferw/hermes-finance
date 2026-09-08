@@ -11,12 +11,8 @@ import {
   PulseIcon,
 } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
-import {
-  formatAbsAmount,
-  formatDateShort,
-  formatRelativeDays,
-} from "@/lib/format";
-import { formatMoney, BAND_LABEL, type ConfidenceFactor } from "@kosh/domain";
+import { formatAbsAmount, formatDateShort, formatMoney, formatRelativeDays } from "@/lib/format";
+import { BAND_LABEL, type ConfidenceFactor } from "@kosh/domain";
 import { getConfidence, type ConfidenceView } from "@/modules/confidence/queries";
 import { getNetWorthSummary, listAccounts } from "@/modules/accounts/queries";
 import {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { signProposal, verifyProposal } from "./confirm";
 import { toJsonSchema } from "./schemas";
-import { TOOLS, toolsForScopes } from "./registry";
+import { TOOL_BY_NAME, TOOLS, toolsForScopes } from "./registry";
 import { runAgentTurn, AiUnavailableError } from "./agent";
 import type { ModelProvider, ModelTurn } from "./provider";
 import type { ReadTool, ToolContext, WriteTool } from "./types";
@@ -107,6 +107,75 @@ describe("registry", () => {
     }
     const unusual = TOOLS.find((tool) => tool.name === "find_unusual_spending")!;
     expect(unusual.input.safeParse({ limit: 9 }).success).toBe(false);
+  });
+
+  it("exposes the P0 finance-domain read tools, all gated behind finance:read", () => {
+    const financeToolNames = [
+      "get_position",
+      "get_projection",
+      "get_projected_commitments",
+      "get_credit_cards",
+      "get_card_statement",
+      "get_confidence_breakdown",
+      "get_purchase_plans",
+      "get_purchase_plan",
+      "simulate_purchase",
+      "compare_payment_options",
+    ];
+    const names = new Set(toolsForScopes(["finance:read"]).map((tool) => tool.name));
+    for (const name of financeToolNames) {
+      expect(names.has(name), name).toBe(true);
+      const tool = TOOL_BY_NAME.get(name)!;
+      expect(tool.kind, name).toBe("read");
+      expect(tool.requiredScope, name).toBe("finance:read");
+    }
+    // Absent finance:read, none of them are exposed.
+    const withoutFinance = new Set(toolsForScopes(["rules:read"]).map((tool) => tool.name));
+    for (const name of financeToolNames) {
+      expect(withoutFinance.has(name), name).toBe(false);
+    }
+  });
+
+  it("validates horizonDays (integer, 1..365, default 30) on the forecast-backed finance tools", () => {
+    for (const name of ["get_projection", "get_projected_commitments", "get_confidence_breakdown"]) {
+      const tool = TOOL_BY_NAME.get(name)!;
+      expect(tool.input.parse({}), name).toEqual({ horizonDays: 30 });
+      expect(tool.input.safeParse({ horizonDays: 0 }).success, name).toBe(false);
+      expect(tool.input.safeParse({ horizonDays: 366 }).success, name).toBe(false);
+      expect(tool.input.safeParse({ horizonDays: 1.5 }).success, name).toBe(false);
+      expect(tool.input.safeParse({ horizonDays: 90 }).success, name).toBe(true);
+    }
+  });
+
+  it("get_card_statement and get_purchase_plan require a uuid id", () => {
+    const statement = TOOL_BY_NAME.get("get_card_statement")!;
+    expect(statement.input.safeParse({ cardId: "not-a-uuid" }).success).toBe(false);
+    expect(statement.input.safeParse({}).success).toBe(false);
+
+    const plan = TOOL_BY_NAME.get("get_purchase_plan")!;
+    expect(plan.input.safeParse({ id: "not-a-uuid" }).success).toBe(false);
+    expect(plan.input.safeParse({}).success).toBe(false);
+  });
+
+  it("validates the simulate_purchase option shape and defaults its context", () => {
+    const tool = TOOL_BY_NAME.get("simulate_purchase")!;
+    const validOption = { id: "opt1", method: "credit_card" as const, amountMinor: 15000 };
+    const parsed = tool.input.parse({ option: validOption });
+    expect(parsed).toEqual({ option: validOption, context: { horizonDays: 30 } });
+
+    expect(tool.input.safeParse({ option: { ...validOption, method: "crypto" } }).success).toBe(false);
+    expect(tool.input.safeParse({ option: { ...validOption, amountMinor: -1 } }).success).toBe(false);
+    expect(tool.input.safeParse({ option: { method: "cash", amountMinor: 100 } }).success).toBe(false); // missing id
+  });
+
+  it("bounds the compare_payment_options list to 1..10 options", () => {
+    const tool = TOOL_BY_NAME.get("compare_payment_options")!;
+    const option = (id: string) => ({ id, method: "pix" as const, amountMinor: 1000 });
+    expect(tool.input.safeParse({ options: [] }).success).toBe(false);
+    expect(tool.input.safeParse({ options: [option("a")] }).success).toBe(true);
+    expect(
+      tool.input.safeParse({ options: Array.from({ length: 11 }, (_, i) => option(`o${i}`)) }).success,
+    ).toBe(false);
   });
 });
 

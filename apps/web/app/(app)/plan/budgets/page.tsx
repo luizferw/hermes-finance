@@ -4,8 +4,7 @@ import { PieChart01Icon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
-import { formatAbsAmount } from "@/lib/format";
-import { formatMoney } from "@kosh/domain";
+import { formatAbsAmount, formatMoney } from "@/lib/format";
 import { Card } from "@/components/ui/card";
 import {
   Empty,

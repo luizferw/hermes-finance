@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import { toast } from "sonner";
-import { formatMoney, majorToMinor } from "@kosh/domain";
+import { majorToMinor } from "@kosh/domain";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,6 +14,7 @@ import {
   type CategoryTier,
 } from "@/modules/onboarding/data";
 import { completeOnboarding } from "@/modules/onboarding/mutations";
+import { formatMoney } from "@/lib/format";
 
 const STEPS = ["Region", "Accounts", "Categories", "Review"] as const;
 

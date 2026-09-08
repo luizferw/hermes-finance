@@ -7,28 +7,86 @@ import {
   Target01Icon,
 } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
-import { formatMoney } from "@kosh/domain";
-import { formatDate, formatRelativeDays } from "@/lib/format";
+import { formatDate, formatMoney, formatRelativeDays } from "@/lib/format";
 import { getUserSettings } from "@/modules/settings/queries";
+import {
+  buildUserForecastDetailed,
+  getConfidenceBreakdown,
+  getFinancePosition,
+  getSafeToSpend,
+} from "@/modules/finance/queries";
 import {
   getFutureView,
   type FutureView,
   type GoalTrajectory,
 } from "@/modules/future/queries";
+import { FinancialPositionSummary } from "@/components/plan/financial-position";
+import { ConfidenceBreakdownMeter } from "@/components/plan/confidence-breakdown";
+import { ForecastHorizonChart, type HorizonSeries } from "@/components/plan/forecast-horizon-chart";
 import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = { title: "Future" };
 
+/** The horizons the forecast chart lets you switch between. */
+const CHART_HORIZONS: Array<{ days: number; label: string }> = [
+  { days: 30, label: "30d" },
+  { days: 60, label: "60d" },
+  { days: 90, label: "90d" },
+  { days: 180, label: "6m" },
+  { days: 365, label: "12m" },
+];
+
 export default async function FuturePage() {
   const user = await requireUser();
-  const [settings, future] = await Promise.all([
-    getUserSettings(user.id),
-    getFutureView(user.id),
-  ]);
+  const [settings, future, position, safeToSpend, confidence, horizonForecasts] =
+    await Promise.all([
+      getUserSettings(user.id),
+      getFutureView(user.id),
+      getFinancePosition(user.id),
+      getSafeToSpend(user.id, 30),
+      getConfidenceBreakdown(user.id, 90),
+      Promise.all(CHART_HORIZONS.map((h) => buildUserForecastDetailed(user.id, h.days))),
+    ]);
   const currency = settings.currencyCode;
+
+  // Each horizon is its own engine run — the chart only ever switches
+  // between fully precomputed series, never recomputes one client-side.
+  const chartSeries: HorizonSeries[] = horizonForecasts.map(({ forecast }, i) => ({
+    horizonDays: CHART_HORIZONS[i]!.days,
+    label: CHART_HORIZONS[i]!.label,
+    data: forecast.days.map((day) => ({
+      date: day.date,
+      closingBalanceMinor: day.closingBalanceMinor,
+    })),
+    openingBalanceMinor: forecast.openingBalanceMinor,
+    minimumBalanceMinor: forecast.minimumBalanceMinor,
+    minimumBalanceDate: forecast.minimumBalanceDate,
+  }));
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl space-y-10 py-2 md:space-y-14 md:py-4">
+      {/* ── Movement 0 · Financial position ───────────────────────────── */}
+      <section className="row-in" style={{ "--i": 0 } as React.CSSProperties} aria-label="Your financial position">
+        <FinancialPositionSummary
+          position={position}
+          safeToSpendMinor={safeToSpend.safeToSpendMinor}
+          committedMinor={safeToSpend.committedMinor}
+          hardReserveMinor={safeToSpend.hardReserveMinor}
+          currency={currency}
+        />
+      </section>
+
+      <section className="row-in" style={{ "--i": 1 } as React.CSSProperties} aria-label="Balance forecast">
+        <ForecastHorizonChart series={chartSeries} currency={currency} />
+      </section>
+
+      <section className="row-in" style={{ "--i": 2 } as React.CSSProperties} aria-label="How the forecast is made up">
+        <span className="micro-label">Confidence in this forecast</span>
+        <ConfidenceBreakdownMeter breakdown={confidence} />
+      </section>
+
+      <hr className="border-border/60" />
+
       {/* ── Movement I · The horizon ──────────────────────────────────── */}
       <section
         className="row-in"

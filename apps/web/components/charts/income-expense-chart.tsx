@@ -9,8 +9,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { formatMoney } from "@kosh/domain";
-import { formatMonth } from "@/lib/format";
+import { formatMoney, formatMonth } from "@/lib/format";
 
 const config = {
   incomeMinor: { label: "Income", color: "var(--chart-1)" },

@@ -32,6 +32,7 @@ import {
   purchaseItems,
   paymentOptions,
   purchaseSimulations,
+  users,
 } from "./schema";
 
 export const accountsRelations = relations(accounts, ({ many }) => ({
@@ -304,4 +305,17 @@ export const paymentOptionsRelations = relations(paymentOptions, ({ one, many })
 export const purchaseSimulationsRelations = relations(purchaseSimulations, ({ one }) => ({
   purchaseItem: one(purchaseItems, { fields: [purchaseSimulations.purchaseItemId], references: [purchaseItems.id] }),
   paymentOption: one(paymentOptions, { fields: [purchaseSimulations.paymentOptionId], references: [paymentOptions.id] }),
+}));
+
+export const financialReservesRelations = relations(financialReserves, ({ one }) => ({
+  user: one(users, { fields: [financialReserves.userId], references: [users.id] }),
+}));
+
+export const projectedEventsRelations = relations(projectedEvents, ({ one }) => ({
+  account: one(accounts, { fields: [projectedEvents.accountId], references: [accounts.id] }),
+  category: one(categories, { fields: [projectedEvents.categoryId], references: [categories.id] }),
+  resolvedByTransaction: one(transactions, {
+    fields: [projectedEvents.resolvedByTransactionId],
+    references: [transactions.id],
+  }),
 }));

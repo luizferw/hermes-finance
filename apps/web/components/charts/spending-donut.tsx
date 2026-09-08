@@ -7,7 +7,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { formatMoney } from "@kosh/domain";
+import { formatMoney } from "@/lib/format";
 
 const FALLBACK_COLORS = [
   "var(--chart-1)",

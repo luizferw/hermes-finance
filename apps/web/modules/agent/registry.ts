@@ -3,7 +3,6 @@ import { z, type ZodType } from "zod";
 import {
   addMonthsClamped,
   formatMoney,
-  monthRange,
   todayIso,
 } from "@kosh/domain";
 import { getNetWorthSummary, listAccounts } from "@/modules/accounts/queries";
@@ -23,7 +22,18 @@ import { listRecurring } from "@/modules/recurring/queries";
 import { listGoals } from "@/modules/goals/queries";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { getPatternsView } from "@/modules/patterns/queries";
-import { buildUserForecast, getSafeToSpend } from "@/modules/finance/queries";
+import {
+  buildUserForecastDetailed,
+  getCardStatement,
+  getConfidenceBreakdown,
+  getFinancePosition,
+  getPurchasePlan,
+  getSafeToSpend,
+  getUpcomingCommitments as getProjectedCommitments,
+  listCreditCards,
+  listPurchasePlans,
+} from "@/modules/finance/queries";
+import { compareUserPaymentOptions, simulateUserPurchase } from "@/modules/finance/simulation";
 import { listCategories } from "@/modules/taxonomy/queries";
 import {
   createTransactionCore,
@@ -136,6 +146,31 @@ function currencyWarningBlocks(defaultCurrency: string, currencies: string[]) {
 }
 
 const periodSchema = z.enum(["this_month", "last_month"]).optional();
+
+/* ── purchase simulation input (narrow surface over the deterministic engine
+   in modules/finance/simulation.ts — the model supplies the option, the
+   engine supplies every number in the response) ─────────────────────────── */
+
+const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+
+const purchaseOptionInput = z.object({
+  id: z.string().min(1).max(100),
+  label: z.string().max(150).optional(),
+  method: z.enum(["pix", "boleto", "cash", "credit_card", "debit_card"]),
+  amountMinor: z.number().int().positive(),
+  cardId: z.string().uuid().nullish(),
+  installments: z.number().int().min(1).max(60).nullish(),
+  installmentAmountMinor: z.number().int().positive().nullish(),
+  purchaseDate: isoDateSchema.nullish(),
+  firstPaymentDate: isoDateSchema.nullish(),
+});
+
+const simulationContextInput = z
+  .object({
+    horizonDays: z.number().int().min(1).max(365).default(30),
+    maxLastPaymentDate: isoDateSchema.optional(),
+  })
+  .default(() => ({ horizonDays: 30 }));
 
 /* ── rule construction (narrow, typed; values resolved to owned ids) ──────── */
 
@@ -790,6 +825,345 @@ const readTools: ReadTool[] = [
             })),
             warning: broad ? "This looks broad — consider narrowing the conditions before activating." : undefined,
           },
+        },
+      };
+    },
+  }),
+
+  /* ── finance domain (deterministic forecast/planning engine) ────────────── */
+
+  read({
+    name: "get_position",
+    title: "Financial position",
+    description:
+      "Liquid account balances (cash/asset/wallet), the consolidated total, and which balances are stale (older than the freshness policy).",
+    requiredScope: "finance:read",
+    input: z.object({}),
+    async execute(ctx) {
+      const position = await getFinancePosition(ctx.userId);
+      return {
+        forModel: {
+          asOf: position.asOf,
+          currency: ctx.currency,
+          balanceMinor: position.balanceMinor,
+          accounts: position.accounts.map((account) => ({
+            id: account.id,
+            name: account.name,
+            balanceMinor: account.balanceMinor,
+            currency: account.currencyCode,
+            observedAt: account.observedAt,
+            source: account.source,
+            ageDays: account.ageDays,
+            isStale: account.isStale,
+          })),
+          staleAccountNames: position.staleAccountNames,
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_projection",
+    title: "Cash projection",
+    description:
+      "Deterministic daily cash forecast over the horizon (default 30 days): the minimum balance and the date it occurs, plus every projected event (bills, recurring rules, card statements). Card purchases don't appear directly — only their statement settlement does.",
+    requiredScope: "finance:read",
+    input: z.object({ horizonDays: z.number().int().min(1).max(365).default(30) }),
+    async execute(ctx, args) {
+      const { forecast } = await buildUserForecastDetailed(ctx.userId, args.horizonDays);
+      return {
+        forModel: {
+          asOf: forecast.asOf,
+          horizonEnd: forecast.horizonEnd,
+          currency: ctx.currency,
+          openingBalanceMinor: forecast.openingBalanceMinor,
+          minimumBalanceMinor: forecast.minimumBalanceMinor,
+          minimumBalanceDate: forecast.minimumBalanceDate,
+          days: forecast.days,
+          events: forecast.events,
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_projected_commitments",
+    title: "Projected commitments",
+    description:
+      "Unpaid commitments from the deterministic forecast engine (bills, recurring rules, card statements) within the horizon (default 30 days), each labelled and confidence-rated. Distinct from get_upcoming_commitments, which lists tracked bills only.",
+    requiredScope: "finance:read",
+    input: z.object({ horizonDays: z.number().int().min(1).max(365).default(30) }),
+    async execute(ctx, args) {
+      const commitments = await getProjectedCommitments(ctx.userId, args.horizonDays);
+      return {
+        forModel: { currency: ctx.currency, commitments },
+      };
+    },
+  }),
+
+  read({
+    name: "get_credit_cards",
+    title: "Credit cards",
+    description: "Active credit cards with credit limit, committed (outstanding) amount, available limit, and utilization.",
+    requiredScope: "finance:read",
+    input: z.object({}),
+    async execute(ctx) {
+      const cards = await listCreditCards(ctx.userId);
+      return {
+        forModel: {
+          cards: cards.map((card) => ({
+            id: card.id,
+            name: card.name,
+            issuer: card.issuer,
+            currency: card.currencyCode,
+            creditLimitMinor: card.creditLimitMinor,
+            committedMinor: card.committedMinor,
+            availableLimitMinor: card.availableLimitMinor,
+            utilizationPercent: card.utilizationPercent,
+            defaultClosingDay: card.defaultClosingDay,
+            defaultDueDay: card.defaultDueDay,
+          })),
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_card_statement",
+    title: "Card statement",
+    description: "Billing cycles for one credit card, with charged/confirmed totals and reconciliation state.",
+    requiredScope: "finance:read",
+    input: z.object({ cardId: z.string().uuid() }),
+    async execute(ctx, args) {
+      const statement = await getCardStatement(ctx.userId, args.cardId);
+      if (!statement) return { forModel: { error: "not_found" } };
+      return {
+        forModel: {
+          card: {
+            id: statement.card.id,
+            name: statement.card.name,
+            issuer: statement.card.issuer,
+            currency: statement.card.currencyCode,
+            creditLimitMinor: statement.card.creditLimitMinor,
+          },
+          cycles: statement.cycles.map((cycle) => ({
+            id: cycle.id,
+            statementMonth: cycle.statementMonth,
+            closesAt: cycle.closesAt,
+            dueAt: cycle.dueAt,
+            status: cycle.status,
+            chargesMinor: cycle.chargesMinor,
+            creditsMinor: cycle.creditsMinor,
+            totalMinor: cycle.totalMinor,
+            isReconciled: cycle.isReconciled,
+            // "derived" means inferred from the card's closing day, not a
+            // reconciled statement. The model must not present it as confirmed.
+            source: cycle.source,
+          })),
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_confidence_breakdown",
+    title: "Forecast confidence breakdown",
+    description:
+      "How much of the projected cash volume rests on facts (actual/confirmed) versus assumptions (high/medium/low confidence), by amount and share of total.",
+    requiredScope: "finance:read",
+    input: z.object({ horizonDays: z.number().int().min(1).max(365).default(30) }),
+    async execute(ctx, args) {
+      const breakdown = await getConfidenceBreakdown(ctx.userId, args.horizonDays);
+      return {
+        forModel: {
+          currency: ctx.currency,
+          totalMinor: breakdown.totalMinor,
+          byConfidence: breakdown.byConfidence,
+          sharePercent: breakdown.sharePercent,
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_purchase_plans",
+    title: "Purchase plans",
+    description: "All purchase plans with their items and payment options.",
+    requiredScope: "finance:read",
+    input: z.object({}),
+    async execute(ctx) {
+      const plans = await listPurchasePlans(ctx.userId);
+      return {
+        forModel: {
+          currency: ctx.currency,
+          plans: plans.map((plan) => ({
+            id: plan.id,
+            name: plan.name,
+            description: plan.description,
+            targetDate: plan.targetDate,
+            budgetMinor: plan.budgetMinor,
+            currency: plan.currencyCode,
+            status: plan.status,
+            items: plan.items.map((item) => ({
+              id: item.id,
+              name: item.name,
+              priority: item.priority,
+              estimatedPriceMinor: item.estimatedPriceMinor,
+              actualPriceMinor: item.actualPriceMinor,
+              earliestPurchaseDate: item.earliestPurchaseDate,
+              deadline: item.deadline,
+              status: item.status,
+              paymentOptions: item.paymentOptions.map((option) => ({
+                id: option.id,
+                method: option.paymentMethod,
+                cardId: option.cardId,
+                cashPriceMinor: option.cashPriceMinor,
+                installments: option.installments,
+                installmentAmountMinor: option.installmentAmountMinor,
+                totalCostMinor: option.totalCostMinor,
+                firstPaymentDate: option.firstPaymentDate,
+              })),
+            })),
+          })),
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_purchase_plan",
+    title: "Purchase plan",
+    description: "Full detail of one purchase plan by id, including items, payment options, and any stored simulations.",
+    requiredScope: "finance:read",
+    input: z.object({ id: z.string().uuid() }),
+    async execute(ctx, args) {
+      const plan = await getPurchasePlan(ctx.userId, args.id);
+      if (!plan) return { forModel: { error: "not_found" } };
+      return {
+        forModel: {
+          currency: ctx.currency,
+          plan: {
+            id: plan.id,
+            name: plan.name,
+            description: plan.description,
+            targetDate: plan.targetDate,
+            budgetMinor: plan.budgetMinor,
+            currency: plan.currencyCode,
+            status: plan.status,
+            items: plan.items.map((item) => ({
+              id: item.id,
+              name: item.name,
+              priority: item.priority,
+              estimatedPriceMinor: item.estimatedPriceMinor,
+              actualPriceMinor: item.actualPriceMinor,
+              earliestPurchaseDate: item.earliestPurchaseDate,
+              deadline: item.deadline,
+              status: item.status,
+              paymentOptions: item.paymentOptions.map((option) => ({
+                id: option.id,
+                method: option.paymentMethod,
+                cardId: option.cardId,
+                cashPriceMinor: option.cashPriceMinor,
+                installments: option.installments,
+                installmentAmountMinor: option.installmentAmountMinor,
+                totalCostMinor: option.totalCostMinor,
+                firstPaymentDate: option.firstPaymentDate,
+              })),
+              simulations: item.simulations.map((sim) => ({
+                id: sim.id,
+                paymentOptionId: sim.paymentOptionId,
+                forecastVersion: sim.forecastVersion,
+                currentBalanceMinor: sim.currentBalanceMinor,
+                minimumBalanceMinor: sim.minimumBalanceMinor,
+                safeToSpendBeforeMinor: sim.safeToSpendBeforeMinor,
+                safeToSpendAfterMinor: sim.safeToSpendAfterMinor,
+                reserveViolations: sim.reserveViolations,
+                totalCostMinor: sim.totalCostMinor,
+                lastInstallmentDate: sim.lastInstallmentDate,
+                recommendationScore: sim.recommendationScore,
+                createdAt: sim.createdAt,
+              })),
+            })),
+          },
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "simulate_purchase",
+    title: "Simulate a purchase",
+    description:
+      "Runs one payment option through the deterministic planning engine and reports its exact cash impact: feasibility, hard-constraint rejections, and the audit reasons behind them. Never recommends or computes anything itself — it only reports the engine's output verbatim.",
+    requiredScope: "finance:read",
+    input: z.object({ option: purchaseOptionInput, context: simulationContextInput }),
+    async execute(ctx, args) {
+      const result = await simulateUserPurchase(ctx.userId, args.option, {
+        horizonDays: args.context.horizonDays,
+        maxLastPaymentDate: args.context.maxLastPaymentDate,
+      });
+      return {
+        forModel: {
+          currency: ctx.currency,
+          optionId: result.optionId,
+          label: result.label,
+          totalCostMinor: result.totalCostMinor,
+          immediateImpactMinor: result.immediateImpactMinor,
+          monthlyImpactMinor: result.monthlyImpactMinor,
+          safeToSpendBeforeMinor: result.safeToSpendBeforeMinor,
+          safeToSpendAfterMinor: result.safeToSpendAfterMinor,
+          minimumBalanceBeforeMinor: result.minimumBalanceBeforeMinor,
+          minimumBalanceAfterMinor: result.minimumBalanceAfterMinor,
+          minimumBalanceDateAfter: result.minimumBalanceDateAfter,
+          hardReserveViolated: result.hardReserveViolated,
+          softReserveImpacts: result.softReserveImpacts,
+          creditLimitExceededMinor: result.creditLimitExceededMinor,
+          cardUtilizationAfterMinor: result.cardUtilizationAfterMinor,
+          lastPaymentDate: result.lastPaymentDate,
+          installments: result.installments,
+          feasible: result.feasible,
+          rejections: result.rejections,
+          reasons: result.reasons,
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "compare_payment_options",
+    title: "Compare payment options",
+    description:
+      "Compares payment alternatives for the same purchase against one shared cash forecast. Reports each option's feasibility, hard-constraint rejections, and audit reasons, plus which option (if any) the engine recommends. Never invents a recommendation when the engine reports NO_FEASIBLE_OPTION or INSUFFICIENT_DATA — that verdict is propagated as-is.",
+    requiredScope: "finance:read",
+    input: z.object({ options: z.array(purchaseOptionInput).min(1).max(10), context: simulationContextInput }),
+    async execute(ctx, args) {
+      const result = await compareUserPaymentOptions(ctx.userId, args.options, {
+        horizonDays: args.context.horizonDays,
+        maxLastPaymentDate: args.context.maxLastPaymentDate,
+      });
+      return {
+        forModel: {
+          currency: ctx.currency,
+          status: result.status,
+          recommendedOptionId: result.recommendedOptionId,
+          blockers: result.blockers,
+          options: result.options.map((option) => ({
+            id: option.id,
+            label: option.label,
+            totalCostMinor: option.totalCostMinor,
+            minimumBalanceMinor: option.minimumBalanceMinor,
+            minimumBalanceDate: option.minimumBalanceDate,
+            hardReserveViolated: option.hardReserveViolated,
+            safeToSpendAfterMinor: option.safeToSpendAfterMinor,
+            feasible: option.feasible,
+            rejections: option.rejections,
+            reasons: option.reasons,
+            softReserveImpacts: option.softReserveImpacts,
+            creditLimitExceededMinor: option.creditLimitExceededMinor,
+            lastPaymentDate: option.lastPaymentDate,
+            installments: option.installments,
+            peakMonthlyOutflowMinor: option.peakMonthlyOutflowMinor,
+          })),
         },
       };
     },

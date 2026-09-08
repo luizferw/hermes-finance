@@ -16,11 +16,12 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 
-const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD"] as const;
+const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD", "BRL"] as const;
 const LOCALES = [
   { value: "en-IN", label: "English (India)" },
   { value: "en-US", label: "English (United States)" },
   { value: "en-GB", label: "English (United Kingdom)" },
+  { value: "pt-BR", label: "Português (Brasil)" },
 ] as const;
 const DATE_FORMATS = ["dd MMM yyyy", "yyyy-MM-dd", "dd/MM/yyyy", "MM/dd/yyyy"] as const;
 

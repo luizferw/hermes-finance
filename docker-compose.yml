@@ -6,6 +6,11 @@ services:
       POSTGRES_DB: kosh
       POSTGRES_USER: kosh
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    # Bound to the loopback interface only, so host tooling (migrations, tests,
+    # drizzle studio) can reach the database while the network cannot. Override
+    # POSTGRES_HOST_PORT when 5432 is already taken on the host.
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

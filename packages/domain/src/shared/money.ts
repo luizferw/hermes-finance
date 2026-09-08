@@ -40,12 +40,18 @@ export interface FormatMoneyOptions {
   compactDecimals?: boolean;
 }
 
+// "en-IN" used to be the default here, but that baked a single country's
+// formatting (lakh grouping) into a shared, currency-agnostic utility. The
+// product now supports multiple user locales (see user_settings.locale), so
+// callers that have a user in scope must always pass `options.locale`
+// explicitly. "en-US" is kept only as a neutral, universally-supported ICU
+// fallback for callers with no user context (e.g. scripts, tests).
 export function formatMoney(
   amountMinor: number,
   currencyCode: string,
   options: FormatMoneyOptions = {},
 ): string {
-  const { locale = "en-IN", signDisplay = "auto", compactDecimals = true } = options;
+  const { locale = "en-US", signDisplay = "auto", compactDecimals = true } = options;
   const exponent = minorUnitExponent(currencyCode);
   const major = minorToMajor(amountMinor, currencyCode);
   const isWhole = amountMinor % 10 ** exponent === 0;

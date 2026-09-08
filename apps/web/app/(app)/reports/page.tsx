@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { requireUser } from "@/lib/session";
-import { formatMoney } from "@kosh/domain";
 import {
   getFinancialYearSummary,
   getMonthlyFlows,
@@ -15,6 +14,7 @@ import { PageHeader } from "@/components/app-shell/page-header";
 import { IncomeExpenseChart } from "@/components/charts/income-expense-chart";
 import { NetWorthChart } from "@/components/charts/net-worth-chart";
 import { cn } from "@/lib/utils";
+import { formatMoney } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Patterns" };
 

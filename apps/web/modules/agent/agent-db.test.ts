@@ -80,6 +80,66 @@ describe("read tool isolation", () => {
       expect(JSON.stringify(result.forModel).length, name).toBeLessThan(50_000);
     }
   });
+
+  it("runs the P0 finance-domain read tools against the demo user's own data", async () => {
+    const noArgTools = [
+      "get_position",
+      "get_projection",
+      "get_projected_commitments",
+      "get_credit_cards",
+      "get_confidence_breakdown",
+      "get_purchase_plans",
+    ];
+    for (const name of noArgTools) {
+      const tool = TOOL_BY_NAME.get(name) as ReadTool;
+      const input = tool.input.parse({});
+      const result = await tool.execute(ctx, input);
+      expect(result.forModel, name).toBeDefined();
+      expect(JSON.stringify(result.forModel).length, name).toBeLessThan(50_000);
+    }
+
+    // Unknown ids resolve to a not_found payload rather than leaking another
+    // user's row or throwing.
+    const statementTool = TOOL_BY_NAME.get("get_card_statement") as ReadTool;
+    const statement = (await statementTool.execute(ctx, {
+      cardId: "00000000-0000-0000-0000-000000000000",
+    })) as { forModel: { error?: string } };
+    expect(statement.forModel.error).toBe("not_found");
+
+    const planTool = TOOL_BY_NAME.get("get_purchase_plan") as ReadTool;
+    const plan = (await planTool.execute(ctx, { id: "00000000-0000-0000-0000-000000000000" })) as {
+      forModel: { error?: string };
+    };
+    expect(plan.forModel.error).toBe("not_found");
+  });
+
+  it("simulate_purchase and compare_payment_options never fabricate a recommendation", async () => {
+    const simulate = TOOL_BY_NAME.get("simulate_purchase") as ReadTool;
+    const option = { id: "sim1", method: "pix" as const, amountMinor: 5_000 };
+    const simResult = (await simulate.execute(ctx, simulate.input.parse({ option }))).forModel as {
+      feasible: boolean;
+      rejections: unknown[];
+      reasons: string[];
+    };
+    expect(typeof simResult.feasible).toBe("boolean");
+    expect(Array.isArray(simResult.rejections)).toBe(true);
+    expect(simResult.reasons.length).toBeGreaterThan(0);
+
+    const compare = TOOL_BY_NAME.get("compare_payment_options") as ReadTool;
+    const compareResult = (
+      await compare.execute(
+        ctx,
+        compare.input.parse({ options: [option, { id: "sim2", method: "cash" as const, amountMinor: 5_000 }] }),
+      )
+    ).forModel as { status: string; blockers: string[]; recommendedOptionId?: string; options: unknown[] };
+    expect(["OK", "NO_FEASIBLE_OPTION", "INSUFFICIENT_DATA"]).toContain(compareResult.status);
+    expect(Array.isArray(compareResult.blockers)).toBe(true);
+    expect(compareResult.options.length).toBe(2);
+    // Never a fabricated recommendation when the engine found none feasible.
+    if (compareResult.status !== "OK") {
+      expect(compareResult.recommendedOptionId).toBeUndefined();
+    }
+  });
 });
 
 describe("write execution via confirmation", () => {

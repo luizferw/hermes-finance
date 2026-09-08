@@ -1,7 +1,9 @@
 import {
   ArrowDataTransferHorizontalIcon,
+  Calendar03Icon,
   ChartLineData01Icon,
   Compass01Icon,
+  CreditCardIcon,
   Home01Icon,
   InboxIcon,
   Invoice01Icon,
@@ -9,6 +11,7 @@ import {
   PieChart01Icon,
   RepeatIcon,
   Settings01Icon,
+  ShoppingBag01Icon,
   Target01Icon,
   Wallet01Icon,
 } from "@hugeicons/core-free-icons";
@@ -58,6 +61,9 @@ export const NAV_SECTIONS: NavSection[] = [
       { title: "Bills", href: "/plan/bills", icon: Invoice01Icon },
       { title: "Recurring", href: "/plan/recurring", icon: RepeatIcon },
       { title: "Budgets", href: "/plan/budgets", icon: PieChart01Icon },
+      { title: "Commitments", href: "/plan/commitments", icon: Calendar03Icon },
+      { title: "Cards", href: "/plan/cards", icon: CreditCardIcon },
+      { title: "Purchases", href: "/plan/purchases", icon: ShoppingBag01Icon },
     ],
   },
   {

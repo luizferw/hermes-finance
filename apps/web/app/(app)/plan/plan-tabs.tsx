@@ -10,6 +10,9 @@ const TABS = [
   { href: "/plan/bills", label: "Bills" },
   { href: "/plan/recurring", label: "Recurring" },
   { href: "/plan/budgets", label: "Budgets" },
+  { href: "/plan/commitments", label: "Commitments" },
+  { href: "/plan/cards", label: "Cards" },
+  { href: "/plan/purchases", label: "Purchases" },
 ];
 
 export function PlanTabs() {

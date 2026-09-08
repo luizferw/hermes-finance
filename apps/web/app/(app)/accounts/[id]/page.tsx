@@ -7,8 +7,7 @@ import {
   getAccountBalanceHistory,
   getAccountTransactions,
 } from "@/modules/accounts/queries";
-import { formatMoney } from "@kosh/domain";
-import { formatDate, formatDateShort } from "@/lib/format";
+import { formatDate, formatDateShort, formatMoney } from "@/lib/format";
 import { PageHeader } from "@/components/app-shell/page-header";
 import { Amount } from "@/components/transactions/amount";
 import { CategoryBadge } from "@/components/transactions/category-badge";

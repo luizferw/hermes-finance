@@ -8,7 +8,6 @@ import {
   getNetWorthSummary,
   type AccountRow,
 } from "@/modules/accounts/queries";
-import { formatMoney } from "@kosh/domain";
 import { PageHeader } from "@/components/app-shell/page-header";
 import {
   Empty,
@@ -19,6 +18,7 @@ import {
 } from "@/components/ui/empty";
 import { cn } from "@/lib/utils";
 import { NewAccountDialog } from "./new-account-dialog";
+import { formatMoney } from "@/lib/format";
 
 export const metadata: Metadata = { title: "Accounts" };
 
