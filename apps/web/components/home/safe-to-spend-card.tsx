@@ -1,4 +1,4 @@
-import { formatMoney } from "@/lib/format";
+import { formatDate, formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -7,28 +7,41 @@ import { cn } from "@/lib/utils";
  * (native <details>) so the figure is never a black box. Tone is carried by a
  * soft tint and the word — red is reserved for genuinely over, never for
  * "a bit tight".
+ *
+ * The breakdown mirrors exactly what `getSafeToSpend` computed — the lowest
+ * projected balance ahead, minus the protected reserve — rather than a
+ * separate "earned minus spent" narrative. Showing any other equation here
+ * would make the reveal lie about how the headline number was actually
+ * derived, and the two would drift the moment they disagreed.
  */
 export function SafeToSpendCard({
   safeMinor,
-  incomeMinor,
-  expenseMinor,
-  committedMinor,
+  minimumBalanceMinor,
+  minimumBalanceDate,
+  hardReserveMinor,
+  hardReserveViolated,
   currency,
 }: {
   safeMinor: number;
-  incomeMinor: number;
-  expenseMinor: number;
-  committedMinor: number;
+  minimumBalanceMinor: number;
+  minimumBalanceDate: string;
+  hardReserveMinor: number;
+  hardReserveViolated: boolean;
   currency: string;
 }) {
-  const over = safeMinor < 0;
-  // "Tight" once less than ~15% of income remains (only meaningful with income).
-  const tight = !over && incomeMinor > 0 && safeMinor < incomeMinor * 0.15;
+  const over = hardReserveViolated;
+  // How far the projected trough falls below the reserve — the deficit a
+  // violated reserve represents, shown instead of a negative safe-to-spend
+  // (which the engine never returns; it floors at 0).
+  const deficitMinor = Math.max(0, hardReserveMinor - minimumBalanceMinor);
+  // "Tight" once less than ~15% of the reserve is left as headroom — only
+  // meaningful when a reserve is actually configured.
+  const tight = !over && hardReserveMinor > 0 && safeMinor < hardReserveMinor * 0.15;
 
   const tone = over ? "over" : tight ? "tight" : "clear";
   const read = {
-    over: "You're over for the month — ease off where you can.",
-    tight: "Running tight. Worth slowing down on the extras.",
+    over: "Projected to dip below your protected reserve — ease off where you can.",
+    tight: "Running tight against your reserve. Worth slowing down on the extras.",
     clear: "You're clear. This is yours to spend or save.",
   }[tone];
   const accent = {
@@ -46,8 +59,8 @@ export function SafeToSpendCard({
           accent,
         )}
       >
-        {formatMoney(over ? -safeMinor : safeMinor, currency)}
-        {over && <span className="ml-2 align-middle text-base font-normal text-destructive">over</span>}
+        {formatMoney(over ? deficitMinor : safeMinor, currency)}
+        {over && <span className="ml-2 align-middle text-base font-normal text-destructive">short</span>}
       </p>
       <p className="mt-2 max-w-[40ch] text-sm text-muted-foreground">{read}</p>
 
@@ -59,16 +72,14 @@ export function SafeToSpendCard({
           </span>
         </summary>
         <dl className="mt-2.5 space-y-1.5 border-t border-border/60 pt-2.5 text-sm">
-          <Row label="Earned this month" value={formatMoney(incomeMinor, currency)} />
-          <Row label="Spent" value={`− ${formatMoney(expenseMinor, currency)}`} />
-          {committedMinor > 0 && (
-            <Row label="Bills still due" value={`− ${formatMoney(committedMinor, currency)}`} />
-          )}
           <Row
-            label="Safe to spend"
-            value={formatMoney(safeMinor, currency)}
-            strong
+            label={`Lowest projected balance · ${formatDate(minimumBalanceDate)}`}
+            value={formatMoney(minimumBalanceMinor, currency)}
           />
+          {hardReserveMinor > 0 && (
+            <Row label="Protected reserve" value={`− ${formatMoney(hardReserveMinor, currency)}`} />
+          )}
+          <Row label="Safe to spend" value={formatMoney(safeMinor, currency)} strong />
         </dl>
       </details>
     </div>

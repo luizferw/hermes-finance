@@ -309,16 +309,22 @@ const readTools: ReadTool[] = [
     }),
     async execute(ctx, args) {
       const result = await getSafeToSpend(ctx.userId, args.horizonDays);
-      const committedMinor = result.forecast.events.filter((event) => event.amountMinor < 0).reduce((total, event) => total + -event.amountMinor, 0);
       return {
         forModel: {
           safeToSpendMinor: result.safeToSpendMinor,
           minimumBalanceMinor: result.minimumBalanceMinor,
           minimumBalanceDate: result.minimumBalanceDate,
           hardReserveViolated: result.hardReserveViolated,
-          hardReserveMinor: result.forecast.minimumBalanceMinor - result.safeToSpendMinor,
+          // Read straight off the result — deriving it from
+          // (minimumBalance - safeToSpend) breaks the moment safeToSpend is
+          // clamped to 0, since the subtraction no longer inverts cleanly.
+          hardReserveMinor: result.hardReserveMinor,
           horizonEnd: result.forecast.horizonEnd,
           currency: ctx.currency,
+          // A balance older than the freshness policy still gets used, but the
+          // model must say so — silently answering "you can spend R$X" from a
+          // stale number is exactly what §62 exists to prevent.
+          staleAccountNames: result.staleAccountNames,
         },
         block: {
           type: "safeToSpend",
@@ -326,10 +332,13 @@ const readTools: ReadTool[] = [
           period: `${result.forecast.asOf} to ${result.forecast.horizonEnd}`,
           safeMinor: result.safeToSpendMinor,
           incomeMinor: result.forecast.events.filter((event) => event.amountMinor > 0).reduce((total, event) => total + event.amountMinor, 0),
-          expenseMinor: committedMinor,
-          committedMinor,
+          expenseMinor: result.committedMinor,
+          committedMinor: result.committedMinor,
           currency: ctx.currency,
-          note: `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}.`,
+          note:
+            result.staleAccountNames.length > 0
+              ? `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}. Uses a balance that is a few days old for ${result.staleAccountNames.join(", ")}.`
+              : `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}.`,
         },
       };
     },

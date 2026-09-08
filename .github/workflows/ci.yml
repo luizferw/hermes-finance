@@ -42,7 +42,7 @@ jobs:
           cache: pnpm
       - run: sudo apt-get update && sudo apt-get install --yes postgresql-client
       - run: pnpm install --frozen-lockfile
-      - run: pnpm db:migrate && pnpm db:seed
+      - run: pnpm db:migrate && pnpm db:seed && pnpm --filter @kosh/db seed:prd-scenario
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test

@@ -11,6 +11,7 @@ import { claimAction } from "./recorder";
 import { prepareProposal } from "./execute";
 import { executeProposal } from "./execute";
 import { MCP_TOOLS, TOOL_BY_NAME } from "./registry";
+import { getSafeToSpend } from "@/modules/finance/queries";
 import {
   createMcpToken,
   verifyMcpToken,
@@ -111,6 +112,21 @@ describe("read tool isolation", () => {
       forModel: { error?: string };
     };
     expect(plan.forModel.error).toBe("not_found");
+  });
+
+  it("reports the reserve and staleness the engine actually computed, not a re-derived guess", async () => {
+    const direct = await getSafeToSpend(userId, 30);
+    const tool = TOOL_BY_NAME.get("get_safe_to_spend") as ReadTool;
+    const result = (await tool.execute(ctx, tool.input.parse({ horizonDays: 30 }))).forModel as {
+      hardReserveMinor: number;
+      staleAccountNames: string[];
+    };
+
+    // hardReserveMinor used to be derived as (minimumBalance - safeToSpend),
+    // which breaks the moment safeToSpend is clamped to 0 by the reserve
+    // itself — the exact case that made this worth asserting directly.
+    expect(result.hardReserveMinor).toBe(direct.hardReserveMinor);
+    expect(result.staleAccountNames).toEqual(direct.staleAccountNames);
   });
 
   it("simulate_purchase and compare_payment_options never fabricate a recommendation", async () => {

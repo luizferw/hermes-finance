@@ -27,6 +27,7 @@ import {
 import { listBills } from "@/modules/bills/queries";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { getRuleSuggestions } from "@/modules/rules/queries";
+import { getSafeToSpend } from "@/modules/finance/queries";
 import { getSystemHealth } from "@/modules/system/queries";
 import { getUserSettings } from "@/modules/settings/queries";
 import { PageHeader } from "@/components/app-shell/page-header";
@@ -56,6 +57,7 @@ export default async function OverviewPage() {
     suggestions,
     health,
     accounts,
+    safeToSpend,
   ] = await Promise.all([
     getUserSettings(user.id),
     getConfidence(user.id),
@@ -70,6 +72,10 @@ export default async function OverviewPage() {
     getRuleSuggestions(user.id),
     getSystemHealth(),
     listAccounts(user.id),
+    // The home page's headline number and the Horizon page must agree: both
+    // read the same deterministic engine, not two independent calculations
+    // that can silently drift apart.
+    getSafeToSpend(user.id, 30),
   ]);
 
   const currency = settings.currencyCode;
@@ -93,21 +99,6 @@ export default async function OverviewPage() {
   const monthLabel = new Intl.DateTimeFormat("en-IN", { month: "long" }).format(
     new Date(),
   );
-
-  // Safe to spend = earned − spent − active bills still due by month end,
-  // all in the user's default currency.
-  const _now = new Date();
-  const monthEndIso = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(new Date(_now.getFullYear(), _now.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
-  const committedMinor = bills
-    .filter(
-      (b) =>
-        b.bill.isActive &&
-        b.bill.currencyCode === currency &&
-        b.bill.nextDueDate <= monthEndIso,
-    )
-    .reduce((sum, b) => sum + b.bill.expectedAmountMinor, 0);
-  const safeMinor =
-    monthSummary.incomeMinor - monthSummary.expenseMinor - committedMinor;
 
   // Net-worth trajectory across the series — the felt direction of the figure.
   const first = netWorthData[0]?.netWorthMinor ?? 0;
@@ -234,10 +225,11 @@ export default async function OverviewPage() {
 
             <div className="mt-6">
               <SafeToSpendCard
-                safeMinor={safeMinor}
-                incomeMinor={monthSummary.incomeMinor}
-                expenseMinor={monthSummary.expenseMinor}
-                committedMinor={committedMinor}
+                safeMinor={safeToSpend.safeToSpendMinor}
+                minimumBalanceMinor={safeToSpend.minimumBalanceMinor}
+                minimumBalanceDate={safeToSpend.minimumBalanceDate}
+                hardReserveMinor={safeToSpend.hardReserveMinor}
+                hardReserveViolated={safeToSpend.hardReserveViolated}
                 currency={currency}
               />
             </div>

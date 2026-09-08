@@ -193,7 +193,12 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     amountMinor: -bill.expectedAmountMinor,
     interval: toRecurrenceInterval(bill.recurrence),
     startDate: bill.nextDueDate,
-    confidence: "CONFIRMED",
+    // `expectedAmountMinor` is a manually entered figure, never a fact
+    // confirmed by a real transaction — CONFIRMED overstated it. HIGH matches
+    // the sibling `recurring_transactions` source just below, which carries
+    // the same provenance (the user told us this is coming, no AmountStrategy
+    // — §9.10 — exists yet to tell a fixed bill from a rough one).
+    confidence: "HIGH",
   }));
   events.push(
     ...tagLabels(
@@ -235,7 +240,7 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
   });
   const cardById = new Map(cards.map((card) => [card.id, card]));
   if (cards.length > 0) {
-    const cycles = await db.query.creditCardBillingCycles.findMany({
+    const recordedCycles = await db.query.creditCardBillingCycles.findMany({
       where: and(
         inArray(creditCardBillingCycles.creditCardId, [...cardById.keys()]),
         gte(creditCardBillingCycles.dueAt, asOf),
@@ -244,22 +249,37 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
       orderBy: [asc(creditCardBillingCycles.dueAt)],
     });
     // A settled cycle is a fact, not a projection: it leaves the active set.
-    const openCycles = cycles.filter((cycle) => cycle.status !== "paid");
-    const charges = await loadCycleCharges(openCycles.map((cycle) => cycle.id));
-    const statementEvents = projectStatements(
-      openCycles.map(
-        (cycle): BillingCycle => ({
-          id: cycle.id,
-          creditCardId: cycle.creditCardId,
-          statementMonth: cycle.statementMonth,
-          dueAt: cycle.dueAt,
-          confirmedTotalMinor: cycle.confirmedTotalMinor ?? undefined,
-        }),
-      ),
-      charges,
-      range,
+    const openCycles = recordedCycles.filter((cycle) => cycle.status !== "paid");
+    const recordedMonths = new Set(
+      openCycles.map((cycle) => `${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`),
     );
-    for (const cycle of openCycles) {
+
+    const billingCycles: BillingCycle[] = openCycles.map((cycle) => ({
+      id: cycle.id,
+      creditCardId: cycle.creditCardId,
+      statementMonth: cycle.statementMonth,
+      dueAt: cycle.dueAt,
+      confirmedTotalMinor: cycle.confirmedTotalMinor ?? undefined,
+    }));
+    const charges = await loadCycleCharges(openCycles.map((cycle) => cycle.id));
+
+    // A card imported from a bank export has no recorded cycle at all — only
+    // ledger transactions. Without deriving its statements the same way
+    // `getCardStatement` does, the card's entire debt is invisible to the
+    // forecast and to safe-to-spend, no matter how many transactions it has.
+    for (const card of cards) {
+      const derived = await deriveLedgerCycles(userId, card);
+      for (const [month, entry] of derived) {
+        if (recordedMonths.has(`${card.id}:${month}`)) continue;
+        if (entry.dueAt < asOf || entry.dueAt > horizonEnd) continue;
+        const id = `derived:${card.id}:${month}`;
+        billingCycles.push({ id, creditCardId: card.id, statementMonth: month, dueAt: entry.dueAt });
+        charges.push({ billingCycleId: id, amountMinor: entry.chargesMinor - entry.creditsMinor });
+      }
+    }
+
+    const statementEvents = projectStatements(billingCycles, charges, range);
+    for (const cycle of billingCycles) {
       const card = cardById.get(cycle.creditCardId);
       if (card) labels.set(`statement:${cycle.creditCardId}:${cycle.statementMonth}`, `Fatura ${card.name}`);
     }
@@ -518,6 +538,50 @@ export interface CardStatementCycle {
   status: string;
 }
 
+export interface DerivedLedgerCycle {
+  closesAt: string;
+  dueAt: string;
+  /** Purchases and fees posted in the period, as a positive magnitude. */
+  chargesMinor: number;
+  /** Payments and refunds posted in the period, as a positive magnitude. */
+  creditsMinor: number;
+}
+
+/**
+ * Groups a card account's ledger transactions into the billing cycles they
+ * would fall into, using the card's nominal closing and due days.
+ *
+ * A card imported from a bank export has no recorded `CreditCardBillingCycle`
+ * rows — only transactions. Both the statement history view and the forecast
+ * need the same derivation, so it lives here once rather than being
+ * approximated twice: without it, a card's debt is invisible to whichever
+ * caller skips this step.
+ */
+async function deriveLedgerCycles(
+  userId: string,
+  card: { id: string; accountId: string; defaultClosingDay: number; defaultDueDay: number },
+): Promise<Map<string, DerivedLedgerCycle>> {
+  const ledger = await db.query.transactions.findMany({
+    where: and(eq(transactions.userId, userId), eq(transactions.accountId, card.accountId)),
+    columns: { date: true, amountMinor: true },
+  });
+
+  const byMonth = new Map<string, DerivedLedgerCycle>();
+  for (const entry of ledger) {
+    const cycle = nominalCycleFor(entry.date, card.defaultClosingDay, card.defaultDueDay);
+    const existing = byMonth.get(cycle.statementMonth) ?? {
+      closesAt: cycle.closesAt,
+      dueAt: cycle.dueAt,
+      chargesMinor: 0,
+      creditsMinor: 0,
+    };
+    if (entry.amountMinor < 0) existing.chargesMinor += -entry.amountMinor;
+    else existing.creditsMinor += entry.amountMinor;
+    byMonth.set(cycle.statementMonth, existing);
+  }
+  return byMonth;
+}
+
 /**
  * Statement history for a card.
  *
@@ -538,31 +602,21 @@ export async function getCardStatement(userId: string, cardId: string) {
     with: { installments: true },
   });
 
-  const ledger = await db.query.transactions.findMany({
-    where: and(eq(transactions.userId, userId), eq(transactions.accountId, card.accountId)),
-    columns: { date: true, amountMinor: true },
-  });
-
+  const derived = await deriveLedgerCycles(userId, card);
   const byMonth = new Map<string, CardStatementCycle>();
-
-  for (const entry of ledger) {
-    const cycle = nominalCycleFor(entry.date, card.defaultClosingDay, card.defaultDueDay);
-    const existing = byMonth.get(cycle.statementMonth) ?? {
-      id: `derived:${cardId}:${cycle.statementMonth}`,
-      statementMonth: cycle.statementMonth,
-      closesAt: cycle.closesAt,
-      dueAt: cycle.dueAt,
-      chargesMinor: 0,
-      creditsMinor: 0,
-      totalMinor: 0,
+  for (const [month, entry] of derived) {
+    byMonth.set(month, {
+      id: `derived:${cardId}:${month}`,
+      statementMonth: month,
+      closesAt: entry.closesAt,
+      dueAt: entry.dueAt,
+      chargesMinor: entry.chargesMinor,
+      creditsMinor: entry.creditsMinor,
+      totalMinor: entry.chargesMinor - entry.creditsMinor,
       isReconciled: false,
-      source: "derived" as const,
+      source: "derived",
       status: "closed",
-    };
-    if (entry.amountMinor < 0) existing.chargesMinor += -entry.amountMinor;
-    else existing.creditsMinor += entry.amountMinor;
-    existing.totalMinor = existing.chargesMinor - existing.creditsMinor;
-    byMonth.set(cycle.statementMonth, existing);
+    });
   }
 
   // A recorded cycle always wins over the derived one for the same month.
