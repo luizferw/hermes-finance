@@ -5,6 +5,7 @@ import { ArrowRight01Icon, ShoppingBag01Icon } from "@hugeicons/core-free-icons"
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
 import { listPurchasePlans } from "@/modules/finance/queries";
+import { getUserSettings } from "@/modules/settings/queries";
 import { Badge } from "@/components/ui/badge";
 import {
   Empty,
@@ -14,6 +15,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { cn } from "@/lib/utils";
+import { NewPurchasePlanDialog } from "./new-plan-dialog";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -41,15 +43,21 @@ const ITEM_STATUS_LABEL: Record<string, string> = {
 
 export default async function PurchasesPage() {
   const user = await requireUser();
-  const plans = await listPurchasePlans(user.id);
+  const [plans, settings] = await Promise.all([
+    listPurchasePlans(user.id),
+    getUserSettings(user.id),
+  ]);
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">Purchase plans</h2>
-        <p className="text-sm text-muted-foreground">
-          What you&apos;re planning to buy, and how it would fit against your money.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">Purchase plans</h2>
+          <p className="text-sm text-muted-foreground">
+            What you&apos;re planning to buy, and how it would fit against your money.
+          </p>
+        </div>
+        <NewPurchasePlanDialog defaultCurrency={settings.currencyCode} />
       </div>
 
       {plans.length === 0 ? (

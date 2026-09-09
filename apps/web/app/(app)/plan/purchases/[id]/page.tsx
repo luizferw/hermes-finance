@@ -8,6 +8,7 @@ import { getPurchasePlan } from "@/modules/finance/queries";
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { NewPurchaseItemDialog } from "./new-item-dialog";
 
 export const metadata: Metadata = { title: "Payment options" };
 
@@ -97,12 +98,15 @@ export default async function PurchasePlanDetailPage({
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">{plan.name}</h2>
-        <p className="text-sm text-muted-foreground">
-          {plan.description ? `${plan.description} · ` : ""}
-          {plan.targetDate ? `Target ${formatDate(plan.targetDate)}` : "No target date"}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">{plan.name}</h2>
+          <p className="text-sm text-muted-foreground">
+            {plan.description ? `${plan.description} · ` : ""}
+            {plan.targetDate ? `Target ${formatDate(plan.targetDate)}` : "No target date"}
+          </p>
+        </div>
+        <NewPurchaseItemDialog purchasePlanId={plan.id} currencyCode={plan.currencyCode} />
       </div>
 
       {comparisons.length === 0 ? (
