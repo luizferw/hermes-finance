@@ -1,0 +1,1 @@
+ALTER TABLE "purchase_items" ADD COLUMN "selected_payment_option_id" uuid;

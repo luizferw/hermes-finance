@@ -185,22 +185,9 @@ export const updatePaymentOptionSchema = z.object({
 export type CreatePaymentOptionInput = z.infer<typeof createPaymentOptionSchema>;
 export type UpdatePaymentOptionInput = z.infer<typeof updatePaymentOptionSchema>;
 
-// --- purchase simulation (ad-hoc what-if, driven by searchParams) --------------
+/** Records which of an item's options is the one actually paying for it. */
+export const selectPaymentOptionSchema = z.object({
+  paymentOptionId: z.string().uuid().nullable(),
+});
 
-export const simulatePurchaseParamsSchema = z
-  .object({
-    method: paymentMethodSchema,
-    /** Major units. */
-    amount: z.coerce.number().positive("Amount must be positive"),
-    purchaseDate: isoDate.nullish(),
-    cardId: z.string().uuid().nullish(),
-    installments: z.coerce.number().int().positive().nullish(),
-    /** Maps to SimulationContext.maxLastPaymentDate. */
-    neededBy: isoDate.nullish(),
-  })
-  .refine((data) => data.method !== "credit_card" || !!data.cardId, {
-    message: "cardId is required for credit_card payment options",
-    path: ["cardId"],
-  });
-
-export type SimulatePurchaseParamsInput = z.infer<typeof simulatePurchaseParamsSchema>;
+export type SelectPaymentOptionInput = z.infer<typeof selectPaymentOptionSchema>;

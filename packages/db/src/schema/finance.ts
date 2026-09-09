@@ -175,6 +175,14 @@ export const purchaseItems = pgTable("purchase_items", {
   deadline: date("deadline", { mode: "string" }),
   status: purchaseItemStatusEnum("status").notNull().default("idea"),
   notes: text("notes"),
+  /**
+   * The one option this item is actually being paid by, out of the
+   * alternatives under it. Comparing options answers "which way is best";
+   * this answers "which way did I pick", which is what lets the plan's
+   * items be added up into a single simulation. Soft reference (no FK)
+   * because payment_options is declared after purchase_items.
+   */
+  selectedPaymentOptionId: uuid("selected_payment_option_id"),
 }, (t) => [check("purchase_items_estimated_nonnegative", sql`${t.estimatedPriceMinor} >= 0`), index("purchase_items_plan_idx").on(t.purchasePlanId)]);
 
 export const paymentOptions = pgTable("payment_options", {

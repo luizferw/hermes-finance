@@ -450,3 +450,219 @@ export function monthlySettlementEvents(input: MonthlySettlementInput): Forecast
 
   return events;
 }
+
+export interface PlanItemOption {
+  itemId: string;
+  /** Human name of the item, used in explanations. */
+  label: string;
+  /** The one way this item is being paid. Alternatives belong to comparePaymentOptions. */
+  option: PaymentOption;
+  /** Latest date this item may finish being paid. */
+  deadline?: DateString;
+}
+
+export interface PlanItemContribution {
+  itemId: string;
+  label: string;
+  totalCostMinor: number;
+  installments: number;
+  lastPaymentDate?: DateString;
+  /** Only this item's own failures — a deadline it cannot meet. */
+  rejections: RejectionCode[];
+  reasons: string[];
+}
+
+export interface CardLoad {
+  cardId: string;
+  label: string;
+  creditLimitMinor: number;
+  /** Already taken by billed and projected installments before this plan. */
+  committedMinor: number;
+  /** Added by every item in this plan charged to this card. */
+  planChargedMinor: number;
+  /** How far past the limit the plan pushes this card; 0 when it fits. */
+  exceededMinor: number;
+}
+
+export interface SimulatePurchasePlanInput {
+  forecastInput: BuildForecastInput;
+  hardReserveMinor: number;
+  softReserves?: SoftReserve[];
+  minimumAllowedBalanceMinor?: number;
+  /** The plan's own target date; every item must be paid off by it. */
+  targetDate?: DateString;
+  items: PlanItemOption[];
+}
+
+export interface PurchasePlanSimulation {
+  totalCostMinor: number;
+  items: PlanItemContribution[];
+  safeToSpendBeforeMinor: number;
+  safeToSpendAfterMinor: number;
+  minimumBalanceBeforeMinor: number;
+  minimumBalanceBeforeDate: DateString;
+  minimumBalanceAfterMinor: number;
+  minimumBalanceAfterDate: DateString;
+  hardReserveViolated: boolean;
+  softReserveImpacts: SoftReserveImpact[];
+  /** One entry per card the plan charges, with every item's share summed. */
+  cards: CardLoad[];
+  /** Cash the whole plan adds, keyed by `YYYY-MM`. */
+  monthlyImpactMinor: Record<string, number>;
+  lastPaymentDate?: DateString;
+  feasible: boolean;
+  rejections: RejectionCode[];
+  reasons: string[];
+  forecastAfter: Forecast;
+}
+
+/**
+ * Answers "can I buy all of this?" — the question a purchase plan exists for.
+ *
+ * Not the same as simulating each item and reading the results side by side.
+ * Two items on one card share that card's limit, and every item competes for
+ * the same cash on the same days, so the constraints only bind correctly when
+ * the whole basket lands on one forecast. Running them separately would clear
+ * a plan that the sum of its parts cannot afford.
+ *
+ * Each item arrives with the single option it is actually being paid by;
+ * choosing between alternatives is `comparePaymentOptions`' job, upstream.
+ */
+export function simulatePurchasePlan(input: SimulatePurchasePlanInput): PurchasePlanSimulation {
+  const softReserves = input.softReserves ?? [];
+  const floorMinor = input.minimumAllowedBalanceMinor ?? 0;
+  assertMinorUnits(floorMinor, "minimumAllowedBalanceMinor");
+  if (input.targetDate) assertValidDate(input.targetDate, "targetDate");
+
+  const planEvents = input.items.flatMap((item) => item.option.cashEvents);
+
+  // assertDistinctLogicalKeys checks each option against the ledger and against
+  // itself, which is enough when options are alternatives. Here they are
+  // simultaneous, so two items can collide with each other — and a collision
+  // silently drops one item's settlement, quietly making the plan affordable.
+  const seenKeys = new Set(input.forecastInput.events.map((event) => event.logicalKey));
+  for (const item of input.items) {
+    assertMinorUnits(item.option.totalCostMinor, `item ${item.itemId}.totalCostMinor`);
+    for (const event of item.option.cashEvents) {
+      if (seenKeys.has(event.logicalKey)) {
+        throw new Error(
+          `item ${item.itemId} cash event logicalKey "${event.logicalKey}" collides with another commitment in this plan`,
+        );
+      }
+      seenKeys.add(event.logicalKey);
+    }
+  }
+
+  const before = calculateSafeToSpend({
+    hardReserveMinor: input.hardReserveMinor,
+    forecastInput: input.forecastInput,
+  });
+  const after = calculateSafeToSpend({
+    hardReserveMinor: input.hardReserveMinor,
+    forecastInput: { ...input.forecastInput, events: [...input.forecastInput.events, ...planEvents] },
+  });
+
+  const rejections: RejectionCode[] = [];
+  const reasons: string[] = [];
+
+  if (after.minimumBalanceMinor < floorMinor) {
+    rejections.push("NEGATIVE_BALANCE");
+    reasons.push(
+      `projected balance falls to ${after.minimumBalanceMinor} on ${after.minimumBalanceDate}, below the ${floorMinor} floor`,
+    );
+  }
+  if (after.hardReserveViolated) {
+    rejections.push("HARD_RESERVE_VIOLATED");
+    reasons.push(
+      `breaks hard reserve of ${input.hardReserveMinor} (trough ${after.minimumBalanceMinor} on ${after.minimumBalanceDate})`,
+    );
+  } else {
+    reasons.push(
+      `keeps hard reserve ${input.hardReserveMinor} (trough ${after.minimumBalanceMinor} on ${after.minimumBalanceDate})`,
+    );
+  }
+
+  // Card limits are shared, so they are summed across the plan rather than
+  // checked per item. Two 60%-of-limit purchases both pass alone and fail here.
+  const cardById = new Map<string, CardLoad>();
+  for (const item of input.items) {
+    const card = item.option.card;
+    if (!card) continue;
+    const load = cardById.get(card.cardId) ?? {
+      cardId: card.cardId,
+      label: card.label ?? card.cardId,
+      creditLimitMinor: card.creditLimitMinor,
+      committedMinor: card.committedMinor,
+      planChargedMinor: 0,
+      exceededMinor: 0,
+    };
+    load.planChargedMinor += item.option.totalCostMinor;
+    cardById.set(card.cardId, load);
+  }
+  const cards = [...cardById.values()].map((load) => ({
+    ...load,
+    exceededMinor: Math.max(0, load.committedMinor + load.planChargedMinor - load.creditLimitMinor),
+  }));
+  for (const load of cards) {
+    if (load.exceededMinor > 0) {
+      rejections.push("CREDIT_LIMIT_EXCEEDED");
+      reasons.push(`${load.label} goes ${load.exceededMinor} over its limit once every item on it is charged`);
+    }
+  }
+
+  const items = input.items.map((item): PlanItemContribution => {
+    const { lastPaymentDate } = summarizeOption(item.option);
+    const itemRejections: RejectionCode[] = [];
+    const itemReasons: string[] = [];
+    const limit = item.deadline ?? input.targetDate;
+    if (limit && lastPaymentDate && lastPaymentDate > limit) {
+      itemRejections.push("DEADLINE_EXCEEDED");
+      itemReasons.push(`last payment on ${lastPaymentDate} falls after ${limit}`);
+    }
+    return {
+      itemId: item.itemId,
+      label: item.label,
+      totalCostMinor: item.option.totalCostMinor,
+      installments: item.option.installments ?? 1,
+      lastPaymentDate,
+      rejections: itemRejections,
+      reasons: itemReasons,
+    };
+  });
+
+  for (const item of items) {
+    if (item.rejections.includes("DEADLINE_EXCEEDED")) {
+      if (!rejections.includes("DEADLINE_EXCEEDED")) rejections.push("DEADLINE_EXCEEDED");
+      reasons.push(`${item.label}: ${item.reasons[0]}`);
+    }
+  }
+
+  const monthlyImpactMinor: Record<string, number> = {};
+  for (const event of planEvents) {
+    if (event.amountMinor >= 0) continue;
+    const key = monthKey(event.expectedAt);
+    monthlyImpactMinor[key] = (monthlyImpactMinor[key] ?? 0) + -event.amountMinor;
+  }
+
+  const settlementDates = planEvents.map((event) => event.expectedAt).sort();
+
+  return {
+    totalCostMinor: input.items.reduce((total, item) => total + item.option.totalCostMinor, 0),
+    items,
+    safeToSpendBeforeMinor: before.safeToSpendMinor,
+    safeToSpendAfterMinor: after.safeToSpendMinor,
+    minimumBalanceBeforeMinor: before.minimumBalanceMinor,
+    minimumBalanceBeforeDate: before.minimumBalanceDate,
+    minimumBalanceAfterMinor: after.minimumBalanceMinor,
+    minimumBalanceAfterDate: after.minimumBalanceDate,
+    hardReserveViolated: after.hardReserveViolated,
+    softReserveImpacts: evaluateSoftReserves(after.minimumBalanceMinor, softReserves),
+    cards,
+    monthlyImpactMinor,
+    lastPaymentDate: settlementDates.at(-1),
+    feasible: rejections.length === 0,
+    rejections,
+    reasons,
+    forecastAfter: after.forecast,
+  };
+}

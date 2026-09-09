@@ -38,6 +38,7 @@ import {
   createPurchasePlanSchema,
   reconcileBillingCycleSchema,
   registerCardPurchaseSchema,
+  selectPaymentOptionSchema,
   updateBillingCycleSchema,
   updateCreditCardSchema,
   updateFinancialReserveSchema,
@@ -53,6 +54,7 @@ import {
   type CreatePurchasePlanInput,
   type ReconcileBillingCycleInput,
   type RegisterCardPurchaseInput,
+  type SelectPaymentOptionInput,
   type UpdateBillingCycleInput,
   type UpdateCreditCardInput,
   type UpdateFinancialReserveInput,
@@ -843,6 +845,11 @@ export async function createPaymentOption(input: CreatePaymentOptionInput) {
   const currency = item.purchasePlan.currencyCode;
   if (data.cardId) await loadOwnedCreditCard(user.id, data.cardId);
 
+  const existingOptions = await db.query.paymentOptions.findMany({
+    where: eq(paymentOptions.purchaseItemId, item.id),
+    columns: { id: true },
+  });
+
   const [option] = await db
     .insert(paymentOptions)
     .values({
@@ -856,6 +863,15 @@ export async function createPaymentOption(input: CreatePaymentOptionInput) {
       firstPaymentDate: data.firstPaymentDate ?? null,
     })
     .returning();
+
+  // With nine items to configure, the item's only option is the obvious
+  // choice — auto-selecting it skips a click that has only one right answer.
+  if (existingOptions.length === 0) {
+    await db
+      .update(purchaseItems)
+      .set({ selectedPaymentOptionId: option!.id })
+      .where(eq(purchaseItems.id, item.id));
+  }
 
   await logAudit({
     userId: user.id,
@@ -910,13 +926,48 @@ export async function updatePaymentOption(optionId: string, input: UpdatePayment
 
 export async function deletePaymentOption(optionId: string) {
   const user = await requireUser();
-  await loadOwnedPaymentOption(user.id, optionId);
+  const existing = await loadOwnedPaymentOption(user.id, optionId);
   await db.delete(paymentOptions).where(eq(paymentOptions.id, optionId));
+  // selectedPaymentOptionId is a soft reference (no FK, no cascade) — clear it
+  // ourselves so a deleted option never lingers as an item's "chosen" one.
+  if (existing.purchaseItem.selectedPaymentOptionId === optionId) {
+    await db
+      .update(purchaseItems)
+      .set({ selectedPaymentOptionId: null })
+      .where(eq(purchaseItems.id, existing.purchaseItemId));
+  }
   await logAudit({
     userId: user.id,
     action: "payment_option.deleted",
     entityType: "payment_option",
     entityId: optionId,
+  });
+  revalidateFinance();
+}
+
+export async function selectPaymentOption(itemId: string, input: SelectPaymentOptionInput) {
+  const user = await requireUser();
+  const data = selectPaymentOptionSchema.parse(input);
+  const item = await loadOwnedPurchaseItem(user.id, itemId);
+
+  if (data.paymentOptionId) {
+    const option = await loadOwnedPaymentOption(user.id, data.paymentOptionId);
+    if (option.purchaseItemId !== item.id) {
+      throw new ApiError(404, "not_found", "Payment option not found.");
+    }
+  }
+
+  await db
+    .update(purchaseItems)
+    .set({ selectedPaymentOptionId: data.paymentOptionId })
+    .where(eq(purchaseItems.id, item.id));
+
+  await logAudit({
+    userId: user.id,
+    action: "purchase_item.payment_option_selected",
+    entityType: "purchase_item",
+    entityId: item.id,
+    data: { paymentOptionId: data.paymentOptionId },
   });
   revalidateFinance();
 }

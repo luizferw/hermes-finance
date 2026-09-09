@@ -182,6 +182,26 @@ export function TransactionsClient({
     setSelected(new Set());
   }
 
+  const [categoryBusyId, setCategoryBusyId] = React.useState<string | null>(null);
+
+  /**
+   * Recategorizing is the one edit worth doing without leaving the table — it
+   * is what a review pass is made of. Every other field still opens the drawer.
+   */
+  function setCategory(id: string, categoryId: string | null) {
+    setCategoryBusyId(id);
+    void (async () => {
+      try {
+        await updateTransaction(id, { categoryId });
+        await refetch();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not change the category");
+      } finally {
+        setCategoryBusyId(null);
+      }
+    })();
+  }
+
   function exportSelected() {
     const rows = items.filter((i) => selected.has(i.id));
     if (rows.length === 0) return;
@@ -438,10 +458,27 @@ export function TransactionsClient({
                     <span className="font-amount text-xs text-muted-foreground">
                       {formatDateCompact(tx.date)}
                     </span>
-                    <CategoryBadge
-                      category={tx.category}
-                      className="px-1.5 py-0 text-[10px]"
-                    />
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <CategoryPicker
+                        categories={categories}
+                        value={tx.category?.id}
+                        align="start"
+                        onSelect={(categoryId) => setCategory(tx.id, categoryId)}
+                        trigger={
+                          <button
+                            type="button"
+                            disabled={categoryBusyId === tx.id}
+                            aria-label={`Change the category of ${tx.description}`}
+                            className="rounded-md outline-none disabled:opacity-50"
+                          >
+                            <CategoryBadge
+                              category={tx.category}
+                              className="px-1.5 py-0 text-[10px]"
+                            />
+                          </button>
+                        }
+                      />
+                    </span>
                   </div>
                   {tx.transactionTags.length > 0 && (
                     <span className="mt-0.5 hidden gap-1 md:flex">
@@ -457,8 +494,26 @@ export function TransactionsClient({
                     </span>
                   )}
                 </div>
-                <span className="hidden w-36 md:block">
-                  <CategoryBadge category={tx.category} />
+                <span
+                  className="hidden w-36 md:block"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <CategoryPicker
+                    categories={categories}
+                    value={tx.category?.id}
+                    align="start"
+                    onSelect={(categoryId) => setCategory(tx.id, categoryId)}
+                    trigger={
+                      <button
+                        type="button"
+                        disabled={categoryBusyId === tx.id}
+                        aria-label={`Change the category of ${tx.description}`}
+                        className="rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-50"
+                      >
+                        <CategoryBadge category={tx.category} />
+                      </button>
+                    }
+                  />
                 </span>
                 <span className="hidden w-28 truncate text-xs text-muted-foreground md:block">
                   {tx.account?.name}

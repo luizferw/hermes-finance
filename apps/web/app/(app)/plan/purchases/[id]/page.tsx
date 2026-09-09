@@ -1,12 +1,22 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { CheckmarkCircle02Icon, InformationCircleIcon } from "@hugeicons/core-free-icons";
+import {
+  Alert02Icon,
+  CheckmarkCircle02Icon,
+  InformationCircleIcon,
+} from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
-import { getPurchasePlan, listCreditCards } from "@/modules/finance/queries";
+import {
+  buildUserForecastDetailed,
+  getPurchasePlan,
+  getPurchasePlanSimulation,
+  listCreditCards,
+} from "@/modules/finance/queries";
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
 import { Badge } from "@/components/ui/badge";
+import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
 import { cn } from "@/lib/utils";
 import { PurchaseItemActions } from "../item-actions";
 import { NewPurchaseItemDialog } from "./new-item-dialog";
@@ -15,6 +25,9 @@ import { PurchasePlanActions } from "../plan-actions";
 import { PlanTotalsLine } from "../plan-totals";
 
 export const metadata: Metadata = { title: "Payment options" };
+
+/** Matches the default horizon `getPurchasePlanSimulation` uses internally. */
+const PLAN_HORIZON_DAYS = 365;
 
 const PRIORITY_LABEL: Record<string, string> = {
   must_have: "Must have",
@@ -97,12 +110,38 @@ export default async function PurchasePlanDetailPage({
   if (!plan) notFound();
   const cardOptions = creditCards.map((card) => ({ id: card.id, name: card.name }));
 
-  const comparisons = await Promise.all(
-    plan.items.map(async (item) => ({
-      item,
-      result: await compareStoredPaymentOptions(user.id, item.id),
-    })),
+  const [comparisons, planSimulationResult, baseline] = await Promise.all([
+    Promise.all(
+      plan.items.map(async (item) => ({
+        item,
+        result: await compareStoredPaymentOptions(user.id, item.id),
+      })),
+    ),
+    getPurchasePlanSimulation(user.id, plan.id),
+    buildUserForecastDetailed(user.id, PLAN_HORIZON_DAYS),
+  ]);
+
+  const planSimulation = planSimulationResult?.simulation;
+  const unconfiguredItems = planSimulationResult?.unconfiguredItems ?? [];
+
+  // Joined on the date, not the position — see the same reasoning that used
+  // to live on the standalone /plan/simulate screen: two forecasts built by
+  // separate calls each resolve "today" on their own, so a render across
+  // midnight would shift one series against the other. Days without a
+  // counterpart are dropped rather than defaulted.
+  const baselineByDate = new Map(
+    baseline.forecast.days.map((day) => [day.date, day.closingBalanceMinor]),
   );
+  const planChartData = planSimulation
+    ? planSimulation.forecastAfter.days.flatMap((day) => {
+        const beforeMinor = baselineByDate.get(day.date);
+        if (beforeMinor === undefined) return [];
+        return [{ date: day.date, afterMinor: day.closingBalanceMinor, beforeMinor }];
+      })
+    : [];
+  const monthlyEntries = planSimulation
+    ? Object.entries(planSimulation.monthlyImpactMinor).sort(([a], [b]) => a.localeCompare(b))
+    : [];
 
   return (
     <div className="space-y-8">
@@ -142,6 +181,122 @@ export default async function PurchasePlanDetailPage({
           />
         </div>
       </div>
+
+      {unconfiguredItems.length > 0 && (
+        <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-warning-foreground">
+          <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-4 shrink-0" />
+          <p>
+            {unconfiguredItems.length} item{unconfiguredItems.length > 1 ? "s" : ""} still need
+            {unconfiguredItems.length > 1 ? "" : "s"} a payment option chosen before the
+            plan&apos;s verdict below can account for {unconfiguredItems.length > 1 ? "them" : "it"}:{" "}
+            {unconfiguredItems.map((item) => item.name).join(", ")}.
+          </p>
+        </div>
+      )}
+
+      {planSimulation && (
+        <section className="glass-panel space-y-5 rounded-2xl p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <HugeiconsIcon
+                icon={planSimulation.feasible ? CheckmarkCircle02Icon : Alert02Icon}
+                className={cn("size-5", planSimulation.feasible ? "text-success" : "text-destructive")}
+              />
+              <h3 className="text-sm font-semibold">
+                {planSimulation.feasible
+                  ? plan.targetDate
+                    ? `Fits, all of it, by ${formatDate(plan.targetDate)}`
+                    : "Fits, all of it"
+                  : "Does not fit as configured"}
+              </h3>
+            </div>
+            <span className="font-amount text-sm tabular-nums text-muted-foreground">
+              {formatMoney(planSimulation.totalCostMinor, plan.currencyCode)} total
+            </span>
+          </div>
+
+          {!planSimulation.feasible && (
+            <div className="flex flex-wrap gap-1.5">
+              {planSimulation.rejections.map((code) => (
+                <Badge key={code} variant="destructive" className="text-[10px]">
+                  {REJECTION_LABEL[code] ?? code}
+                </Badge>
+              ))}
+            </div>
+          )}
+          {planSimulation.reasons.length > 0 && (
+            <ul className="space-y-1 text-xs text-muted-foreground">
+              {planSimulation.reasons.map((reason, index) => (
+                <li key={index}>{reason}</li>
+              ))}
+            </ul>
+          )}
+
+          <div className="grid gap-6 sm:grid-cols-2">
+            <BeforeAfter
+              label="Minimum balance"
+              beforeMinor={planSimulation.minimumBalanceBeforeMinor}
+              afterMinor={planSimulation.minimumBalanceAfterMinor}
+              note={`on ${formatDate(planSimulation.minimumBalanceAfterDate)}`}
+              currencyCode={plan.currencyCode}
+            />
+            <BeforeAfter
+              label="Safe to spend"
+              beforeMinor={planSimulation.safeToSpendBeforeMinor}
+              afterMinor={planSimulation.safeToSpendAfterMinor}
+              currencyCode={plan.currencyCode}
+            />
+          </div>
+
+          <div>
+            <span className="micro-label">Balance, vs without this plan</span>
+            <div className="mt-3">
+              <SimulationBalanceChart data={planChartData} currencyCode={plan.currencyCode} />
+            </div>
+          </div>
+
+          {monthlyEntries.length > 0 && (
+            <div>
+              <span className="micro-label">Cash the plan adds, by month</span>
+              <ul className="mt-2 divide-y divide-dashed">
+                {monthlyEntries.map(([month, amountMinor]) => (
+                  <li key={month} className="flex items-center justify-between py-1.5 text-xs first:pt-0 last:pb-0">
+                    <span className="text-muted-foreground">{month}</span>
+                    <span className="font-amount tabular-nums">
+                      {formatMoney(amountMinor, plan.currencyCode)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {planSimulation.cards.length > 0 && (
+            <div>
+              <span className="micro-label">Card load</span>
+              <ul className="mt-2 divide-y divide-dashed">
+                {planSimulation.cards.map((card) => (
+                  <li key={card.cardId} className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0">
+                    <span>{card.label}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="font-amount tabular-nums text-muted-foreground">
+                        {formatMoney(card.committedMinor + card.planChargedMinor, plan.currencyCode)}
+                        {" / "}
+                        {formatMoney(card.creditLimitMinor, plan.currencyCode)}
+                      </span>
+                      {card.exceededMinor > 0 && (
+                        <Badge variant="destructive" className="text-[10px]">
+                          +{formatMoney(card.exceededMinor, plan.currencyCode)} over
+                        </Badge>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
 
       {comparisons.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
@@ -201,6 +356,7 @@ export default async function PurchasePlanDetailPage({
                   firstPaymentDate: option.firstPaymentDate,
                 }))}
                 cards={cardOptions}
+                selectedPaymentOptionId={item.selectedPaymentOptionId}
               />
 
               {!comparison || comparison.status !== "OK" ? (
@@ -313,6 +469,36 @@ export default async function PurchasePlanDetailPage({
           );
         })
       )}
+    </div>
+  );
+}
+
+function BeforeAfter({
+  label,
+  beforeMinor,
+  afterMinor,
+  note,
+  currencyCode,
+}: {
+  label: string;
+  beforeMinor: number;
+  afterMinor: number;
+  note?: string;
+  currencyCode: string;
+}) {
+  return (
+    <div>
+      <dt className="micro-label">{label}</dt>
+      <dd className="mt-1.5 flex items-baseline gap-2">
+        <span className="font-amount text-sm tabular-nums text-muted-foreground line-through decoration-muted-foreground/40">
+          {formatMoney(beforeMinor, currencyCode)}
+        </span>
+        <span className="text-muted-foreground">→</span>
+        <span className="font-amount text-lg font-medium tabular-nums">
+          {formatMoney(afterMinor, currencyCode)}
+        </span>
+      </dd>
+      {note && <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>}
     </div>
   );
 }

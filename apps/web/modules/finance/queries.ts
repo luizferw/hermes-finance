@@ -30,7 +30,8 @@ import {
   type RecurrenceInterval,
   type RecurrenceRule,
 } from "@hermes-finance/forecast";
-import { calculateSafeToSpend } from "@hermes-finance/planning";
+import { calculateSafeToSpend, simulatePurchasePlan, type PlanItemOption } from "@hermes-finance/planning";
+import { toEnginePaymentOption } from "./simulation";
 
 const CONFIDENCE: Record<string, Confidence> = {
   actual: "ACTUAL",
@@ -743,6 +744,94 @@ export async function getPurchasePlan(userId: string, id: string) {
     with: { items: { with: { paymentOptions: true, simulations: true } } },
   });
   return plan ? { ...plan, ...totalsFor(plan.items, plan.budgetMinor) } : undefined;
+}
+
+/**
+ * Whether the whole plan — not one item in isolation — fits by its target
+ * date. Only items still ahead (not cancelled, not already purchased) count,
+ * and only the ones with a settled payment choice: an item's chosen option is
+ * its `selectedPaymentOptionId`, falling back to its only option when it has
+ * exactly one. An item with no chosen option is left out of the simulation
+ * and reported back separately — inventing a payment for it would answer a
+ * question the user never configured.
+ */
+export async function getPurchasePlanSimulation(userId: string, planId: string) {
+  const plan = await db.query.purchasePlans.findFirst({
+    where: and(eq(purchasePlans.id, planId), eq(purchasePlans.userId, userId)),
+    with: { items: { with: { paymentOptions: true } } },
+  });
+  if (!plan) return undefined;
+
+  const active = plan.items.filter((item) => item.status !== "cancelled" && item.status !== "purchased");
+
+  const unconfiguredItems: Array<{ id: string; name: string }> = [];
+  const resolved: Array<{
+    item: (typeof active)[number];
+    option: (typeof active)[number]["paymentOptions"][number];
+  }> = [];
+  for (const item of active) {
+    const chosen =
+      (item.selectedPaymentOptionId
+        ? item.paymentOptions.find((option) => option.id === item.selectedPaymentOptionId)
+        : undefined) ?? (item.paymentOptions.length === 1 ? item.paymentOptions[0] : undefined);
+    if (!chosen) {
+      unconfiguredItems.push({ id: item.id, name: item.name });
+      continue;
+    }
+    resolved.push({ item, option: chosen });
+  }
+
+  if (resolved.length === 0) {
+    return { plan, simulation: undefined, unconfiguredItems };
+  }
+
+  const horizonDays = 365;
+  const [{ forecast }, hardReserveMinor, softReserves] = await Promise.all([
+    buildUserForecastDetailed(userId, horizonDays),
+    getHardReserveMinor(userId),
+    getSoftReserves(userId),
+  ]);
+
+  const items: PlanItemOption[] = await Promise.all(
+    resolved.map(async ({ item, option }) => ({
+      itemId: item.id,
+      label: item.name,
+      // toEnginePaymentOption keys cash events off `option.id`, and every
+      // resolved item here carries a distinct payment_options row — so
+      // logicalKeys are unique across the plan without extra namespacing.
+      option: await toEnginePaymentOption(userId, {
+        id: option.id,
+        label: item.name,
+        method: option.paymentMethod,
+        amountMinor: option.cashPriceMinor ?? option.totalCostMinor,
+        cardId: option.cardId,
+        installments: option.installments,
+        installmentAmountMinor: option.installmentAmountMinor,
+        purchaseDate: item.earliestPurchaseDate,
+        firstPaymentDate: option.firstPaymentDate,
+      }),
+      deadline: item.deadline ?? undefined,
+    })),
+  );
+
+  const simulation = simulatePurchasePlan({
+    forecastInput: {
+      asOf: forecast.asOf,
+      horizonEnd: forecast.horizonEnd,
+      balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
+      events: forecast.events,
+    },
+    hardReserveMinor,
+    softReserves: softReserves.map((reserve) => ({
+      id: reserve.id,
+      name: reserve.name,
+      amountMinor: reserve.amountMinor,
+    })),
+    targetDate: plan.targetDate ?? undefined,
+    items,
+  });
+
+  return { plan, simulation, unconfiguredItems };
 }
 
 /**

@@ -78,6 +78,13 @@
       "when": 1788914120101,
       "tag": "0010_glorious_king_cobra",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788960813340,
+      "tag": "0011_crazy_sleepwalker",
+      "breakpoints": true
     }
   ]
 }
