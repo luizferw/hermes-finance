@@ -1395,7 +1395,7 @@ const writeTools: WriteTool[] = [
         fields: [
           { label: "When", value: conditionLabels.map((c) => c.label).join(args.matchAll ? " AND " : " OR ") },
           { label: "Then", value: actionLabels.map((a) => a.label).join(", ") },
-          { label: "Matches now", value: `${preview.matchedCount} of ${preview.scannedCount} recent` },
+          { label: "Matches now", value: `${preview.matchedCount} of ${preview.scannedCount}` },
         ],
         affectedCount: preview.matchedCount,
         warning: preview.matchedCount > 50 ? "This rule matches a large number of transactions." : undefined,

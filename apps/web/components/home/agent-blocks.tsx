@@ -466,7 +466,7 @@ function Block({
           </dl>
           <p className="mt-3 text-sm">
             <span className="font-amount font-medium tabular-nums">{d.matchedCount}</span>
-            <span className="text-muted-foreground"> of {d.scannedCount} recent transactions would match.</span>
+            <span className="text-muted-foreground"> of {d.scannedCount} transactions would match.</span>
           </p>
           {d.sample.length > 0 && (
             <ul className="mt-2 space-y-1">
