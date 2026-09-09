@@ -25,5 +25,41 @@ export const updateBillSchema = createBillSchema.partial().extend({
   isActive: z.coerce.boolean().optional(),
 });
 
+/**
+ * Marking a bill paid can link an existing transaction, record a new one from
+ * a typed amount (variable bills — PRD §9.10 wants the real payment, not the
+ * estimate), or neither (fixed bills' plain one-click case). Never both an id
+ * and an amount: that would be ambiguous about which fact is the real one.
+ */
+export const markBillPaidFields = {
+  transactionId: z.string().uuid().optional(),
+  /** Major units — what was actually paid. */
+  amount: z.coerce.number().positive("Amount must be positive").optional(),
+  paymentDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use yyyy-MM-dd").optional(),
+};
+
+function refineMarkBillPaid<T extends { transactionId?: string; amount?: number }>(
+  v: T,
+) {
+  return !(v.transactionId && v.amount !== undefined);
+}
+
+/** Used by the "mark paid" dialog, which supplies `billId` separately. */
+export const markBillPaidFormSchema = z
+  .object(markBillPaidFields)
+  .refine(refineMarkBillPaid, {
+    message: "Pick a transaction or enter an amount, not both",
+    path: ["amount"],
+  });
+
+export const markBillPaidSchema = z
+  .object({ billId: z.string().uuid(), ...markBillPaidFields })
+  .refine(refineMarkBillPaid, {
+    message: "Pick a transaction or enter an amount, not both",
+    path: ["amount"],
+  });
+
 export type CreateBillInput = z.infer<typeof createBillSchema>;
 export type UpdateBillInput = z.infer<typeof updateBillSchema>;
+export type MarkBillPaidInput = z.infer<typeof markBillPaidSchema>;
+export type MarkBillPaidFormInput = z.infer<typeof markBillPaidFormSchema>;

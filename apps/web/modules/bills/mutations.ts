@@ -2,8 +2,13 @@
 
 import { and, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { bills, db, transactions } from "@kosh/db";
-import { advanceOnePeriod, majorToMinor, todayIso } from "@kosh/domain";
+import { bills, db, transactions, transactionSplits } from "@kosh/db";
+import {
+  advanceOnePeriod,
+  computeImportHash,
+  majorToMinor,
+  todayIso,
+} from "@kosh/domain";
 import { requireUser } from "@/lib/session";
 import { ApiError } from "@/modules/shared/api";
 import { logAudit } from "@/modules/shared/audit";
@@ -11,10 +16,14 @@ import {
   assertAccountsOwned,
   assertCategoriesOwned,
 } from "@/modules/shared/ownership";
+import { recomputeAccountBalances } from "@/modules/accounts/queries";
+import { listUnlinkedExpenseCandidates } from "@/modules/transactions/queries";
 import {
   createBillSchema,
+  markBillPaidSchema,
   updateBillSchema,
   type CreateBillInput,
+  type MarkBillPaidInput,
   type UpdateBillInput,
 } from "./validators";
 
@@ -101,50 +110,100 @@ export async function updateBill(billId: string, input: UpdateBillInput) {
 }
 
 /**
- * Mark the current cycle paid — optionally linking the paying transaction —
- * and advance the due date one period.
+ * Mark the current cycle paid and advance the due date one period. Three
+ * shapes of input, mutually exclusive (enforced by the schema):
+ *  - `transactionId` — link an existing transaction; its amount is already a
+ *    fact on that row.
+ *  - `amount` (+ optional `paymentDate`) — for a variable bill where no
+ *    matching transaction exists yet: create the expense that records what
+ *    was actually paid, so the next forecast (PRD §9.10) reads real history
+ *    instead of the typed estimate.
+ *  - neither — today's plain one-click case, unchanged (fixed bills).
  */
-export async function markBillPaid(input: {
-  billId: string;
-  transactionId?: string;
-}) {
+export async function markBillPaid(input: MarkBillPaidInput) {
   const user = await requireUser();
+  const data = markBillPaidSchema.parse(input);
   const bill = await db.query.bills.findFirst({
-    where: and(eq(bills.id, input.billId), eq(bills.userId, user.id)),
+    where: and(eq(bills.id, data.billId), eq(bills.userId, user.id)),
   });
   if (!bill) throw new ApiError(404, "not_found", "Bill not found.");
 
   // Idempotency: re-marking paid with the same linked transaction is a no-op,
   // so a duplicate submit can't advance the due date twice.
-  if (
-    input.transactionId &&
-    bill.lastPaidTransactionId === input.transactionId
-  ) {
+  if (data.transactionId && bill.lastPaidTransactionId === data.transactionId) {
     return;
   }
 
-  if (input.transactionId) {
+  if (data.transactionId) {
     const tx = await db.query.transactions.findFirst({
       where: and(
-        eq(transactions.id, input.transactionId),
+        eq(transactions.id, data.transactionId),
         eq(transactions.userId, user.id),
       ),
     });
     if (!tx) throw new ApiError(404, "not_found", "Transaction not found.");
   }
 
+  if (data.amount !== undefined && !bill.accountId) {
+    throw new ApiError(
+      422,
+      "missing_account",
+      "This bill has no account, so a payment transaction can't be recorded for it.",
+    );
+  }
+
+  let createdTransactionId: string | null = null;
+
   await db.transaction(async (trx) => {
-    if (input.transactionId) {
+    if (data.transactionId) {
       await trx
         .update(transactions)
         .set({ billId: bill.id })
-        .where(eq(transactions.id, input.transactionId));
+        .where(eq(transactions.id, data.transactionId));
+    } else if (data.amount !== undefined) {
+      const accountId = bill.accountId!;
+      const date = data.paymentDate ?? todayIso();
+      const amountMinor = -majorToMinor(data.amount, bill.currencyCode);
+
+      const [created] = await trx
+        .insert(transactions)
+        .values({
+          userId: user.id,
+          accountId,
+          type: "expense",
+          date,
+          amountMinor,
+          currencyCode: bill.currencyCode,
+          description: bill.name,
+          categoryId: bill.categoryId,
+          billId: bill.id,
+          importHash: computeImportHash({
+            accountId,
+            date,
+            amountMinor,
+            description: bill.name,
+          }),
+        })
+        .returning();
+      createdTransactionId = created!.id;
+
+      await trx.insert(transactionSplits).values({
+        transactionId: created!.id,
+        categoryId: bill.categoryId,
+        amountMinor,
+        sortOrder: 0,
+      });
+
+      await recomputeAccountBalances([accountId], trx);
     }
+
     await trx
       .update(bills)
       .set({
-        lastPaidDate: todayIso(),
-        lastPaidTransactionId: input.transactionId ?? null,
+        // When the user says the payment happened on another day, that day is
+        // when the bill was paid — not the day they got around to recording it.
+        lastPaidDate: data.paymentDate ?? todayIso(),
+        lastPaidTransactionId: data.transactionId ?? createdTransactionId,
         nextDueDate: advanceOnePeriod(bill),
       })
       .where(eq(bills.id, bill.id));
@@ -155,9 +214,24 @@ export async function markBillPaid(input: {
     action: "bill.paid",
     entityType: "bill",
     entityId: bill.id,
-    data: { transactionId: input.transactionId ?? null },
+    data: {
+      transactionId: data.transactionId ?? createdTransactionId,
+      createdTransaction: createdTransactionId !== null,
+    },
   });
   revalidateBills();
+}
+
+/** Candidate transactions the "mark paid" dialog can offer to link instead of
+ * typing an amount — unlinked expenses on the bill's account. Session-bound
+ * wrapper around the `server-only` query so a client component can call it. */
+export async function listBillPaymentCandidates(billId: string, limit = 15) {
+  const user = await requireUser();
+  const bill = await db.query.bills.findFirst({
+    where: and(eq(bills.id, billId), eq(bills.userId, user.id)),
+  });
+  if (!bill) throw new ApiError(404, "not_found", "Bill not found.");
+  return listUnlinkedExpenseCandidates(user.id, bill.accountId, limit);
 }
 
 export async function deleteBill(billId: string) {

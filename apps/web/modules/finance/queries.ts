@@ -725,3 +725,60 @@ export async function listArchivedCreditCards(userId: string) {
     orderBy: [asc(creditCards.name)],
   });
 }
+
+/**
+ * Installments still ahead, grouped by the purchase that created them.
+ *
+ * These are shown alongside recurring transactions because that is how they
+ * behave from the outside — a fixed amount landing every month until a known
+ * end. They are not recurrences: the forecast already carries them through the
+ * card's statement projection (PRD R4), so nothing here feeds the engine a
+ * second time.
+ */
+export async function listOpenInstallmentPlans(userId: string) {
+  const cards = await db.query.creditCards.findMany({
+    where: eq(creditCards.userId, userId),
+    columns: { id: true, name: true, currencyCode: true },
+  });
+  if (cards.length === 0) return [];
+  const cardById = new Map(cards.map((card) => [card.id, card]));
+
+  const purchases = await db.query.creditCardPurchases.findMany({
+    where: inArray(
+      creditCardPurchases.creditCardId,
+      cards.map((card) => card.id),
+    ),
+    with: {
+      transaction: { columns: { description: true } },
+      installmentPlans: { with: { installments: true } },
+    },
+  });
+
+  return purchases
+    .flatMap((purchase) =>
+      purchase.installmentPlans.map((plan) => {
+        const remaining = plan.installments
+          .filter((one) => one.status === "projected" || one.status === "billed")
+          .sort((left, right) => left.expectedAt.localeCompare(right.expectedAt));
+        const next = remaining[0];
+        const card = cardById.get(purchase.creditCardId)!;
+        return {
+          id: plan.id,
+          cardId: purchase.creditCardId,
+          cardName: card.name,
+          currencyCode: card.currencyCode,
+          description: purchase.transaction.description,
+          merchant: purchase.merchant,
+          totalInstallments: plan.totalInstallments,
+          paidInstallments: plan.totalInstallments - remaining.length,
+          remainingCount: remaining.length,
+          nextAmountMinor: next?.amountMinor ?? 0,
+          nextExpectedAt: next?.expectedAt ?? null,
+          lastExpectedAt: remaining[remaining.length - 1]?.expectedAt ?? null,
+          remainingTotalMinor: remaining.reduce((total, one) => total + one.amountMinor, 0),
+        };
+      }),
+    )
+    .filter((plan) => plan.remainingCount > 0)
+    .sort((left, right) => (left.nextExpectedAt ?? "").localeCompare(right.nextExpectedAt ?? ""));
+}

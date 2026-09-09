@@ -16,7 +16,12 @@ import {
 } from "@/components/ui/tooltip";
 
 interface PageHeaderProps {
-  title: string;
+  /**
+   * The breadcrumb's leaf. Omit it inside a layout shared by several routes:
+   * a hardcoded title there would name the section on every child page, and
+   * the nav already knows which leaf the current path is.
+   */
+  title?: string;
   description?: string;
   /** Right-aligned actions (buttons, filters). */
   children?: React.ReactNode;
@@ -36,6 +41,7 @@ export function PageHeader({ title, description, children }: PageHeaderProps) {
   const pathname = usePathname();
   const { sectionLabel, item } = findNavLocation(pathname);
   const atRoot = item?.href === "/overview";
+  const leaf = title ?? item?.title ?? "";
 
   return (
     <header className="sticky top-0 z-20 border-b border-border/70 bg-background">
@@ -70,7 +76,7 @@ export function PageHeader({ title, description, children }: PageHeaderProps) {
               className="h-4 w-[3px] shrink-0 rounded-full bg-primary"
             />
             <h1 className="min-w-0 shrink truncate text-[0.9375rem] leading-none font-semibold tracking-[-0.01em] text-foreground">
-              {title}
+              {leaf}
             </h1>
           </span>
 

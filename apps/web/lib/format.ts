@@ -56,6 +56,7 @@ const DEFAULT_LOCALE = process.env.NEXT_PUBLIC_KOSH_LOCALE || "en-IN";
 // function body) or once per invocation.
 const dateFormatCache = new Map<string, Intl.DateTimeFormat>();
 const dateFormatShortCache = new Map<string, Intl.DateTimeFormat>();
+const dateFormatCompactCache = new Map<string, Intl.DateTimeFormat>();
 const monthFormatCache = new Map<string, Intl.DateTimeFormat>();
 
 function getDateFormat(locale: string): Intl.DateTimeFormat {
@@ -83,6 +84,19 @@ function getDateFormatShort(locale: string): Intl.DateTimeFormat {
   return format;
 }
 
+function getDateFormatCompact(locale: string): Intl.DateTimeFormat {
+  let format = dateFormatCompactCache.get(locale);
+  if (!format) {
+    format = new Intl.DateTimeFormat(locale, {
+      day: "2-digit",
+      month: "short",
+      year: "2-digit",
+    });
+    dateFormatCompactCache.set(locale, format);
+  }
+  return format;
+}
+
 function getMonthFormat(locale: string): Intl.DateTimeFormat {
   let format = monthFormatCache.get(locale);
   if (!format) {
@@ -103,6 +117,15 @@ export function formatDate(iso: string, locale: string = DEFAULT_LOCALE): string
 /** "05 Jun" for dense tables. */
 export function formatDateShort(iso: string, locale: string = DEFAULT_LOCALE): string {
   return getDateFormatShort(locale).format(fromIsoDate(iso));
+}
+
+/**
+ * "05 Jun 26" — for a dense table that still spans years. Without the year, a
+ * row from a past year reads as this year's, which is worse than the two
+ * characters it costs.
+ */
+export function formatDateCompact(iso: string, locale: string = DEFAULT_LOCALE): string {
+  return getDateFormatCompact(locale).format(fromIsoDate(iso));
 }
 
 /** "Jun 2026" from "2026-06" or a full ISO date. */

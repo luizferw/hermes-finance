@@ -21,6 +21,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { CategoryBadge } from "@/components/transactions/category-badge";
 import { EditBillDialog } from "./edit-bill-dialog";
+import { MarkBillPaidDialog } from "./mark-bill-paid-dialog";
 
 export interface BillRow {
   id: string;
@@ -64,6 +65,17 @@ export function BillList({
   const [isPending, startTransition] = React.useTransition();
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [editingBill, setEditingBill] = React.useState<BillRow | null>(null);
+  const [payingBill, setPayingBill] = React.useState<BillRow | null>(null);
+
+  function markPaid(bill: BillRow) {
+    // A variable bill's amount isn't known upfront (PRD §9.10) — ask what was
+    // really paid instead of assuming the estimate. A fixed one stays one-click.
+    if (bill.amountStrategy === "variable") {
+      setPayingBill(bill);
+      return;
+    }
+    act(bill.id, () => markBillPaid({ billId: bill.id }), `${bill.name} marked paid`);
+  }
 
   function act(billId: string, action: () => Promise<unknown>, message: string) {
     setBusyId(billId);
@@ -133,13 +145,7 @@ export function BillList({
                   variant="outline"
                   className="hidden h-7 text-xs sm:flex"
                   disabled={isPending && busyId === bill.id}
-                  onClick={() =>
-                    act(
-                      bill.id,
-                      () => markBillPaid({ billId: bill.id }),
-                      `${bill.name} marked paid`,
-                    )
-                  }
+                  onClick={() => markPaid(bill)}
                 >
                   {isPending && busyId === bill.id ? (
                     <Spinner className="size-3" />
@@ -159,13 +165,7 @@ export function BillList({
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem
                     className="sm:hidden"
-                    onClick={() =>
-                      act(
-                        bill.id,
-                        () => markBillPaid({ billId: bill.id }),
-                        `${bill.name} marked paid`,
-                      )
-                    }
+                    onClick={() => markPaid(bill)}
                   >
                     Mark paid
                   </DropdownMenuItem>
@@ -219,6 +219,15 @@ export function BillList({
           }}
           accounts={accounts}
           categories={categories}
+        />
+      )}
+      {payingBill && (
+        <MarkBillPaidDialog
+          bill={payingBill}
+          open={!!payingBill}
+          onOpenChange={(open) => {
+            if (!open) setPayingBill(null);
+          }}
         />
       )}
     </div>

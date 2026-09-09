@@ -19,7 +19,7 @@ import {
   deleteTransaction,
   updateTransaction,
 } from "@/modules/transactions/mutations";
-import { formatDate, formatDateShort } from "@/lib/format";
+import { formatDate, formatDateCompact } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Amount } from "@/components/transactions/amount";
@@ -389,7 +389,7 @@ export function TransactionsClient({
               }
               aria-label="Select page"
             />
-            <span className="micro-label w-20">Date</span>
+            <span className="micro-label w-24">Date</span>
             <span className="micro-label flex-1">Description</span>
             <span className="micro-label w-36">Category</span>
             <span className="micro-label w-28">Account</span>
@@ -421,8 +421,8 @@ export function TransactionsClient({
                     aria-label={`Select ${tx.description}`}
                   />
                 </span>
-                <span className="hidden w-20 font-amount text-xs text-muted-foreground md:block">
-                  {formatDateShort(tx.date)}
+                <span className="hidden w-24 font-amount text-xs text-muted-foreground md:block">
+                  {formatDateCompact(tx.date)}
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm">
@@ -436,7 +436,7 @@ export function TransactionsClient({
                   </p>
                   <div className="mt-0.5 flex items-center gap-2 md:hidden">
                     <span className="font-amount text-xs text-muted-foreground">
-                      {formatDateShort(tx.date)}
+                      {formatDateCompact(tx.date)}
                     </span>
                     <CategoryBadge
                       category={tx.category}
@@ -647,7 +647,7 @@ function TransactionDetailSheet({
                 <StatusBadge status={tx.status} />
                 <span>{formatDate(tx.date)}</span>
                 {tx.valueDate && tx.valueDate !== tx.date && (
-                  <span className="text-xs">value {formatDateShort(tx.valueDate)}</span>
+                  <span className="text-xs">value {formatDateCompact(tx.valueDate)}</span>
                 )}
               </SheetDescription>
             </SheetHeader>

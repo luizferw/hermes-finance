@@ -4,6 +4,7 @@ import { RepeatIcon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { listAccounts } from "@/modules/accounts/queries";
 import { listRecurring } from "@/modules/recurring/queries";
+import { listOpenInstallmentPlans } from "@/modules/finance/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
 import { getUserSettings } from "@/modules/settings/queries";
 import {
@@ -14,17 +15,19 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { NewRecurringDialog } from "./new-recurring-dialog";
+import { InstallmentList } from "./installment-list";
 import { RecurringList } from "./recurring-list";
 
 export const metadata: Metadata = { title: "Recurring" };
 
 export default async function RecurringPage() {
   const user = await requireUser();
-  const [items, accounts, categories, settings] = await Promise.all([
+  const [items, accounts, categories, settings, installmentPlans] = await Promise.all([
     listRecurring(user.id),
     listAccounts(user.id),
     listCategories(user.id),
     getUserSettings(user.id),
+    listOpenInstallmentPlans(user.id),
   ]);
 
   return (
@@ -89,6 +92,8 @@ export default async function RecurringPage() {
           }))}
         />
       )}
+
+      <InstallmentList plans={installmentPlans} />
     </div>
   );
 }
