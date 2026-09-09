@@ -32,9 +32,11 @@ import { cn } from "@/lib/utils";
 
 export function NewBudgetDialog({
   categories,
+  defaultCurrency,
   defaultOpen = false,
 }: {
   categories: CategoryOption[];
+  defaultCurrency: string;
   defaultOpen?: boolean;
 }) {
   const router = useRouter();
@@ -45,7 +47,7 @@ export function NewBudgetDialog({
       name: "",
       categoryIds: [] as string[],
       plannedAmount: undefined as unknown as number,
-      currencyCode: "INR",
+      currencyCode: defaultCurrency,
     },
   });
   const errors = form.formState.errors;

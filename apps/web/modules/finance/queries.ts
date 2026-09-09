@@ -362,6 +362,14 @@ export async function getHardReserveMinor(userId: string): Promise<number> {
   return reserves.reduce((total, reserve) => total + reserve.amountMinor, 0);
 }
 
+/** Every reserve the user has configured, active or not, for management UI. */
+export async function listFinancialReserves(userId: string) {
+  return db.query.financialReserves.findMany({
+    where: eq(financialReserves.userId, userId),
+    orderBy: [desc(financialReserves.isActive), asc(financialReserves.kind), asc(financialReserves.name)],
+  });
+}
+
 export async function getSoftReserves(userId: string) {
   return db.query.financialReserves.findMany({
     where: and(

@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/session";
 import { listAccounts } from "@/modules/accounts/queries";
 import { listRecurring } from "@/modules/recurring/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
+import { getUserSettings } from "@/modules/settings/queries";
 import {
   Empty,
   EmptyDescription,
@@ -19,10 +20,11 @@ export const metadata: Metadata = { title: "Recurring" };
 
 export default async function RecurringPage() {
   const user = await requireUser();
-  const [items, accounts, categories] = await Promise.all([
+  const [items, accounts, categories, settings] = await Promise.all([
     listRecurring(user.id),
     listAccounts(user.id),
     listCategories(user.id),
+    getUserSettings(user.id),
   ]);
 
   return (
@@ -43,6 +45,7 @@ export default async function RecurringPage() {
             name: c.name,
             color: c.color,
           }))}
+          defaultCurrency={settings.currencyCode}
         />
       </div>
 

@@ -3,8 +3,13 @@ import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney, formatMonth } from "@/lib/format";
 import { getCardStatement } from "@/modules/finance/queries";
+import { listAccounts } from "@/modules/accounts/queries";
+import { listCategories } from "@/modules/taxonomy/queries";
+import { todayIso } from "@kosh/domain";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { NewPurchaseDialog } from "./new-purchase-dialog";
+import { EditCardDialog } from "./edit-card-dialog";
 
 export const metadata: Metadata = { title: "Card statement" };
 
@@ -22,19 +27,48 @@ export default async function CardDetailPage({
 }) {
   const user = await requireUser();
   const { id } = await params;
-  const statement = await getCardStatement(user.id, id);
+  const [statement, categories, accounts] = await Promise.all([
+    getCardStatement(user.id, id),
+    listCategories(user.id),
+    listAccounts(user.id),
+  ]);
   if (!statement) notFound();
 
   const { card, cycles } = statement;
+  const paymentAccounts = accounts
+    .filter((account) => ["asset", "cash", "wallet"].includes(account.type))
+    .map((account) => ({ id: account.id, name: account.name }));
 
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-lg font-semibold tracking-tight">{card.name}</h2>
-        <p className="text-sm text-muted-foreground">
-          {card.issuer ? `${card.issuer} · ` : ""}
-          Limit {formatMoney(card.creditLimitMinor, card.currencyCode)}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold tracking-tight">{card.name}</h2>
+          <p className="text-sm text-muted-foreground">
+            {card.issuer ? `${card.issuer} · ` : ""}
+            Limit {formatMoney(card.creditLimitMinor, card.currencyCode)}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <EditCardDialog
+            card={{
+              id: card.id,
+              name: card.name,
+              issuer: card.issuer,
+              currencyCode: card.currencyCode,
+              creditLimitMinor: card.creditLimitMinor,
+              defaultClosingDay: card.defaultClosingDay,
+              defaultDueDay: card.defaultDueDay,
+              paymentAccountId: card.paymentAccountId,
+            }}
+            paymentAccounts={paymentAccounts}
+          />
+          <NewPurchaseDialog
+            creditCardId={card.id}
+            categories={categories.map((category) => ({ id: category.id, name: category.name }))}
+            todayIso={todayIso()}
+          />
+        </div>
       </div>
 
       {cycles.length === 0 ? (

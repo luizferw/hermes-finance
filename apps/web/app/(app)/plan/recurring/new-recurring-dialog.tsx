@@ -42,9 +42,11 @@ const INTERVALS = [
 export function NewRecurringDialog({
   accounts,
   categories,
+  defaultCurrency,
 }: {
   accounts: Array<{ id: string; name: string }>;
   categories: CategoryOption[];
+  defaultCurrency: string;
 }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
@@ -57,7 +59,7 @@ export function NewRecurringDialog({
       transferAccountId: null,
       categoryId: null,
       amount: undefined as unknown as number,
-      currencyCode: "INR",
+      currencyCode: defaultCurrency,
       description: "",
       interval: "monthly",
       nextRunDate: todayIso(),

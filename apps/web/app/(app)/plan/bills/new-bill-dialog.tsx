@@ -42,9 +42,11 @@ const RECURRENCES = [
 export function NewBillDialog({
   accounts,
   categories,
+  defaultCurrency,
 }: {
   accounts: Array<{ id: string; name: string }>;
   categories: CategoryOption[];
+  defaultCurrency: string;
 }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
@@ -53,7 +55,7 @@ export function NewBillDialog({
     defaultValues: {
       name: "",
       expectedAmount: undefined as unknown as number,
-      currencyCode: "INR",
+      currencyCode: defaultCurrency,
       recurrence: "monthly",
       nextDueDate: todayIso(),
       accountId: null,

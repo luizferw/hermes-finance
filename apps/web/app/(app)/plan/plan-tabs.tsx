@@ -13,6 +13,7 @@ const TABS = [
   { href: "/plan/commitments", label: "Commitments" },
   { href: "/plan/cards", label: "Cards" },
   { href: "/plan/purchases", label: "Purchases" },
+  { href: "/plan/reserves", label: "Reserves" },
 ];
 
 export function PlanTabs() {

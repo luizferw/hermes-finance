@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import { budgetCategories, budgetPeriods, budgets, db } from "@kosh/db";
 import { majorToMinor, monthRange, todayIso } from "@kosh/domain";
 import { requireUser } from "@/lib/session";
+import { getUserSettings } from "@/modules/settings/queries";
 import { ApiError } from "@/modules/shared/api";
 import { logAudit } from "@/modules/shared/audit";
 import { assertCategoriesOwned } from "@/modules/shared/ownership";
@@ -74,7 +75,14 @@ export async function updateBudget(budgetId: string, input: UpdateBudgetInput) {
     }
     if (data.plannedAmount !== undefined) {
       const { start, end } = monthRange(todayIso());
-      const plannedAmountMinor = majorToMinor(data.plannedAmount, "INR");
+      // A budget's currency is set once at creation; editing its planned
+      // amount must never silently rewrite it to a hardcoded default. Reuse
+      // whatever the budget's own periods already record.
+      const existingPeriod = await trx.query.budgetPeriods.findFirst({
+        where: eq(budgetPeriods.budgetId, budgetId),
+      });
+      const currencyCode = existingPeriod?.currencyCode ?? (await getUserSettings(user.id)).currencyCode;
+      const plannedAmountMinor = majorToMinor(data.plannedAmount, currencyCode);
       await trx
         .insert(budgetPeriods)
         .values({
@@ -82,7 +90,7 @@ export async function updateBudget(budgetId: string, input: UpdateBudgetInput) {
           periodStart: start,
           periodEnd: end,
           plannedAmountMinor,
-          currencyCode: "INR",
+          currencyCode,
         })
         .onConflictDoUpdate({
           target: [budgetPeriods.budgetId, budgetPeriods.periodStart],

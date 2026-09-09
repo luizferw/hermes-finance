@@ -31,8 +31,10 @@ import { Spinner } from "@/components/ui/spinner";
 
 export function NewGoalDialog({
   accounts,
+  defaultCurrency,
 }: {
   accounts: Array<{ id: string; name: string }>;
+  defaultCurrency: string;
 }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
@@ -42,7 +44,7 @@ export function NewGoalDialog({
       name: "",
       targetAmount: undefined as unknown as number,
       currentAmount: 0,
-      currencyCode: "INR",
+      currencyCode: defaultCurrency,
       accountId: null,
       targetDate: null,
     },

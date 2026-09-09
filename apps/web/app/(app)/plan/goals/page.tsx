@@ -4,6 +4,7 @@ import { Target01Icon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { listAccounts } from "@/modules/accounts/queries";
 import { listGoals } from "@/modules/goals/queries";
+import { getUserSettings } from "@/modules/settings/queries";
 import {
   Empty,
   EmptyDescription,
@@ -18,9 +19,10 @@ export const metadata: Metadata = { title: "Goals" };
 
 export default async function GoalsPage() {
   const user = await requireUser();
-  const [goals, accounts] = await Promise.all([
+  const [goals, accounts, settings] = await Promise.all([
     listGoals(user.id),
     listAccounts(user.id),
+    getUserSettings(user.id),
   ]);
 
   return (
@@ -32,7 +34,10 @@ export default async function GoalsPage() {
             Track targets, deadlines, and manual contributions.
           </p>
         </div>
-        <NewGoalDialog accounts={accounts.map((a) => ({ id: a.id, name: a.name }))} />
+        <NewGoalDialog
+            accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+            defaultCurrency={settings.currencyCode}
+          />
       </div>
 
       {goals.length === 0 ? (

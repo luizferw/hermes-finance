@@ -11,6 +11,7 @@ import {
   PieChart01Icon,
   RepeatIcon,
   Settings01Icon,
+  Shield01Icon,
   ShoppingBag01Icon,
   Target01Icon,
   Wallet01Icon,
@@ -64,6 +65,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { title: "Commitments", href: "/plan/commitments", icon: Calendar03Icon },
       { title: "Cards", href: "/plan/cards", icon: CreditCardIcon },
       { title: "Purchases", href: "/plan/purchases", icon: ShoppingBag01Icon },
+      { title: "Reserves", href: "/plan/reserves", icon: Shield01Icon },
     ],
   },
   {

@@ -66,7 +66,13 @@ const TYPE_OPTIONS = [
   },
 ] as const;
 
-export function NewAccountDialog({ defaultOpen = false }: { defaultOpen?: boolean }) {
+export function NewAccountDialog({
+  defaultCurrency,
+  defaultOpen = false,
+}: {
+  defaultCurrency: string;
+  defaultOpen?: boolean;
+}) {
   const router = useRouter();
   const [open, setOpen] = React.useState(defaultOpen);
   const form = useForm({
@@ -74,7 +80,7 @@ export function NewAccountDialog({ defaultOpen = false }: { defaultOpen?: boolea
     defaultValues: {
       name: "",
       type: "asset",
-      currencyCode: "INR",
+      currencyCode: defaultCurrency,
       openingBalance: 0,
       openingBalanceDate: todayIso(),
       includeInNetWorth: true,

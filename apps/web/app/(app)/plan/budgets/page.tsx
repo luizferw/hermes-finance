@@ -4,6 +4,7 @@ import { PieChart01Icon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
+import { getUserSettings } from "@/modules/settings/queries";
 import { formatAbsAmount, formatMoney } from "@/lib/format";
 import { Card } from "@/components/ui/card";
 import {
@@ -26,14 +27,15 @@ export default async function BudgetsPage({
 }) {
   const user = await requireUser();
   const params = await searchParams;
-  const [budgets, categories] = await Promise.all([
+  const [budgets, categories, settings] = await Promise.all([
     listBudgetsWithProgress(user.id),
     listCategories(user.id),
+    getUserSettings(user.id),
   ]);
 
   const totalPlanned = budgets.reduce((acc, b) => acc + b.plannedMinor, 0);
   const totalSpent = budgets.reduce((acc, b) => acc + b.spentMinor, 0);
-  const currency = budgets[0]?.currencyCode ?? "INR";
+  const currency = budgets[0]?.currencyCode ?? settings.currencyCode;
 
   return (
     <div className="space-y-5">
@@ -59,6 +61,7 @@ export default async function BudgetsPage({
             name: c.name,
             color: c.color,
           }))}
+          defaultCurrency={settings.currencyCode}
           defaultOpen={params.new === "1"}
         />
       </div>

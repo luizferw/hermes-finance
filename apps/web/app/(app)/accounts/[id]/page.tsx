@@ -8,6 +8,9 @@ import {
   getAccountTransactions,
 } from "@/modules/accounts/queries";
 import { formatDate, formatDateShort, formatMoney } from "@/lib/format";
+import { todayIso } from "@kosh/domain";
+import { RecordBalanceDialog } from "./record-balance-dialog";
+import { EditAccountDialog } from "./edit-account-dialog";
 import { PageHeader } from "@/components/app-shell/page-header";
 import { Amount } from "@/components/transactions/amount";
 import { CategoryBadge } from "@/components/transactions/category-badge";
@@ -51,6 +54,18 @@ export default async function AccountDetailPage({
   return (
     <>
       <PageHeader title={account.name} description={TYPE_LABEL[account.type]}>
+        <EditAccountDialog
+          account={{
+            id: account.id,
+            name: account.name,
+            currencyCode: account.currencyCode,
+            institution: account.institution,
+            limitMinor: account.limitMinor,
+            includeInNetWorth: account.includeInNetWorth,
+            isArchived: account.isArchived,
+          }}
+        />
+        <RecordBalanceDialog accountId={account.id} todayIso={todayIso()} />
         <Button asChild variant="outline" size="sm" className="h-8">
           <Link href={`/transactions?accountId=${account.id}`}>
             All transactions

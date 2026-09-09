@@ -59,7 +59,7 @@ export default async function AccountsPage({
         title="Accounts"
         description={`Net worth uses ${currency}; foreign-currency accounts are listed but excluded from the total.`}
       >
-        <NewAccountDialog defaultOpen={params.new === "1"} />
+        <NewAccountDialog defaultCurrency={currency} defaultOpen={params.new === "1"} />
       </PageHeader>
 
       <main className="mx-auto w-full max-w-screen-2xl space-y-10 px-4 py-6 md:space-y-14 md:px-8 md:py-8">
@@ -93,7 +93,7 @@ export default async function AccountsPage({
                 history honest.
               </EmptyDescription>
             </EmptyHeader>
-            <NewAccountDialog />
+            <NewAccountDialog defaultCurrency={currency} />
           </Empty>
         ) : (
           <div
