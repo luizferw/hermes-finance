@@ -961,7 +961,19 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     const acceptable = verdicts.filter((verdict) => verdict.acceptable).sort(byPreference);
     const picked = acceptable[0];
 
-    const nearest = [...verdicts].sort(byPreference)[0]!;
+    // When nothing is acceptable, "least bad" must mean fewest walls hit, not
+    // just the highest trough. Two cards give near-identical troughs, so the
+    // trough alone let the fallback land on the card that is already over its
+    // limit while another had room — pointing at the wrong card in the one
+    // case where the pointing is all the user gets.
+    const brokenCount = (verdict: CandidateVerdict) =>
+      Number(verdict.breaksInstallmentCap) +
+      Number(verdict.breaksDeadline) +
+      Number(verdict.breaksCard) +
+      Number(verdict.breaksFloor);
+    const nearest = [...verdicts].sort(
+      (left, right) => brokenCount(left) - brokenCount(right) || byPreference(left, right),
+    )[0]!;
     if (!picked) {
       failed = true;
       if (!bestEffortTrough || nearest.minimumBalanceMinor < bestEffortTrough.minimumBalanceMinor) {

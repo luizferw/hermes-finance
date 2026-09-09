@@ -300,3 +300,33 @@ describe("recommendPurchasePlan", () => {
     expect(backward.choices).toEqual(forward.choices);
   });
 });
+
+describe("least-bad fallback", () => {
+  it("points at the card with room, not the one already over its limit", () => {
+    const full = { cardId: "full", label: "Maxed", creditLimitMinor: 50_000, committedMinor: 50_000 };
+    const roomy = { cardId: "roomy", label: "Spare", creditLimitMinor: 900_000, committedMinor: 0 };
+
+    const result = recommendPurchasePlan({
+      forecastInput: {
+        ...forecastInput,
+        events: [],
+        // No income, so nothing can clear the floor: every candidate fails,
+        // and all that is left is which failure to show.
+        balances: [{ accountId: "cash", amountMinor: 0, observedAt: "2026-09-07" }],
+      },
+      hardReserveMinor: 0,
+      items: [
+        item("crib", [
+          card("crib", 240_000, ["2026-10-10", "2026-11-10"], full),
+          card("crib", 240_000, ["2026-10-10", "2026-11-10"], roomy),
+        ]),
+      ],
+    });
+
+    const choice = result.choices[0]!;
+    expect(choice.fits).toBe(false);
+    // Both break the balance floor; only one also breaks a card limit.
+    expect(choice.cardLabel).toBe("Spare");
+    expect(choice.rejections).not.toContain("CREDIT_LIMIT_EXCEEDED");
+  });
+});
