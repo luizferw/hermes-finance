@@ -3,13 +3,14 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 import {
+  useFieldArray,
   useForm,
   Controller,
   type UseFormRegisterReturn,
 } from "react-hook-form";
 import { toast } from "sonner";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { PlusSignIcon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, PlusSignIcon } from "@hugeicons/core-free-icons";
 import { majorToMinor } from "@kosh/domain";
 import { createRule } from "@/modules/rules/mutations";
 import type {
@@ -60,11 +61,19 @@ const ACTION_OPTIONS = [
   { value: "mark_reviewed", label: "Mark reviewed" },
 ] as const;
 
+/** Mirrors `createRuleSchema.conditions.max(10)`. */
+const MAX_CONDITIONS = 10;
+
+interface ConditionRow {
+  field: RuleConditionInput["field"];
+  value: string;
+}
+
 interface RuleForm {
   name: string;
   description: string;
-  conditionField: RuleConditionInput["field"];
-  conditionValue: string;
+  conditions: ConditionRow[];
+  matchAll: boolean;
   actionType: RuleActionInput["type"];
   actionValue: string;
   runOnImport: boolean;
@@ -93,25 +102,24 @@ export function NewRuleDialog({
     defaultValues: {
       name: defaultContains ? `Categorize ${defaultContains}` : "",
       description: "",
-      conditionField: "description_contains",
-      conditionValue: defaultContains ?? "",
+      conditions: [
+        { field: "description_contains", value: defaultContains ?? "" },
+      ],
+      matchAll: true,
       actionType: defaultCategoryId ? "set_category" : "mark_reviewed",
       actionValue: defaultCategoryId ?? "",
       runOnImport: true,
     },
   });
-  const conditionField = form.watch("conditionField");
+  const conditions = useFieldArray({ control: form.control, name: "conditions" });
+  const conditionRows = form.watch("conditions");
   const actionType = form.watch("actionType");
 
-  function normalizedCondition(values: RuleForm): RuleConditionInput {
-    const value = values.conditionValue.trim();
-    const amountField =
-      values.conditionField === "amount_equals" ||
-      values.conditionField === "amount_greater_than" ||
-      values.conditionField === "amount_less_than";
+  function normalizedCondition(row: ConditionRow): RuleConditionInput {
+    const value = row.value.trim();
     return {
-      field: values.conditionField,
-      value: amountField
+      field: row.field,
+      value: row.field.startsWith("amount_")
         ? String(majorToMinor(Number(value), currencyCode))
         : value,
     };
@@ -132,8 +140,11 @@ export function NewRuleDialog({
       form.setError("name", { message: "Name is required" });
       return;
     }
-    if (!values.conditionValue.trim()) {
-      form.setError("conditionValue", { message: "Condition value is required" });
+    const blank = values.conditions.findIndex((c) => !c.value.trim());
+    if (blank !== -1) {
+      form.setError(`conditions.${blank}.value`, {
+        message: "Condition value is required",
+      });
       return;
     }
     if (values.actionType !== "mark_reviewed" && !values.actionValue.trim()) {
@@ -145,9 +156,9 @@ export function NewRuleDialog({
       await createRule({
         name: values.name.trim(),
         description: values.description.trim() || undefined,
-        matchAll: true,
+        matchAll: values.matchAll,
         runOnImport: values.runOnImport,
-        conditions: [normalizedCondition(values)],
+        conditions: values.conditions.map(normalizedCondition),
         actions: [normalizedAction(values)],
       });
       toast.success("Rule created");
@@ -171,7 +182,8 @@ export function NewRuleDialog({
         <DialogHeader>
           <DialogTitle>New automation rule</DialogTitle>
           <DialogDescription>
-            Match imported transactions and apply one cleanup action.
+            Match imported transactions on one or more conditions, then apply a
+            cleanup action.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} noValidate>
@@ -197,37 +209,102 @@ export function NewRuleDialog({
               />
             </Field>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Controller
-                control={form.control}
-                name="conditionField"
-                render={({ field }) => (
-                  <Field>
-                    <FieldLabel>When</FieldLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {CONDITION_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <FieldLabel>When</FieldLabel>
+                {conditions.fields.length > 1 && (
+                  <Controller
+                    control={form.control}
+                    name="matchAll"
+                    render={({ field }) => (
+                      <Select
+                        value={field.value ? "all" : "any"}
+                        onValueChange={(value) => field.onChange(value === "all")}
+                      >
+                        <SelectTrigger size="sm" className="w-[9.5rem]">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">Match all of these</SelectItem>
+                          <SelectItem value="any">Match any of these</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  />
                 )}
-              />
+              </div>
 
-              <ConditionValueField
-                field={conditionField}
-                accounts={accounts}
-                register={form.register("conditionValue")}
-                value={form.watch("conditionValue")}
-                onChange={(value) => form.setValue("conditionValue", value)}
-                error={form.formState.errors.conditionValue?.message}
-              />
+              {conditions.fields.map((row, index) => (
+                <div key={row.id} className="flex items-end gap-2">
+                  <div className="grid flex-1 gap-4 sm:grid-cols-2">
+                    <Controller
+                      control={form.control}
+                      name={`conditions.${index}.field`}
+                      render={({ field }) => (
+                        <Field>
+                          <Select
+                            value={field.value}
+                            onValueChange={(value) => {
+                              field.onChange(value);
+                              // Value shapes differ per field (uuid, enum, amount).
+                              form.setValue(`conditions.${index}.value`, "");
+                            }}
+                          >
+                            <SelectTrigger className="w-full">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {CONDITION_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </Field>
+                      )}
+                    />
+
+                    <ConditionValueField
+                      id={`rule-condition-value-${index}`}
+                      field={conditionRows[index]?.field ?? "description_contains"}
+                      accounts={accounts}
+                      register={form.register(`conditions.${index}.value`)}
+                      value={conditionRows[index]?.value ?? ""}
+                      onChange={(value) =>
+                        form.setValue(`conditions.${index}.value`, value)
+                      }
+                      error={
+                        form.formState.errors.conditions?.[index]?.value?.message
+                      }
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Remove condition ${index + 1}`}
+                    // A rule needs at least one condition to match anything.
+                    disabled={conditions.fields.length === 1}
+                    onClick={() => conditions.remove(index)}
+                  >
+                    <HugeiconsIcon icon={Cancel01Icon} />
+                  </Button>
+                </div>
+              ))}
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={conditions.fields.length >= MAX_CONDITIONS}
+                onClick={() =>
+                  conditions.append({ field: "description_contains", value: "" })
+                }
+              >
+                <HugeiconsIcon icon={PlusSignIcon} />
+                Add condition
+              </Button>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
@@ -304,6 +381,7 @@ export function NewRuleDialog({
 }
 
 function ConditionValueField({
+  id,
   field,
   accounts,
   value,
@@ -311,6 +389,7 @@ function ConditionValueField({
   register,
   error,
 }: {
+  id: string;
   field: RuleConditionInput["field"];
   accounts: Array<{ id: string; name: string }>;
   value: string;
@@ -321,7 +400,6 @@ function ConditionValueField({
   if (field === "account_is") {
     return (
       <Field data-invalid={!!error}>
-        <FieldLabel>Value</FieldLabel>
         <Select value={value} onValueChange={onChange}>
           <SelectTrigger className="w-full">
             <SelectValue placeholder="Pick account" />
@@ -342,7 +420,6 @@ function ConditionValueField({
   if (field === "transaction_type_is") {
     return (
       <Field data-invalid={!!error}>
-        <FieldLabel>Value</FieldLabel>
         <Select value={value} onValueChange={onChange}>
           <SelectTrigger className="w-full">
             <SelectValue placeholder="Pick type" />
@@ -360,9 +437,8 @@ function ConditionValueField({
 
   return (
     <Field data-invalid={!!error}>
-      <FieldLabel htmlFor="rule-condition-value">Value</FieldLabel>
       <Input
-        id="rule-condition-value"
+        id={id}
         type={field.startsWith("amount_") ? "number" : "text"}
         step="0.01"
         inputMode={field.startsWith("amount_") ? "decimal" : undefined}

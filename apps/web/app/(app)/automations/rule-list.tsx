@@ -22,6 +22,7 @@ export interface RuleRow {
   description: string | null;
   isActive: boolean;
   runOnImport: boolean;
+  matchAll: boolean;
   conditions: Array<{ field: string; value: string }>;
   actions: Array<{ type: string; value: string | null }>;
   lastRun: {
@@ -76,7 +77,11 @@ export function RuleList({ rules }: { rules: RuleRow[] }) {
                 </p>
               )}
               <p className="mt-1 truncate text-xs text-muted-foreground">
-                When {rule.conditions.map(formatCondition).join(" and ")} - then{" "}
+                When{" "}
+                {rule.conditions
+                  .map(formatCondition)
+                  .join(rule.matchAll ? " and " : " or ")}{" "}
+                - then{" "}
                 {rule.actions.map(formatAction).join(", ")}
               </p>
               {rule.lastRun && (

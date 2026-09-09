@@ -141,6 +141,7 @@ export default async function AutomationsPage({
                 description: rule.description,
                 isActive: rule.isActive,
                 runOnImport: rule.runOnImport,
+                matchAll: rule.matchAll,
                 conditions: rule.conditions.map((condition) => ({
                   field: condition.field,
                   value: condition.value,
