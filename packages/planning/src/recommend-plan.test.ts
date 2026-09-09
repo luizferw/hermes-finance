@@ -360,3 +360,53 @@ describe("cash preservation when troughs tie", () => {
     expect(result.choices[0]!.installments).toBe(6);
   });
 });
+
+describe("advisory balance floor", () => {
+  const broke = {
+    ...forecastInput,
+    events: [],
+    balances: [{ accountId: "cash", amountMinor: 10_000, observedAt: "2026-09-07" }],
+  };
+  const items = [
+    item("floor", [
+      cash("floor", 190_000, "2026-09-15"),
+      card("floor", 190_000, ["2026-10-10", "2026-11-10", "2026-12-10"]),
+    ]),
+  ];
+
+  it("refuses to sink the balance by default", () => {
+    const result = recommendPurchasePlan({ forecastInput: broke, hardReserveMinor: 0, items });
+    expect(result.status).toBe("NO_FEASIBLE_PLAN");
+    expect(result.choices[0]!.fits).toBe(false);
+  });
+
+  it("answers anyway when the floor is advisory, and still says it sinks", () => {
+    const result = recommendPurchasePlan({
+      forecastInput: broke,
+      hardReserveMinor: 0,
+      balanceFloor: "advisory",
+      items,
+    });
+
+    expect(result.status).toBe("OK");
+    expect(result.choices[0]!.fits).toBe(true);
+    // Nothing is hidden: the trough it produces is still reported, and the
+    // basket verdict still calls the plan infeasible.
+    expect(result.choices[0]!.minimumBalanceMinor).toBeLessThan(0);
+    expect(result.simulation!.feasible).toBe(false);
+    expect(result.simulation!.rejections).toContain("NEGATIVE_BALANCE");
+  });
+
+  it("keeps a card's limit hard even when the floor is advisory", () => {
+    const tight = { cardId: "tight", label: "Tight", creditLimitMinor: 50_000, committedMinor: 0 };
+    const result = recommendPurchasePlan({
+      forecastInput: broke,
+      hardReserveMinor: 0,
+      balanceFloor: "advisory",
+      items: [item("crib", [card("crib", 240_000, ["2026-10-10"], tight)])],
+    });
+
+    expect(result.choices[0]!.fits).toBe(false);
+    expect(result.choices[0]!.rejections).toContain("CREDIT_LIMIT_EXCEEDED");
+  });
+});

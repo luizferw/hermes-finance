@@ -877,6 +877,12 @@ export interface PurchasePlanRecommendationResult {
 export async function getPurchasePlanRecommendation(
   userId: string,
   planId: string,
+  /**
+   * `advisory` answers as if the purchases had already been made: the balance
+   * floor stops vetoing a way of paying and is reported instead. Card limits
+   * and deadlines stay hard.
+   */
+  balanceFloor: "enforce" | "advisory" = "enforce",
 ): Promise<PurchasePlanRecommendationResult | undefined> {
   const plan = await getPurchasePlan(userId, planId);
   if (!plan) return undefined;
@@ -978,6 +984,7 @@ export async function getPurchasePlanRecommendation(
   );
 
   const recommendation = recommendPurchasePlan({
+    balanceFloor,
     forecastInput: {
       asOf: forecast.asOf,
       horizonEnd: forecast.horizonEnd,

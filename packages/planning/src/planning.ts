@@ -744,6 +744,17 @@ export interface RecommendPurchasePlanInput {
   minimumAllowedBalanceMinor?: number;
   /** The plan's target date; an item without its own deadline inherits it. */
   targetDate?: DateString;
+  /**
+   * What the balance floor means.
+   *
+   * `enforce` (the default) refuses a way of paying that sinks the balance
+   * below the floor. `advisory` lets it through and reports it instead —
+   * "assume I have already bought all of this, show me the damage". The
+   * breach is still recorded on the choice, so nothing is hidden; it just
+   * stops being a veto. A card's limit and an item's own deadline stay hard
+   * either way: the bank declines, and a date does not move.
+   */
+  balanceFloor?: "enforce" | "advisory";
   items: RecommendationCandidateItem[];
 }
 
@@ -902,6 +913,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
   // So the bar becomes "do not make it worse": no candidate may push the
   // trough below where it already sits. The breach is reported either way.
   const effectiveFloorMinor = alreadyShort ? baseline.minimumBalanceMinor : floorMinor;
+  const floorIsAdvisory = input.balanceFloor === "advisory";
 
   const chosenEvents: ForecastEvent[] = [];
   const cardChargedMinor = new Map<string, number>();
@@ -946,7 +958,11 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         breaksCard,
         breaksFloor,
         breaksInstallmentCap,
-        acceptable: !breaksDeadline && !breaksCard && !breaksFloor && !breaksInstallmentCap,
+        acceptable:
+          !breaksDeadline &&
+          !breaksCard &&
+          !breaksInstallmentCap &&
+          (floorIsAdvisory || !breaksFloor),
       };
     });
 
@@ -979,7 +995,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       Number(verdict.breaksInstallmentCap) +
       Number(verdict.breaksDeadline) +
       Number(verdict.breaksCard) +
-      Number(verdict.breaksFloor);
+      Number(floorIsAdvisory ? 0 : verdict.breaksFloor);
     const nearest = [...verdicts].sort(
       (left, right) => brokenCount(left) - brokenCount(right) || byPreference(left, right),
     )[0]!;

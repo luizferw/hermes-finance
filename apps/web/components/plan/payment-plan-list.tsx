@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert02Icon } from "@hugeicons/core-free-icons";
 import { formatDate, formatMoney } from "@/lib/format";
@@ -73,18 +74,41 @@ export function PaymentPlanList({
   overriddenItemIds,
   currencyCode,
   rejectionLabel,
+  assumeBought = false,
+  planHref,
 }: {
   choices: RecommendedChoice[];
   overriddenItemIds: Set<string>;
   currencyCode: string;
   rejectionLabel: Record<RejectionCode, string>;
+  /** True when the balance floor is advisory rather than a veto. */
+  assumeBought?: boolean;
+  /** Where the toggle points — the same plan read the other way. */
+  planHref?: string;
 }) {
   if (choices.length === 0) return null;
   const groups = groupChoices(choices);
 
   return (
     <section className="glass-panel space-y-5 rounded-2xl p-5">
-      <h3 className="text-sm font-semibold">Payment plan</h3>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">Payment plan</h3>
+        {planHref && (
+          <Link
+            href={planHref}
+            className="text-xs font-medium text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
+          >
+            {assumeBought ? "Only show what fits" : "Assume I buy it all anyway"}
+          </Link>
+        )}
+      </div>
+      {assumeBought && (
+        <p className="text-xs text-muted-foreground">
+          Answering as if these were already bought — the balance is allowed to
+          go under, and what that costs is shown below. Card limits and
+          deadlines are still respected; a bank still declines.
+        </p>
+      )}
       <div className="space-y-5">
         {groups.map((group) => (
           <div key={group.key}>

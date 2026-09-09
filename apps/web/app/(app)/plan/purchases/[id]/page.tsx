@@ -114,14 +114,21 @@ function explain(option: ComparedOption, currencyCode: string): string[] {
  */
 export default async function PurchasePlanDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const user = await requireUser();
   const { id } = await params;
+  // "Assume I already bought all of this." The balance floor stops vetoing a
+  // way of paying and is reported instead, so the page answers with the
+  // consequence rather than with a refusal. In the URL so the two readings of
+  // the same plan are each a link.
+  const assumeBought = (await searchParams).assume === "bought";
 
   const [recommendationResult, creditCards, baseline] = await Promise.all([
-    getPurchasePlanRecommendation(user.id, id),
+    getPurchasePlanRecommendation(user.id, id, assumeBought ? "advisory" : "enforce"),
     listCreditCards(user.id),
     buildUserForecastDetailed(user.id, PLAN_HORIZON_DAYS),
   ]);
@@ -218,6 +225,8 @@ export default async function PurchasePlanDetailPage({
           overriddenItemIds={overridden}
           currencyCode={plan.currencyCode}
           rejectionLabel={REJECTION_LABEL}
+          assumeBought={assumeBought}
+          planHref={assumeBought ? `/plan/purchases/${id}` : `/plan/purchases/${id}?assume=bought`}
         />
       )}
 
