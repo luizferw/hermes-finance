@@ -14,7 +14,12 @@ import {
   assertCategoriesOwned,
   assertTagsOwned,
 } from "@/modules/shared/ownership";
-import { createRuleSchema, type CreateRuleInput } from "./validators";
+import {
+  createRuleSchema,
+  updateRuleSchema,
+  type CreateRuleInput,
+  type UpdateRuleInput,
+} from "./validators";
 import { executeStoredRule } from "./engine";
 
 /**
@@ -65,6 +70,63 @@ export async function createRuleCore(userId: string, input: CreateRuleInput) {
     action: "rule.created",
     entityType: "automation_rule",
     entityId: rule.id,
+    data: { name: data.name, source: "agent" },
+  });
+  return rule;
+}
+
+/**
+ * Replaces a rule's definition (name, conditions, actions) in place, so a
+ * typo no longer means deleting and rebuilding the rule from scratch.
+ * `isActive` is deliberately excluded — `setRuleActiveCore` owns it.
+ */
+export async function updateRuleCore(
+  userId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+) {
+  const data = updateRuleSchema.parse(input);
+  await assertRuleActionsOwned(userId, data.actions);
+
+  const existing = await db.query.automationRules.findFirst({
+    where: and(eq(automationRules.id, ruleId), eq(automationRules.userId, userId)),
+  });
+  if (!existing) throw new Error("Rule not found.");
+
+  const rule = await db.transaction(async (trx) => {
+    const [updated] = await trx
+      .update(automationRules)
+      .set({
+        name: data.name,
+        description: data.description,
+        matchAll: data.matchAll,
+        runOnImport: data.runOnImport,
+      })
+      .where(eq(automationRules.id, ruleId))
+      .returning();
+
+    // Conditions/actions are child rows with no natural key to diff against,
+    // so replace the whole set atomically rather than reconciling in place.
+    await trx
+      .delete(automationRuleConditions)
+      .where(eq(automationRuleConditions.ruleId, ruleId));
+    await trx
+      .delete(automationRuleActions)
+      .where(eq(automationRuleActions.ruleId, ruleId));
+    await trx.insert(automationRuleConditions).values(
+      data.conditions.map((c) => ({ ruleId, field: c.field, value: c.value })),
+    );
+    await trx.insert(automationRuleActions).values(
+      data.actions.map((a) => ({ ruleId, type: a.type, value: a.value ?? null })),
+    );
+    return updated!;
+  });
+
+  await logAudit({
+    userId,
+    action: "rule.updated",
+    entityType: "automation_rule",
+    entityId: ruleId,
     data: { name: data.name, source: "agent" },
   });
   return rule;

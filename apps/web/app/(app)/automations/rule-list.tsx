@@ -15,6 +15,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { EditRuleDialog } from "./edit-rule-dialog";
 
 export interface RuleRow {
   id: string;
@@ -33,7 +34,19 @@ export interface RuleRow {
   } | null;
 }
 
-export function RuleList({ rules }: { rules: RuleRow[] }) {
+export function RuleList({
+  rules,
+  accounts,
+  categories,
+  tags,
+  currencyCode,
+}: {
+  rules: RuleRow[];
+  accounts: Array<{ id: string; name: string }>;
+  categories: Array<{ id: string; name: string }>;
+  tags: Array<{ id: string; name: string }>;
+  currencyCode: string;
+}) {
   const router = useRouter();
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [isPending, startTransition] = React.useTransition();
@@ -105,6 +118,13 @@ export function RuleList({ rules }: { rules: RuleRow[] }) {
               <HugeiconsIcon icon={PlayIcon} />
               Run
             </Button>
+            <EditRuleDialog
+              rule={rule}
+              accounts={accounts}
+              categories={categories}
+              tags={tags}
+              currencyCode={currencyCode}
+            />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

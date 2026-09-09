@@ -126,3 +126,26 @@ export async function archiveBudget(budgetId: string) {
   });
   revalidatePath("/plan/budgets");
 }
+
+/**
+ * Puts an archived budget back in the list.
+ *
+ * Archiving is this module's delete, and a delete you cannot walk back from the
+ * UI is the same trap as no delete at all.
+ */
+export async function restoreBudget(budgetId: string) {
+  const user = await requireUser();
+  const existing = await db.query.budgets.findFirst({
+    where: and(eq(budgets.id, budgetId), eq(budgets.userId, user.id)),
+  });
+  if (!existing) throw new ApiError(404, "not_found", "Budget not found.");
+  await db.update(budgets).set({ isArchived: false }).where(eq(budgets.id, budgetId));
+  await logAudit({
+    userId: user.id,
+    action: "budget.restored",
+    entityType: "budget",
+    entityId: budgetId,
+    data: { name: existing.name },
+  });
+  revalidatePath("/plan/budgets");
+}

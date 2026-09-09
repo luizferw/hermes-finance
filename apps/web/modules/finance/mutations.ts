@@ -25,6 +25,7 @@ import {
   nominalCycleFor,
 } from "@hermes-finance/forecast";
 import { requireUser } from "@/lib/session";
+import { recomputeAccountBalances } from "@/modules/accounts/queries";
 import { ApiError } from "@/modules/shared/api";
 import { logAudit } from "@/modules/shared/audit";
 import { assertAccountsOwned, assertCategoriesOwned } from "@/modules/shared/ownership";
@@ -311,6 +312,27 @@ export async function archiveCreditCard(cardId: string) {
   await logAudit({
     userId: user.id,
     action: "credit_card.archived",
+    entityType: "credit_card",
+    entityId: cardId,
+    data: { name: existing.name },
+  });
+  revalidateFinance();
+}
+
+/**
+ * Puts an archived card back in the list. Archiving is this module's delete,
+ * and one the UI cannot walk back is the same trap as no delete at all.
+ */
+export async function restoreCreditCard(cardId: string) {
+  const user = await requireUser();
+  const existing = await db.query.creditCards.findFirst({
+    where: and(eq(creditCards.id, cardId), eq(creditCards.userId, user.id)),
+  });
+  if (!existing) throw new ApiError(404, "not_found", "Credit card not found.");
+  await db.update(creditCards).set({ active: true }).where(eq(creditCards.id, cardId));
+  await logAudit({
+    userId: user.id,
+    action: "credit_card.restored",
     entityType: "credit_card",
     entityId: cardId,
     data: { name: existing.name },
@@ -609,8 +631,44 @@ export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
     entityId: result.purchase.id,
     data: { count: data.totalInstallments },
   });
+  await recomputeAccountBalances([card.accountId]);
   revalidateFinance();
   return result;
+}
+
+/**
+ * Undoes a registration whole.
+ *
+ * The ledger soft-deletes transactions everywhere else, and that is wrong here:
+ * a card purchase is one economic expense plus an installment plan that
+ * projects into the forecast. Hiding the transaction behind `deletedAt` would
+ * leave the plan and its installments alive, still landing on future statements
+ * with nothing on screen to explain them. The purchase, its plan and its
+ * installments all cascade from the transaction row, so deleting that row for
+ * real is what actually reverses the registration.
+ *
+ * Billing cycles are deliberately left behind — they are shared by every
+ * purchase on the card, and an empty one is harmless.
+ */
+export async function deleteCardPurchase(purchaseId: string) {
+  const user = await requireUser();
+  const purchase = await db.query.creditCardPurchases.findFirst({
+    where: eq(creditCardPurchases.id, purchaseId),
+  });
+  if (!purchase) throw new ApiError(404, "not_found", "Card purchase not found.");
+  const card = await loadOwnedCreditCard(user.id, purchase.creditCardId);
+
+  await db.delete(transactions).where(eq(transactions.id, purchase.transactionId));
+
+  await recomputeAccountBalances([card.accountId]);
+  await logAudit({
+    userId: user.id,
+    action: "credit_card_purchase.deleted",
+    entityType: "credit_card_purchase",
+    entityId: purchaseId,
+    data: { merchant: purchase.merchant, totalAmountMinor: purchase.totalAmountMinor },
+  });
+  revalidateFinance();
 }
 
 // --- purchase plans --------------------------------------------------------------

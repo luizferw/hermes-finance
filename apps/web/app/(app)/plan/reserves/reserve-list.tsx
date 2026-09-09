@@ -4,13 +4,14 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { Delete02Icon } from "@hugeicons/core-free-icons";
+import { Delete02Icon, PencilEdit02Icon } from "@hugeicons/core-free-icons";
 import { deleteFinancialReserve, updateFinancialReserve } from "@/modules/finance/mutations";
 import { formatMoney } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
+import { EditReserveDialog } from "./edit-reserve-dialog";
 
 export interface ReserveRow {
   id: string;
@@ -30,6 +31,7 @@ export function ReserveList({ reserves }: { reserves: ReserveRow[] }) {
   const router = useRouter();
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [isPending, startTransition] = React.useTransition();
+  const [editingReserve, setEditingReserve] = React.useState<ReserveRow | null>(null);
 
   function toggleActive(reserve: ReserveRow) {
     setBusyId(reserve.id);
@@ -92,6 +94,15 @@ export function ReserveList({ reserves }: { reserves: ReserveRow[] }) {
               size="icon-sm"
               variant="ghost"
               disabled={isPending && busyId === reserve.id}
+              onClick={() => setEditingReserve(reserve)}
+              aria-label={`Edit ${reserve.name}`}
+            >
+              <HugeiconsIcon icon={PencilEdit02Icon} className="size-4 text-muted-foreground" />
+            </Button>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              disabled={isPending && busyId === reserve.id}
               onClick={() => remove(reserve)}
               aria-label={`Delete ${reserve.name}`}
             >
@@ -100,6 +111,15 @@ export function ReserveList({ reserves }: { reserves: ReserveRow[] }) {
           </div>
         </li>
       ))}
+      {editingReserve && (
+        <EditReserveDialog
+          reserve={editingReserve}
+          open={!!editingReserve}
+          onOpenChange={(open) => {
+            if (!open) setEditingReserve(null);
+          }}
+        />
+      )}
     </ul>
   );
 }

@@ -131,3 +131,11 @@ export async function getBudget(userId: string, id: string) {
     },
   });
 }
+
+/** Archived budgets, so the UI can offer them back. */
+export async function listArchivedBudgets(userId: string) {
+  return db.query.budgets.findMany({
+    where: and(eq(budgets.userId, userId), eq(budgets.isArchived, true)),
+    orderBy: [asc(budgets.name)],
+  });
+}

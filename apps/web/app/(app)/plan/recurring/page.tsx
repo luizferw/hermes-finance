@@ -68,14 +68,24 @@ export default async function RecurringPage() {
             id: item.id,
             name: item.name,
             type: item.type,
+            accountId: item.accountId,
+            transferAccountId: item.transferAccountId,
+            categoryId: item.categoryId,
             amountMinor: item.amountMinor,
             currencyCode: item.currencyCode,
+            description: item.description,
             interval: item.interval,
             nextRunDate: item.nextRunDate,
             lastRunDate: item.lastRunDate,
             isActive: item.isActive,
             accountName: item.account.name,
             category: item.category,
+          }))}
+          accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+          categories={categories.map((c) => ({
+            id: c.id,
+            name: c.name,
+            color: c.color,
           }))}
         />
       )}

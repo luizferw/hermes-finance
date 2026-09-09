@@ -3,7 +3,8 @@ import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowRight01Icon, CreditCardIcon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
-import { listCreditCards } from "@/modules/finance/queries";
+import { listArchivedCreditCards, listCreditCards } from "@/modules/finance/queries";
+import { restoreCreditCard } from "@/modules/finance/mutations";
 import { listAccounts } from "@/modules/accounts/queries";
 import { getUserSettings } from "@/modules/settings/queries";
 import { NewCardDialog } from "./new-card-dialog";
@@ -14,6 +15,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { ArchivedList } from "@/components/shared/archived-list";
 import { cn } from "@/lib/utils";
 import { formatMoney } from "@/lib/format";
 
@@ -21,10 +23,11 @@ export const metadata: Metadata = { title: "Cards" };
 
 export default async function CardsPage() {
   const user = await requireUser();
-  const [cards, accounts, settings] = await Promise.all([
+  const [cards, accounts, settings, archivedCards] = await Promise.all([
     listCreditCards(user.id),
     listAccounts(user.id),
     getUserSettings(user.id),
+    listArchivedCreditCards(user.id),
   ]);
 
   // A ledger account of type `credit_card` is not yet a Hermes card: the limit,
@@ -156,6 +159,12 @@ export default async function CardsPage() {
           })}
         </ul>
       )}
+
+      <ArchivedList
+        rows={archivedCards.map((card) => ({ id: card.id, name: card.name }))}
+        label="cards"
+        restore={restoreCreditCard}
+      />
     </div>
   );
 }

@@ -9,7 +9,12 @@ import { requireUser } from "@/lib/session";
 import { ApiError } from "@/modules/shared/api";
 import { logAudit } from "@/modules/shared/audit";
 import { assertAccountsOwned } from "@/modules/shared/ownership";
-import { createGoalSchema, type CreateGoalInput } from "./validators";
+import {
+  createGoalSchema,
+  updateGoalSchema,
+  type CreateGoalInput,
+  type UpdateGoalInput,
+} from "./validators";
 
 /** Core goal creation, tenancy-scoped by explicit userId. Shared by the server
  * action, the agent, and the MCP server. */
@@ -43,6 +48,45 @@ export async function createGoal(input: CreateGoalInput) {
   const goal = await createGoalCore(user.id, input);
   revalidatePath("/plan/goals");
   return goal;
+}
+
+/**
+ * Fixes what was wrong at creation — name, target, currency, linked account,
+ * target date — without touching the saved balance. `contributeToGoal` owns
+ * `currentAmountMinor`; this never writes it.
+ */
+export async function updateGoal(goalId: string, input: UpdateGoalInput) {
+  const user = await requireUser();
+  const data = updateGoalSchema.parse(input);
+  const existing = await db.query.savingsGoals.findFirst({
+    where: and(eq(savingsGoals.id, goalId), eq(savingsGoals.userId, user.id)),
+  });
+  if (!existing) throw new ApiError(404, "not_found", "Goal not found.");
+  if (data.accountId !== undefined) await assertAccountsOwned(user.id, [data.accountId]);
+  const currency = data.currencyCode ?? existing.currencyCode;
+
+  await db
+    .update(savingsGoals)
+    .set({
+      name: data.name ?? existing.name,
+      targetAmountMinor:
+        data.targetAmount !== undefined
+          ? majorToMinor(data.targetAmount, currency)
+          : existing.targetAmountMinor,
+      currencyCode: currency,
+      accountId: data.accountId === undefined ? existing.accountId : data.accountId,
+      targetDate: data.targetDate === undefined ? existing.targetDate : data.targetDate,
+    })
+    .where(eq(savingsGoals.id, goalId));
+
+  await logAudit({
+    userId: user.id,
+    action: "goal.updated",
+    entityType: "savings_goal",
+    entityId: goalId,
+    data: { changed: Object.keys(data) },
+  });
+  revalidatePath("/plan/goals");
 }
 
 /** Add or remove money (major units; negative withdraws). */

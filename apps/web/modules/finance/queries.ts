@@ -6,6 +6,7 @@ import {
   recurringTransactions,
   balanceSnapshots,
   creditCardBillingCycles,
+  creditCardPurchases,
   creditCards,
   db,
   financialReserves,
@@ -690,5 +691,37 @@ export async function getPurchasePlan(userId: string, id: string) {
   return db.query.purchasePlans.findFirst({
     where: and(eq(purchasePlans.id, id), eq(purchasePlans.userId, userId)),
     with: { items: { with: { paymentOptions: true, simulations: true } } },
+  });
+}
+
+/**
+ * Every purchase registered on a card, newest first, with the installment plan
+ * each one generated.
+ *
+ * Ownership is enforced on the card rather than the purchase: the purchase
+ * table has no `userId` of its own, so reading it unscoped would cross tenants.
+ */
+export async function listCardPurchases(userId: string, cardId: string) {
+  const card = await db.query.creditCards.findFirst({
+    where: and(eq(creditCards.id, cardId), eq(creditCards.userId, userId)),
+    columns: { id: true },
+  });
+  if (!card) return [];
+
+  return db.query.creditCardPurchases.findMany({
+    where: eq(creditCardPurchases.creditCardId, card.id),
+    orderBy: [desc(creditCardPurchases.purchaseDate)],
+    with: {
+      transaction: { columns: { id: true, description: true, deletedAt: true } },
+      installmentPlans: { columns: { id: true, totalInstallments: true } },
+    },
+  });
+}
+
+/** Archived cards, so the UI can offer them back. */
+export async function listArchivedCreditCards(userId: string) {
+  return db.query.creditCards.findMany({
+    where: and(eq(creditCards.userId, userId), eq(creditCards.active, false)),
+    orderBy: [asc(creditCards.name)],
   });
 }

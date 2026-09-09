@@ -159,6 +159,10 @@ export default async function AutomationsPage({
                     }
                   : null,
               }))}
+              accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+              categories={categories.map((c) => ({ id: c.id, name: c.name }))}
+              tags={tags.map((t) => ({ id: t.id, name: t.name }))}
+              currencyCode={settings.currencyCode}
             />
           )}
         </section>

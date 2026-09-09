@@ -15,7 +15,9 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { cn } from "@/lib/utils";
+import { PurchaseItemActions } from "./item-actions";
 import { NewPurchasePlanDialog } from "./new-plan-dialog";
+import { PurchasePlanActions } from "./plan-actions";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -103,6 +105,17 @@ export default async function PurchasesPage() {
                       strokeWidth={2}
                     />
                   </Link>
+                  <PurchasePlanActions
+                    plan={{
+                      id: plan.id,
+                      name: plan.name,
+                      description: plan.description,
+                      targetDate: plan.targetDate,
+                      budgetMinor: plan.budgetMinor,
+                      currencyCode: plan.currencyCode,
+                      status: plan.status,
+                    }}
+                  />
                 </div>
               </div>
 
@@ -140,6 +153,20 @@ export default async function PurchasesPage() {
                         <span className="font-amount tabular-nums text-foreground">
                           {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
                         </span>
+                        <PurchaseItemActions
+                          item={{
+                            id: item.id,
+                            name: item.name,
+                            priority: item.priority,
+                            estimatedPriceMinor: item.estimatedPriceMinor,
+                            actualPriceMinor: item.actualPriceMinor,
+                            earliestPurchaseDate: item.earliestPurchaseDate,
+                            deadline: item.deadline,
+                            status: item.status,
+                            notes: item.notes,
+                          }}
+                          currencyCode={plan.currencyCode}
+                        />
                       </div>
                     </li>
                   ))}

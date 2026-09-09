@@ -61,11 +61,13 @@ export default async function GoalsPage() {
             targetAmountMinor: goal.targetAmountMinor,
             currentAmountMinor: goal.currentAmountMinor,
             currencyCode: goal.currencyCode,
+            accountId: goal.accountId,
             targetDate: goal.targetDate,
             achievedAt: goal.achievedAt,
             createdAt: goal.createdAt,
             accountName: goal.account?.name ?? null,
           }))}
+          accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
         />
       )}
     </div>

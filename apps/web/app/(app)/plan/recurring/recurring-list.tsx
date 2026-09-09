@@ -9,6 +9,7 @@ import { deleteRecurring, setRecurringActive } from "@/modules/recurring/mutatio
 import { formatAbsAmount, formatDate, formatRelativeDays } from "@/lib/format";
 import { daysBetween, todayIso } from "@kosh/domain";
 import { cn } from "@/lib/utils";
+import type { CategoryOption } from "@/components/transactions/category-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,14 +19,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { CategoryBadge } from "@/components/transactions/category-badge";
+import { EditRecurringDialog } from "./edit-recurring-dialog";
 
 export interface RecurringRow {
   id: string;
   name: string;
-  type: string;
+  /** Widened because the column reuses the shared transaction enum — see EDITABLE_TYPES. */
+  type: "income" | "expense" | "transfer" | "adjustment" | "opening_balance";
+  accountId: string;
+  transferAccountId: string | null;
+  categoryId: string | null;
   amountMinor: number;
   currencyCode: string;
-  interval: string;
+  description: string;
+  interval: "weekly" | "monthly" | "quarterly" | "yearly";
   nextRunDate: string;
   lastRunDate: string | null;
   isActive: boolean;
@@ -39,7 +46,29 @@ const TYPE_LABEL: Record<string, string> = {
   transfer: "Transfer",
 };
 
-export function RecurringList({ items }: { items: RecurringRow[] }) {
+/**
+ * `createRecurring` and `updateRecurring` only ever write these three, but the
+ * column reuses the shared transaction enum, so the row type is wider than the
+ * form can represent. A row outside them could only come from a hand-written
+ * insert; hide the edit affordance rather than let the form rewrite its type.
+ */
+const EDITABLE_TYPES = new Set(["income", "expense", "transfer"]);
+
+function editableRecurring(row: RecurringRow) {
+  return EDITABLE_TYPES.has(row.type)
+    ? (row as RecurringRow & { type: "income" | "expense" | "transfer" })
+    : null;
+}
+
+export function RecurringList({
+  items,
+  accounts,
+  categories,
+}: {
+  items: RecurringRow[];
+  accounts: Array<{ id: string; name: string }>;
+  categories: CategoryOption[];
+}) {
   const router = useRouter();
   const [busyId, setBusyId] = React.useState<string | null>(null);
   const [isPending, startTransition] = React.useTransition();
@@ -66,6 +95,7 @@ export function RecurringList({ items }: { items: RecurringRow[] }) {
         {items.map((item) => {
           const days = daysBetween(today, item.nextRunDate);
           const isDue = item.isActive && days <= 0;
+          const editable = editableRecurring(item);
           return (
             <li
               key={item.id}
@@ -107,6 +137,25 @@ export function RecurringList({ items }: { items: RecurringRow[] }) {
               <span className="font-amount text-sm">
                 {formatAbsAmount(item.amountMinor, item.currencyCode)}
               </span>
+              {editable && (
+                <EditRecurringDialog
+                  item={{
+                    id: editable.id,
+                    name: editable.name,
+                    type: editable.type,
+                    accountId: editable.accountId,
+                    transferAccountId: editable.transferAccountId,
+                    categoryId: editable.categoryId,
+                    amountMinor: editable.amountMinor,
+                    currencyCode: editable.currencyCode,
+                    description: editable.description,
+                    interval: editable.interval,
+                    nextRunDate: editable.nextRunDate,
+                  }}
+                  accounts={accounts}
+                  categories={categories}
+                />
+              )}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button

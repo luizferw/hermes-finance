@@ -4,11 +4,12 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { MoreVerticalIcon, Tick02Icon } from "@hugeicons/core-free-icons";
+import { MoreVerticalIcon, PencilEdit02Icon, Tick02Icon } from "@hugeicons/core-free-icons";
 import type { BillState } from "@kosh/domain";
 import { deleteBill, markBillPaid, updateBill } from "@/modules/bills/mutations";
 import { formatAbsAmount, formatDate, formatRelativeDays } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import type { CategoryOption } from "@/components/transactions/category-picker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,19 +20,23 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { CategoryBadge } from "@/components/transactions/category-badge";
+import { EditBillDialog } from "./edit-bill-dialog";
 
 export interface BillRow {
   id: string;
   name: string;
   expectedAmountMinor: number;
   currencyCode: string;
-  recurrence: string;
+  recurrence: "weekly" | "monthly" | "quarterly" | "yearly";
   nextDueDate: string;
   lastPaidDate: string | null;
   isActive: boolean;
   amountStrategy: "fixed" | "variable";
+  accountId: string | null;
   accountName: string | null;
+  categoryId: string | null;
   category: { id: string; name: string; color: string | null } | null;
+  notes: string | null;
   state: BillState;
   daysUntilDue: number;
 }
@@ -46,10 +51,19 @@ const STATE_BADGE: Record<BillState, { label: string; className: string }> = {
   inactive: { label: "Paused", className: "bg-muted text-muted-foreground" },
 };
 
-export function BillList({ bills }: { bills: BillRow[] }) {
+export function BillList({
+  bills,
+  accounts,
+  categories,
+}: {
+  bills: BillRow[];
+  accounts: Array<{ id: string; name: string }>;
+  categories: CategoryOption[];
+}) {
   const router = useRouter();
   const [isPending, startTransition] = React.useTransition();
   const [busyId, setBusyId] = React.useState<string | null>(null);
+  const [editingBill, setEditingBill] = React.useState<BillRow | null>(null);
 
   function act(billId: string, action: () => Promise<unknown>, message: string) {
     setBusyId(billId);
@@ -155,6 +169,10 @@ export function BillList({ bills }: { bills: BillRow[] }) {
                   >
                     Mark paid
                   </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setEditingBill(bill)}>
+                    <HugeiconsIcon icon={PencilEdit02Icon} />
+                    Edit
+                  </DropdownMenuItem>
                   <DropdownMenuItem
                     onClick={() =>
                       act(
@@ -192,6 +210,17 @@ export function BillList({ bills }: { bills: BillRow[] }) {
           );
         })}
       </ul>
+      {editingBill && (
+        <EditBillDialog
+          bill={editingBill}
+          open={!!editingBill}
+          onOpenChange={(open) => {
+            if (!open) setEditingBill(null);
+          }}
+          accounts={accounts}
+          categories={categories}
+        />
+      )}
     </div>
   );
 }

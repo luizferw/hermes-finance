@@ -34,6 +34,16 @@ export const createRuleSchema = z.object({
   actions: z.array(ruleActionSchema).min(1, "Add at least one action").max(10),
 });
 
+export const updateRuleSchema = z.object({
+  name: z.string().min(1, "Name is required").max(120),
+  description: z.string().max(500).optional(),
+  matchAll: z.boolean().default(true),
+  runOnImport: z.boolean().default(true),
+  conditions: z.array(ruleConditionSchema).min(1, "Add at least one condition").max(10),
+  actions: z.array(ruleActionSchema).min(1, "Add at least one action").max(10),
+});
+
 export type CreateRuleInput = z.infer<typeof createRuleSchema>;
+export type UpdateRuleInput = z.infer<typeof updateRuleSchema>;
 export type RuleConditionInput = z.infer<typeof ruleConditionSchema>;
 export type RuleActionInput = z.infer<typeof ruleActionSchema>;

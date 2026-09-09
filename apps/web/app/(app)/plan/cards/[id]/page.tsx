@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney, formatMonth } from "@/lib/format";
-import { getCardStatement } from "@/modules/finance/queries";
+import { getCardStatement, listCardPurchases } from "@/modules/finance/queries";
 import { listAccounts } from "@/modules/accounts/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
 import { todayIso } from "@kosh/domain";
@@ -10,7 +10,9 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { NewPurchaseDialog } from "./new-purchase-dialog";
 import { EditCardDialog } from "./edit-card-dialog";
+import { ArchiveCardButton } from "./archive-card-button";
 import { ReconcileCycleDialog } from "./reconcile-cycle-dialog";
+import { CardPurchaseList } from "./purchase-list";
 
 export const metadata: Metadata = { title: "Card statement" };
 
@@ -29,10 +31,11 @@ export default async function CardDetailPage({
 }) {
   const user = await requireUser();
   const { id } = await params;
-  const [statement, categories, accounts] = await Promise.all([
+  const [statement, categories, accounts, purchases] = await Promise.all([
     getCardStatement(user.id, id),
     listCategories(user.id),
     listAccounts(user.id),
+    listCardPurchases(user.id, id),
   ]);
   if (!statement) notFound();
 
@@ -65,6 +68,7 @@ export default async function CardDetailPage({
             }}
             paymentAccounts={paymentAccounts}
           />
+          <ArchiveCardButton cardId={card.id} cardName={card.name} />
           <NewPurchaseDialog
             creditCardId={card.id}
             categories={categories.map((category) => ({ id: category.id, name: category.name }))}
@@ -72,6 +76,23 @@ export default async function CardDetailPage({
           />
         </div>
       </div>
+
+      {purchases.length > 0 && (
+        <section>
+          <h3 className="mb-2 text-sm font-medium">Registered purchases</h3>
+          <CardPurchaseList
+            currencyCode={card.currencyCode}
+            purchases={purchases.map((purchase) => ({
+              id: purchase.id,
+              purchaseDate: purchase.purchaseDate,
+              description: purchase.transaction.description,
+              merchant: purchase.merchant,
+              totalAmountMinor: purchase.totalAmountMinor,
+              totalInstallments: purchase.installmentPlans[0]?.totalInstallments ?? null,
+            }))}
+          />
+        </section>
+      )}
 
       {cycles.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">

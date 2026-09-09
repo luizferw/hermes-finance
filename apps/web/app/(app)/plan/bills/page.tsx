@@ -74,10 +74,19 @@ export default async function BillsPage() {
             lastPaidDate: bill.lastPaidDate,
             isActive: bill.isActive,
             amountStrategy: bill.amountStrategy,
+            accountId: bill.accountId,
             accountName: bill.account?.name ?? null,
+            categoryId: bill.categoryId,
             category: bill.category,
+            notes: bill.notes,
             state,
             daysUntilDue,
+          }))}
+          accounts={accounts.map((a) => ({ id: a.id, name: a.name }))}
+          categories={categories.map((c) => ({
+            id: c.id,
+            name: c.name,
+            color: c.color,
           }))}
         />
       )}

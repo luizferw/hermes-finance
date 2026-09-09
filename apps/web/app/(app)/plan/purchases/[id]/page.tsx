@@ -4,11 +4,14 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { CheckmarkCircle02Icon, InformationCircleIcon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
-import { getPurchasePlan } from "@/modules/finance/queries";
+import { getPurchasePlan, listCreditCards } from "@/modules/finance/queries";
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { PurchaseItemActions } from "../item-actions";
 import { NewPurchaseItemDialog } from "./new-item-dialog";
+import { PaymentOptionsSection } from "./payment-options-section";
+import { PurchasePlanActions } from "../plan-actions";
 
 export const metadata: Metadata = { title: "Payment options" };
 
@@ -86,8 +89,12 @@ export default async function PurchasePlanDetailPage({
 }) {
   const user = await requireUser();
   const { id } = await params;
-  const plan = await getPurchasePlan(user.id, id);
+  const [plan, creditCards] = await Promise.all([
+    getPurchasePlan(user.id, id),
+    listCreditCards(user.id),
+  ]);
   if (!plan) notFound();
+  const cardOptions = creditCards.map((card) => ({ id: card.id, name: card.name }));
 
   const comparisons = await Promise.all(
     plan.items.map(async (item) => ({
@@ -106,7 +113,21 @@ export default async function PurchasePlanDetailPage({
             {plan.targetDate ? `Target ${formatDate(plan.targetDate)}` : "No target date"}
           </p>
         </div>
-        <NewPurchaseItemDialog purchasePlanId={plan.id} currencyCode={plan.currencyCode} />
+        <div className="flex shrink-0 items-center gap-2">
+          <NewPurchaseItemDialog purchasePlanId={plan.id} currencyCode={plan.currencyCode} />
+          <PurchasePlanActions
+            plan={{
+              id: plan.id,
+              name: plan.name,
+              description: plan.description,
+              targetDate: plan.targetDate,
+              budgetMinor: plan.budgetMinor,
+              currencyCode: plan.currencyCode,
+              status: plan.status,
+            }}
+            redirectAfterDelete
+          />
+        </div>
       </div>
 
       {comparisons.length === 0 ? (
@@ -128,10 +149,42 @@ export default async function PurchasePlanDetailPage({
                     {item.deadline ? ` · needed by ${formatDate(item.deadline)}` : ""}
                   </p>
                 </div>
-                <Badge variant="outline" className="text-[10px]">
-                  {PRIORITY_LABEL[item.priority] ?? item.priority}
-                </Badge>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge variant="outline" className="text-[10px]">
+                    {PRIORITY_LABEL[item.priority] ?? item.priority}
+                  </Badge>
+                  <PurchaseItemActions
+                    item={{
+                      id: item.id,
+                      name: item.name,
+                      priority: item.priority,
+                      estimatedPriceMinor: item.estimatedPriceMinor,
+                      actualPriceMinor: item.actualPriceMinor,
+                      earliestPurchaseDate: item.earliestPurchaseDate,
+                      deadline: item.deadline,
+                      status: item.status,
+                      notes: item.notes,
+                    }}
+                    currencyCode={plan.currencyCode}
+                  />
+                </div>
               </header>
+
+              <PaymentOptionsSection
+                purchaseItemId={item.id}
+                currencyCode={plan.currencyCode}
+                options={item.paymentOptions.map((option) => ({
+                  id: option.id,
+                  paymentMethod: option.paymentMethod,
+                  cardId: option.cardId,
+                  cashPriceMinor: option.cashPriceMinor,
+                  installments: option.installments,
+                  installmentAmountMinor: option.installmentAmountMinor,
+                  totalCostMinor: option.totalCostMinor,
+                  firstPaymentDate: option.firstPaymentDate,
+                }))}
+                cards={cardOptions}
+              />
 
               {!comparison || comparison.status !== "OK" ? (
                 <div className="mt-4 flex gap-2.5 rounded-xl bg-muted/50 p-4">

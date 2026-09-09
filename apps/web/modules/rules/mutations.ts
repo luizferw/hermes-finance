@@ -17,12 +17,17 @@ import {
   assertCategoriesOwned,
   assertTagsOwned,
 } from "@/modules/shared/ownership";
-import { createRuleSchema, type CreateRuleInput } from "./validators";
+import {
+  createRuleSchema,
+  type CreateRuleInput,
+  type UpdateRuleInput,
+} from "./validators";
 import {
   executeStoredRule,
   previewRuleDefinition,
   type RulePreviewResult,
 } from "./engine";
+import { updateRuleCore } from "./core";
 
 /** Rule actions carry ids of other user-owned records; validate ownership. */
 async function assertRuleActionsOwned(
@@ -70,6 +75,13 @@ export async function createRule(input: CreateRuleInput) {
     entityId: rule.id,
     data: { name: data.name },
   });
+  revalidatePath("/automations");
+  return rule;
+}
+
+export async function updateRule(ruleId: string, input: UpdateRuleInput) {
+  const user = await requireUser();
+  const rule = await updateRuleCore(user.id, ruleId, input);
   revalidatePath("/automations");
   return rule;
 }

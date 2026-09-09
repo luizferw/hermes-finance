@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
+import { EditGoalDialog } from "./edit-goal-dialog";
 
 export interface GoalRow {
   id: string;
@@ -19,13 +20,20 @@ export interface GoalRow {
   targetAmountMinor: number;
   currentAmountMinor: number;
   currencyCode: string;
+  accountId: string | null;
   targetDate: string | null;
   achievedAt: string | null;
   createdAt: Date;
   accountName: string | null;
 }
 
-export function GoalList({ goals }: { goals: GoalRow[] }) {
+export function GoalList({
+  goals,
+  accounts,
+}: {
+  goals: GoalRow[];
+  accounts: Array<{ id: string; name: string }>;
+}) {
   const router = useRouter();
   const [amounts, setAmounts] = React.useState<Record<string, string>>({});
   const [busyId, setBusyId] = React.useState<string | null>(null);
@@ -73,6 +81,7 @@ export function GoalList({ goals }: { goals: GoalRow[] }) {
         <GoalTrajectory
           key={goal.id}
           goal={goal}
+          accounts={accounts}
           index={i}
           amount={amounts[goal.id] ?? ""}
           busy={isPending && busyId === goal.id}
@@ -92,6 +101,7 @@ export function GoalList({ goals }: { goals: GoalRow[] }) {
  */
 function GoalTrajectory({
   goal,
+  accounts,
   index,
   amount,
   busy,
@@ -100,6 +110,7 @@ function GoalTrajectory({
   onRemove,
 }: {
   goal: GoalRow;
+  accounts: Array<{ id: string; name: string }>;
   index: number;
   amount: string;
   busy: boolean;
@@ -205,6 +216,17 @@ function GoalTrajectory({
             {busy && <Spinner />}
             Save
           </Button>
+          <EditGoalDialog
+            goal={{
+              id: goal.id,
+              name: goal.name,
+              targetAmountMinor: goal.targetAmountMinor,
+              currencyCode: goal.currencyCode,
+              accountId: goal.accountId,
+              targetDate: goal.targetDate,
+            }}
+            accounts={accounts}
+          />
           <Button
             variant="ghost"
             size="icon-sm"
