@@ -22,6 +22,25 @@ function baseWhere(userId: string): SQL {
   return and(eq(transactions.userId, userId), isNull(transactions.deletedAt))!;
 }
 
+/**
+ * Recent, unlinked expenses on one account — candidates for "this is the
+ * transaction that actually paid this bill". Already-linked transactions
+ * are excluded so the same payment can't be attached to two bills.
+ */
+export async function listUnlinkedExpenseCandidates(userId: string, accountId: string | null, limit = 15) {
+  return db.query.transactions.findMany({
+    where: and(
+      baseWhere(userId),
+      accountId ? eq(transactions.accountId, accountId) : undefined,
+      eq(transactions.type, "expense"),
+      isNull(transactions.billId),
+    ),
+    orderBy: [desc(transactions.date), desc(transactions.createdAt)],
+    limit,
+    columns: { id: true, date: true, amountMinor: true, description: true, merchant: true },
+  });
+}
+
 export async function getInboxCount(userId: string): Promise<number> {
   const [row] = await db
     .select({ value: count() })
