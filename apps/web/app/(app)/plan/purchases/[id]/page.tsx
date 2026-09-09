@@ -15,6 +15,7 @@ import {
 } from "@/modules/finance/queries";
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
 import type {
+  BlockedItem,
   PurchasePlanRecommendation,
   PurchasePlanSimulation,
 } from "@hermes-finance/planning";
@@ -267,10 +268,9 @@ export default async function PurchasePlanDetailPage({
                 </div>
               </header>
 
-              {!isDone && (
+              {!isDone && choice && (
                 <div className="mt-3">
-                  {choice ? (
-                    <div
+                  <div
                       className={cn(
                         "rounded-xl border p-4",
                         overridden.has(item.id) ? "border-border bg-muted/40" : "border-primary/40 bg-primary/5",
@@ -299,26 +299,18 @@ export default async function PurchasePlanDetailPage({
                           : "In full"}
                         {choice.lastPaymentDate ? `, settled by ${formatDate(choice.lastPaymentDate)}` : ""}
                       </p>
-                      {choice.reasons.length > 0 && (
-                        <details className="mt-2 group">
-                          <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
-                            Why
-                          </summary>
-                          <ul className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
-                            {choice.reasons.map((reason, index) => (
-                              <li key={index}>{reason}</li>
-                            ))}
-                          </ul>
-                        </details>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-xl bg-muted/50 p-4 text-xs text-muted-foreground">
-                      {recommendation?.status === "INSUFFICIENT_DATA"
-                        ? "Not enough to go on yet."
-                        : "Not part of the plan the engine could work out — see the blockers above."}
-                    </div>
-                  )}
+                      <details className="mt-2 group">
+                        <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
+                          Why
+                        </summary>
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          Leaves {formatMoney(choice.minimumBalanceMinor, plan.currencyCode)} on{" "}
+                          {formatDate(choice.minimumBalanceDate)} — the most cash of the{" "}
+                          {choice.workableCount} workable{" "}
+                          {choice.workableCount === 1 ? "way" : "ways"} to pay for it.
+                        </p>
+                    </details>
+                  </div>
                 </div>
               )}
 
@@ -460,6 +452,30 @@ export default async function PurchasePlanDetailPage({
   );
 }
 
+/**
+ * The engine's own `blockers` are audit prose in minor units — right for MCP
+ * and the log, wrong for a screen, where they read as "-64381 on 2026-10-06".
+ * This says the same thing from the structured fields, formatted.
+ */
+function describeBlock(blocked: BlockedItem, currencyCode: string): string {
+  const parts: string[] = [];
+  if (blocked.cappedCount > 0) {
+    parts.push(`${blocked.cappedCount} need more than the ${blocked.maxInstallments}x it allows`);
+  }
+  if (blocked.lateCount > 0 && blocked.limitDate) {
+    parts.push(`${blocked.lateCount} finish after ${formatDate(blocked.limitDate)}`);
+  }
+  if (blocked.overCardCount > 0) {
+    parts.push(`${blocked.overCardCount} go past a card's remaining limit`);
+  }
+  if (blocked.belowFloorCount > 0 && blocked.bestFloorBreachMinor !== undefined) {
+    parts.push(
+      `${blocked.belowFloorCount} would leave ${formatMoney(blocked.bestFloorBreachMinor, currencyCode)}${blocked.bestFloorBreachDate ? ` on ${formatDate(blocked.bestFloorBreachDate)}` : ""}`,
+    );
+  }
+  return parts.length > 0 ? `— ${parts.join(", ")}` : "— no way of paying it works";
+}
+
 function RecommendationVerdict({
   recommendation,
   simulation,
@@ -483,34 +499,64 @@ function RecommendationVerdict({
         <HugeiconsIcon icon={InformationCircleIcon} className="mt-0.5 size-4 shrink-0" />
         <div className="space-y-1">
           <p className="font-medium text-foreground">Not enough to recommend yet</p>
-          <ul className="space-y-0.5 text-xs">
-            {recommendation.blockers.map((blocker) => (
-              <li key={blocker}>{blocker}</li>
-            ))}
-          </ul>
+          <p className="text-xs">
+            Add what you want to buy — a name, a price and when you need it by —
+            and this will tell you how to pay for all of it.
+          </p>
         </div>
       </div>
     );
   }
 
   if (recommendation.status === "NO_FEASIBLE_PLAN") {
+    const breach = recommendation.baselineBreach;
     return (
       <section className="glass-panel space-y-4 rounded-2xl p-5">
         <div className="flex items-center gap-2">
           <HugeiconsIcon icon={Alert02Icon} className="size-5 text-destructive" />
-          <h3 className="text-sm font-semibold">This list does not fit as configured</h3>
+          <h3 className="text-sm font-semibold">
+            {breach ? "Your forecast is already short" : "This list does not fit"}
+          </h3>
         </div>
-        {recommendation.shortfallMinor !== undefined && (
-          <p className="text-sm">
-            Short by {formatMoney(recommendation.shortfallMinor, currencyCode)}
-            {recommendation.shortfallDate ? ` around ${formatDate(recommendation.shortfallDate)}` : ""}.
-          </p>
+
+        {breach ? (
+          <div className="space-y-1 text-sm">
+            <p>
+              Before buying anything, your balance drops to{" "}
+              <span className="font-amount tabular-nums text-destructive">
+                {formatMoney(breach.minimumBalanceMinor, currencyCode)}
+              </span>{" "}
+              on {formatDate(breach.minimumBalanceDate)}.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Nothing can be recommended against that. Record your accounts&apos; real
+              balances, or cover that gap first, and this list will be answerable.
+            </p>
+          </div>
+        ) : (
+          recommendation.shortfallMinor !== undefined && (
+            <p className="text-sm">
+              Short by{" "}
+              <span className="font-amount tabular-nums">
+                {formatMoney(recommendation.shortfallMinor, currencyCode)}
+              </span>
+              {recommendation.shortfallDate ? ` around ${formatDate(recommendation.shortfallDate)}` : ""}.
+            </p>
+          )
         )}
-        <ul className="space-y-1 text-xs text-muted-foreground">
-          {recommendation.blockers.map((blocker) => (
-            <li key={blocker}>{blocker}</li>
-          ))}
-        </ul>
+
+        {recommendation.blockedItems.length > 0 && (
+          <ul className="space-y-1.5 text-xs">
+            {recommendation.blockedItems.map((blocked) => (
+              <li key={blocked.itemId} className="flex flex-wrap gap-x-1.5">
+                <span className="font-medium text-foreground">{blocked.label}</span>
+                <span className="text-muted-foreground">
+                  {describeBlock(blocked, currencyCode)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
     );
   }

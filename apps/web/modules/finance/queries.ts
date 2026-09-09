@@ -893,7 +893,7 @@ export async function getPurchasePlanRecommendation(
   if (active.length === 0) {
     return {
       plan,
-      recommendation: { status: "INSUFFICIENT_DATA", choices: [], blockers: ["this plan has no active item yet"] },
+      recommendation: { status: "INSUFFICIENT_DATA", choices: [], blockedItems: [], blockers: ["this plan has no active item yet"] },
       overriddenItemIds: [],
       hasCards: cards.length > 0,
     };

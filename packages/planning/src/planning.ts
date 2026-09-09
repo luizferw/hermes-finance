@@ -704,13 +704,44 @@ export interface RecommendedChoice {
   totalCostMinor: number;
   installments: number;
   lastPaymentDate?: DateString;
-  /** Why this way of paying was picked over the others. */
+  /** Balance trough once this item is paid for this way. */
+  minimumBalanceMinor: number;
+  minimumBalanceDate: DateString;
+  /** How many ways of paying it were workable at all, this one included. */
+  workableCount: number;
+  /**
+   * Why this way was picked, in minor units. Written for the agent, MCP and
+   * the audit trail — a screen should render the structured fields above
+   * through its own formatter instead of printing these.
+   */
   reasons: string[];
+}
+
+export interface BlockedItem {
+  itemId: string;
+  label: string;
+  maxInstallments?: number;
+  limitDate?: DateString;
+  /** How many of its candidates failed for each reason. */
+  cappedCount: number;
+  lateCount: number;
+  overCardCount: number;
+  belowFloorCount: number;
+  /** Best trough among the candidates that only failed on the balance floor. */
+  bestFloorBreachMinor?: number;
+  bestFloorBreachDate?: DateString;
 }
 
 export interface PurchasePlanRecommendation {
   status: "OK" | "NO_FEASIBLE_PLAN" | "INSUFFICIENT_DATA";
   choices: RecommendedChoice[];
+  /**
+   * Set when the forecast is under water before any purchase. The list is not
+   * what broke; nothing could have been recommended against it.
+   */
+  baselineBreach?: { minimumBalanceMinor: number; minimumBalanceDate: DateString };
+  /** One entry per item no candidate worked for, as data rather than prose. */
+  blockedItems: BlockedItem[];
   /** The basket verdict for the chosen set. Absent when nothing was chosen. */
   simulation?: PurchasePlanSimulation;
   /** How far the best attempt still falls short of the reserve, and when. */
@@ -760,6 +791,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     return {
       status: "INSUFFICIENT_DATA",
       choices: [],
+      blockedItems: [],
       blockers: ["no item has a way of being paid to choose from"],
     };
   }
@@ -794,6 +826,11 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     return {
       status: "NO_FEASIBLE_PLAN",
       choices: [],
+      blockedItems: [],
+      baselineBreach: {
+        minimumBalanceMinor: baseline.minimumBalanceMinor,
+        minimumBalanceDate: baseline.minimumBalanceDate,
+      },
       shortfallMinor: Math.max(
         floorMinor - baseline.minimumBalanceMinor,
         input.hardReserveMinor - baseline.minimumBalanceMinor,
@@ -808,6 +845,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
   const chosenEvents: ForecastEvent[] = [];
   const cardChargedMinor = new Map<string, number>();
   const choices: RecommendedChoice[] = [];
+  const blockedItems: BlockedItem[] = [];
   const blockers: string[] = [];
   let bestEffortTrough: { minimumBalanceMinor: number; minimumBalanceDate: DateString } | undefined;
   let failed = false;
@@ -902,6 +940,18 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       }
       const why = `no way of paying it works — ${parts.join(", ")}`;
       blockers.push(`${item.label}: ${why}`);
+      blockedItems.push({
+        itemId: item.itemId,
+        label: item.label,
+        maxInstallments: item.maxInstallments,
+        limitDate,
+        cappedCount: capped,
+        lateCount: late,
+        overCardCount: overCard,
+        belowFloorCount: belowFloor,
+        bestFloorBreachMinor: floorBreakers[0]?.minimumBalanceMinor,
+        bestFloorBreachDate: floorBreakers[0]?.minimumBalanceDate,
+      });
       // Keep going: the remaining items still say something about the gap.
       continue;
     }
@@ -925,6 +975,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       totalCostMinor: picked.option.totalCostMinor,
       installments: picked.option.installments ?? 1,
       lastPaymentDate,
+      minimumBalanceMinor: picked.minimumBalanceMinor,
+      minimumBalanceDate: picked.minimumBalanceDate,
+      workableCount: acceptable.length,
       reasons: [
         `leaves the balance at ${picked.minimumBalanceMinor} on ${picked.minimumBalanceDate}, the highest of ${acceptable.length} workable ${acceptable.length === 1 ? "way" : "ways"} to pay it`,
         ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit but left less cash`] : []),
@@ -941,6 +994,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     return {
       status: "NO_FEASIBLE_PLAN",
       choices,
+      blockedItems,
       shortfallMinor: reserveGap,
       shortfallDate: reserveGap !== undefined ? bestEffortTrough?.minimumBalanceDate : undefined,
       blockers,
@@ -962,5 +1016,5 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     })),
   });
 
-  return { status: "OK", choices, simulation, blockers: [] };
+  return { status: "OK", choices, simulation, blockedItems: [], blockers: [] };
 }
