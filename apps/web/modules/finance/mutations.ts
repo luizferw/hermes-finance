@@ -769,6 +769,7 @@ export async function createPurchaseItem(input: CreatePurchaseItemInput) {
       deadline: data.deadline ?? null,
       status: data.status,
       notes: data.notes,
+      maxInstallments: data.maxInstallments ?? null,
     })
     .returning();
 
@@ -809,6 +810,7 @@ export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseIt
       deadline: data.deadline === undefined ? existing.deadline : data.deadline,
       status: data.status ?? existing.status,
       notes: data.notes ?? existing.notes,
+      maxInstallments: data.maxInstallments === undefined ? existing.maxInstallments : data.maxInstallments,
     })
     .where(eq(purchaseItems.id, itemId));
 

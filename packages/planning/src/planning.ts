@@ -666,3 +666,242 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     forecastAfter: after.forecast,
   };
 }
+
+export interface RecommendationCandidateItem {
+  itemId: string;
+  label: string;
+  /** Latest date this item may finish being paid. */
+  deadline?: DateString;
+  /**
+   * Cap on how many installments this item may be split into — a seller that
+   * only takes 3x, or none at all (1). Enforced here as well as upstream: the
+   * cap is the user's fact about the world, and a recommendation that quietly
+   * exceeds it is not a recommendation, it is a wrong answer.
+   */
+  maxInstallments?: number;
+  /**
+   * Every way this item could be paid, generated upstream where the real card
+   * cycles live. The engine picks among them; it does not invent them.
+   */
+  candidates: PaymentOption[];
+}
+
+export interface RecommendPurchasePlanInput {
+  forecastInput: BuildForecastInput;
+  hardReserveMinor: number;
+  softReserves?: SoftReserve[];
+  minimumAllowedBalanceMinor?: number;
+  /** The plan's target date; an item without its own deadline inherits it. */
+  targetDate?: DateString;
+  items: RecommendationCandidateItem[];
+}
+
+export interface RecommendedChoice {
+  itemId: string;
+  label: string;
+  optionId: string;
+  optionLabel: string;
+  totalCostMinor: number;
+  installments: number;
+  lastPaymentDate?: DateString;
+  /** Why this way of paying was picked over the others. */
+  reasons: string[];
+}
+
+export interface PurchasePlanRecommendation {
+  status: "OK" | "NO_FEASIBLE_PLAN" | "INSUFFICIENT_DATA";
+  choices: RecommendedChoice[];
+  /** The basket verdict for the chosen set. Absent when nothing was chosen. */
+  simulation?: PurchasePlanSimulation;
+  /** How far the best attempt still falls short of the reserve, and when. */
+  shortfallMinor?: number;
+  shortfallDate?: DateString;
+  blockers: string[];
+}
+
+interface CandidateVerdict {
+  option: PaymentOption;
+  /** Trough of the whole basket if this candidate is added to what is chosen. */
+  minimumBalanceMinor: number;
+  minimumBalanceDate: DateString;
+  breaksDeadline: boolean;
+  breaksCard: boolean;
+  breaksFloor: boolean;
+  breaksInstallmentCap: boolean;
+  acceptable: boolean;
+}
+
+/**
+ * Recommends how to pay for a whole list.
+ *
+ * The objective is to preserve cash: among the ways that break nothing, it
+ * takes the one that leaves the balance's low point highest, even when that
+ * costs more in total. Ties go to the cheaper option, then to fewer
+ * installments, then to the option id, so the same inputs always produce the
+ * same recommendation.
+ *
+ * This is a greedy pass in deadline order, not a proven optimum — it commits
+ * to each item before seeing the next. That is the honest trade for an answer
+ * that can explain itself item by item, which per R6 matters more here than
+ * squeezing out the last cruzeiro. When it reports that a list does not fit,
+ * that verdict is sound: the failure is that no candidate for some item keeps
+ * the basket whole, and the shortfall is measured against the best attempt.
+ *
+ * It never defers or drops an item to make a list fit. Deciding that a bin
+ * matters less than a floor is the user's call, not the engine's.
+ */
+export function recommendPurchasePlan(input: RecommendPurchasePlanInput): PurchasePlanRecommendation {
+  const floorMinor = input.minimumAllowedBalanceMinor ?? 0;
+  assertMinorUnits(floorMinor, "minimumAllowedBalanceMinor");
+  if (input.targetDate) assertValidDate(input.targetDate, "targetDate");
+
+  const withCandidates = input.items.filter((item) => item.candidates.length > 0);
+  if (withCandidates.length === 0) {
+    return {
+      status: "INSUFFICIENT_DATA",
+      choices: [],
+      blockers: ["no item has a way of being paid to choose from"],
+    };
+  }
+
+  // Earliest deadline first: the most constrained item picks while the most
+  // room is still available. Ties broken on id so the order never depends on
+  // how the rows happened to arrive.
+  const ordered = [...withCandidates].sort((left, right) => {
+    const leftBy = left.deadline ?? input.targetDate ?? "9999-12-31";
+    const rightBy = right.deadline ?? input.targetDate ?? "9999-12-31";
+    return leftBy.localeCompare(rightBy) || left.itemId.localeCompare(right.itemId);
+  });
+
+  const chosenEvents: ForecastEvent[] = [];
+  const cardChargedMinor = new Map<string, number>();
+  const choices: RecommendedChoice[] = [];
+  const blockers: string[] = [];
+  let bestEffortTrough: { minimumBalanceMinor: number; minimumBalanceDate: DateString } | undefined;
+  let failed = false;
+
+  for (const item of ordered) {
+    const limitDate = item.deadline ?? input.targetDate;
+
+    const verdicts = item.candidates.map((option): CandidateVerdict => {
+      const { lastPaymentDate } = summarizeOption(option);
+      const result = calculateSafeToSpend({
+        hardReserveMinor: input.hardReserveMinor,
+        forecastInput: {
+          ...input.forecastInput,
+          events: [...input.forecastInput.events, ...chosenEvents, ...option.cashEvents],
+        },
+      });
+
+      const breaksDeadline = Boolean(limitDate && lastPaymentDate && lastPaymentDate > limitDate);
+      const card = option.card;
+      const breaksCard = card
+        ? card.committedMinor + (cardChargedMinor.get(card.cardId) ?? 0) + option.totalCostMinor >
+          card.creditLimitMinor
+        : false;
+      const breaksFloor = result.minimumBalanceMinor < floorMinor || result.hardReserveViolated;
+      const breaksInstallmentCap =
+        item.maxInstallments !== undefined && (option.installments ?? 1) > item.maxInstallments;
+
+      return {
+        option,
+        minimumBalanceMinor: result.minimumBalanceMinor,
+        minimumBalanceDate: result.minimumBalanceDate,
+        breaksDeadline,
+        breaksCard,
+        breaksFloor,
+        breaksInstallmentCap,
+        acceptable: !breaksDeadline && !breaksCard && !breaksFloor && !breaksInstallmentCap,
+      };
+    });
+
+    // Preserve cash: highest trough wins, then cheaper, then fewer
+    // installments, then id. Every comparison is total and deterministic.
+    const byPreference = (left: CandidateVerdict, right: CandidateVerdict) =>
+      right.minimumBalanceMinor - left.minimumBalanceMinor ||
+      left.option.totalCostMinor - right.option.totalCostMinor ||
+      (left.option.installments ?? 1) - (right.option.installments ?? 1) ||
+      left.option.id.localeCompare(right.option.id);
+
+    const acceptable = verdicts.filter((verdict) => verdict.acceptable).sort(byPreference);
+    const picked = acceptable[0];
+
+    if (!picked) {
+      failed = true;
+      const nearest = [...verdicts].sort(byPreference)[0]!;
+      if (!bestEffortTrough || nearest.minimumBalanceMinor < bestEffortTrough.minimumBalanceMinor) {
+        bestEffortTrough = {
+          minimumBalanceMinor: nearest.minimumBalanceMinor,
+          minimumBalanceDate: nearest.minimumBalanceDate,
+        };
+      }
+      const why = nearest.breaksInstallmentCap
+        ? `it cannot be split beyond ${item.maxInstallments}x, and nothing within that fits`
+        : nearest.breaksDeadline
+          ? `every way of paying it finishes after ${limitDate}`
+          : nearest.breaksCard
+            ? "every card option goes over its limit"
+            : `the best it can do leaves ${nearest.minimumBalanceMinor} on ${nearest.minimumBalanceDate}`;
+      blockers.push(`${item.label}: ${why}`);
+      // Keep going: the remaining items still say something about the gap.
+      continue;
+    }
+
+    chosenEvents.push(...picked.option.cashEvents);
+    if (picked.option.card) {
+      const card = picked.option.card;
+      cardChargedMinor.set(
+        card.cardId,
+        (cardChargedMinor.get(card.cardId) ?? 0) + picked.option.totalCostMinor,
+      );
+    }
+
+    const runnersUp = acceptable.length - 1;
+    const { lastPaymentDate } = summarizeOption(picked.option);
+    choices.push({
+      itemId: item.itemId,
+      label: item.label,
+      optionId: picked.option.id,
+      optionLabel: picked.option.label,
+      totalCostMinor: picked.option.totalCostMinor,
+      installments: picked.option.installments ?? 1,
+      lastPaymentDate,
+      reasons: [
+        `leaves the balance at ${picked.minimumBalanceMinor} on ${picked.minimumBalanceDate}, the highest of ${acceptable.length} workable ${acceptable.length === 1 ? "way" : "ways"} to pay it`,
+        ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit but left less cash`] : []),
+        ...(limitDate && lastPaymentDate ? [`paid off by ${lastPaymentDate}, within ${limitDate}`] : []),
+      ],
+    });
+  }
+
+  if (failed || choices.length !== ordered.length) {
+    const reserveGap =
+      bestEffortTrough && bestEffortTrough.minimumBalanceMinor < input.hardReserveMinor
+        ? input.hardReserveMinor - bestEffortTrough.minimumBalanceMinor
+        : undefined;
+    return {
+      status: "NO_FEASIBLE_PLAN",
+      choices,
+      shortfallMinor: reserveGap,
+      shortfallDate: reserveGap !== undefined ? bestEffortTrough?.minimumBalanceDate : undefined,
+      blockers,
+    };
+  }
+
+  const chosenById = new Map(choices.map((choice) => [choice.itemId, choice.optionId]));
+  const simulation = simulatePurchasePlan({
+    forecastInput: input.forecastInput,
+    hardReserveMinor: input.hardReserveMinor,
+    softReserves: input.softReserves,
+    minimumAllowedBalanceMinor: input.minimumAllowedBalanceMinor,
+    targetDate: input.targetDate,
+    items: ordered.map((item) => ({
+      itemId: item.itemId,
+      label: item.label,
+      deadline: item.deadline,
+      option: item.candidates.find((candidate) => candidate.id === chosenById.get(item.itemId))!,
+    })),
+  });
+
+  return { status: "OK", choices, simulation, blockers: [] };
+}

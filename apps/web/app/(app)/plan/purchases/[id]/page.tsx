@@ -10,11 +10,14 @@ import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
 import {
   buildUserForecastDetailed,
-  getPurchasePlan,
-  getPurchasePlanSimulation,
+  getPurchasePlanRecommendation,
   listCreditCards,
 } from "@/modules/finance/queries";
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
+import type {
+  PurchasePlanRecommendation,
+  PurchasePlanSimulation,
+} from "@hermes-finance/planning";
 import { Badge } from "@/components/ui/badge";
 import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
 import { cn } from "@/lib/utils";
@@ -26,7 +29,7 @@ import { PlanTotalsLine } from "../plan-totals";
 
 export const metadata: Metadata = { title: "Payment options" };
 
-/** Matches the default horizon `getPurchasePlanSimulation` uses internally. */
+/** Matches the default horizon `getPurchasePlanRecommendation` uses internally. */
 const PLAN_HORIZON_DAYS = 365;
 
 const PRIORITY_LABEL: Record<string, string> = {
@@ -35,6 +38,14 @@ const PRIORITY_LABEL: Record<string, string> = {
   medium: "Medium",
   low: "Low",
   optional: "Optional",
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  idea: "Idea",
+  planned: "Planned",
+  ready: "Ready",
+  purchased: "Purchased",
+  cancelled: "Cancelled",
 };
 
 const REJECTION_LABEL: Record<string, string> = {
@@ -89,12 +100,14 @@ function explain(option: ComparedOption, currencyCode: string): string[] {
 }
 
 /**
- * The payment optimizer surface.
+ * The purchase plan surface: a list to fill in, and the engine's answer for
+ * how to pay for all of it.
  *
  * Every figure here is rendered exactly as the engine returned it — nothing on
- * this page adds, divides or rounds money. When the engine declines to
- * recommend, that is shown as the answer, because saying "not enough to go on"
- * is more useful than a confident guess.
+ * this page adds, divides or rounds money, and nothing here picks a winner
+ * among payment candidates. When the engine declines to recommend, that
+ * refusal — and its reasons — is the answer, shown as-is rather than papered
+ * over with a guess.
  */
 export default async function PurchasePlanDetailPage({
   params,
@@ -103,26 +116,29 @@ export default async function PurchasePlanDetailPage({
 }) {
   const user = await requireUser();
   const { id } = await params;
-  const [plan, creditCards] = await Promise.all([
-    getPurchasePlan(user.id, id),
-    listCreditCards(user.id),
-  ]);
-  if (!plan) notFound();
-  const cardOptions = creditCards.map((card) => ({ id: card.id, name: card.name }));
 
-  const [comparisons, planSimulationResult, baseline] = await Promise.all([
-    Promise.all(
-      plan.items.map(async (item) => ({
-        item,
-        result: await compareStoredPaymentOptions(user.id, item.id),
-      })),
-    ),
-    getPurchasePlanSimulation(user.id, plan.id),
+  const [recommendationResult, creditCards, baseline] = await Promise.all([
+    getPurchasePlanRecommendation(user.id, id),
+    listCreditCards(user.id),
     buildUserForecastDetailed(user.id, PLAN_HORIZON_DAYS),
   ]);
+  if (!recommendationResult) notFound();
+  const { plan, recommendation, overriddenItemIds, hasCards } = recommendationResult;
+  const cardOptions = creditCards.map((card) => ({ id: card.id, name: card.name }));
 
-  const planSimulation = planSimulationResult?.simulation;
-  const unconfiguredItems = planSimulationResult?.unconfiguredItems ?? [];
+  // The manual, per-option comparison further down still reads from the
+  // stored payment options — kept for whoever wants to inspect a specific
+  // option rather than trust the recommendation outright.
+  const comparisons = await Promise.all(
+    plan.items.map(async (item) => ({
+      item,
+      result: await compareStoredPaymentOptions(user.id, item.id),
+    })),
+  );
+
+  const simulation = recommendation?.status === "OK" ? recommendation.simulation : undefined;
+  const choiceByItemId = new Map((recommendation?.choices ?? []).map((choice) => [choice.itemId, choice]));
+  const overridden = new Set(overriddenItemIds);
 
   // Joined on the date, not the position — see the same reasoning that used
   // to live on the standalone /plan/simulate screen: two forecasts built by
@@ -132,15 +148,15 @@ export default async function PurchasePlanDetailPage({
   const baselineByDate = new Map(
     baseline.forecast.days.map((day) => [day.date, day.closingBalanceMinor]),
   );
-  const planChartData = planSimulation
-    ? planSimulation.forecastAfter.days.flatMap((day) => {
+  const planChartData = simulation
+    ? simulation.forecastAfter.days.flatMap((day) => {
         const beforeMinor = baselineByDate.get(day.date);
         if (beforeMinor === undefined) return [];
         return [{ date: day.date, afterMinor: day.closingBalanceMinor, beforeMinor }];
       })
     : [];
-  const monthlyEntries = planSimulation
-    ? Object.entries(planSimulation.monthlyImpactMinor).sort(([a], [b]) => a.localeCompare(b))
+  const monthlyEntries = simulation
+    ? Object.entries(simulation.monthlyImpactMinor).sort(([a], [b]) => a.localeCompare(b))
     : [];
 
   return (
@@ -182,130 +198,37 @@ export default async function PurchasePlanDetailPage({
         </div>
       </div>
 
-      {unconfiguredItems.length > 0 && (
+      {!hasCards && (
         <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-warning-foreground">
-          <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-4 shrink-0" />
+          <HugeiconsIcon icon={InformationCircleIcon} className="mt-0.5 size-4 shrink-0" />
           <p>
-            {unconfiguredItems.length} item{unconfiguredItems.length > 1 ? "s" : ""} still need
-            {unconfiguredItems.length > 1 ? "" : "s"} a payment option chosen before the
-            plan&apos;s verdict below can account for {unconfiguredItems.length > 1 ? "them" : "it"}:{" "}
-            {unconfiguredItems.map((item) => item.name).join(", ")}.
+            No credit card is registered yet, so only paying in full is being considered. Register a
+            card to get installment recommendations.
           </p>
         </div>
       )}
 
-      {planSimulation && (
-        <section className="glass-panel space-y-5 rounded-2xl p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <HugeiconsIcon
-                icon={planSimulation.feasible ? CheckmarkCircle02Icon : Alert02Icon}
-                className={cn("size-5", planSimulation.feasible ? "text-success" : "text-destructive")}
-              />
-              <h3 className="text-sm font-semibold">
-                {planSimulation.feasible
-                  ? plan.targetDate
-                    ? `Fits, all of it, by ${formatDate(plan.targetDate)}`
-                    : "Fits, all of it"
-                  : "Does not fit as configured"}
-              </h3>
-            </div>
-            <span className="font-amount text-sm tabular-nums text-muted-foreground">
-              {formatMoney(planSimulation.totalCostMinor, plan.currencyCode)} total
-            </span>
-          </div>
-
-          {!planSimulation.feasible && (
-            <div className="flex flex-wrap gap-1.5">
-              {planSimulation.rejections.map((code) => (
-                <Badge key={code} variant="destructive" className="text-[10px]">
-                  {REJECTION_LABEL[code] ?? code}
-                </Badge>
-              ))}
-            </div>
-          )}
-          {planSimulation.reasons.length > 0 && (
-            <ul className="space-y-1 text-xs text-muted-foreground">
-              {planSimulation.reasons.map((reason, index) => (
-                <li key={index}>{reason}</li>
-              ))}
-            </ul>
-          )}
-
-          <div className="grid gap-6 sm:grid-cols-2">
-            <BeforeAfter
-              label="Minimum balance"
-              beforeMinor={planSimulation.minimumBalanceBeforeMinor}
-              afterMinor={planSimulation.minimumBalanceAfterMinor}
-              note={`on ${formatDate(planSimulation.minimumBalanceAfterDate)}`}
-              currencyCode={plan.currencyCode}
-            />
-            <BeforeAfter
-              label="Safe to spend"
-              beforeMinor={planSimulation.safeToSpendBeforeMinor}
-              afterMinor={planSimulation.safeToSpendAfterMinor}
-              currencyCode={plan.currencyCode}
-            />
-          </div>
-
-          <div>
-            <span className="micro-label">Balance, vs without this plan</span>
-            <div className="mt-3">
-              <SimulationBalanceChart data={planChartData} currencyCode={plan.currencyCode} />
-            </div>
-          </div>
-
-          {monthlyEntries.length > 0 && (
-            <div>
-              <span className="micro-label">Cash the plan adds, by month</span>
-              <ul className="mt-2 divide-y divide-dashed">
-                {monthlyEntries.map(([month, amountMinor]) => (
-                  <li key={month} className="flex items-center justify-between py-1.5 text-xs first:pt-0 last:pb-0">
-                    <span className="text-muted-foreground">{month}</span>
-                    <span className="font-amount tabular-nums">
-                      {formatMoney(amountMinor, plan.currencyCode)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {planSimulation.cards.length > 0 && (
-            <div>
-              <span className="micro-label">Card load</span>
-              <ul className="mt-2 divide-y divide-dashed">
-                {planSimulation.cards.map((card) => (
-                  <li key={card.cardId} className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0">
-                    <span>{card.label}</span>
-                    <span className="flex items-center gap-2">
-                      <span className="font-amount tabular-nums text-muted-foreground">
-                        {formatMoney(card.committedMinor + card.planChargedMinor, plan.currencyCode)}
-                        {" / "}
-                        {formatMoney(card.creditLimitMinor, plan.currencyCode)}
-                      </span>
-                      {card.exceededMinor > 0 && (
-                        <Badge variant="destructive" className="text-[10px]">
-                          +{formatMoney(card.exceededMinor, plan.currencyCode)} over
-                        </Badge>
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </section>
+      {recommendation && (
+        <RecommendationVerdict
+          recommendation={recommendation}
+          simulation={simulation}
+          planChartData={planChartData}
+          monthlyEntries={monthlyEntries}
+          currencyCode={plan.currencyCode}
+          targetDate={plan.targetDate}
+        />
       )}
 
-      {comparisons.length === 0 ? (
+      {plan.items.length === 0 ? (
         <div className="rounded-lg border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
-          Nothing in this plan yet. Add an item and its payment options to compare them here.
+          Nothing in this plan yet. Add an item to get a recommendation for it.
         </div>
       ) : (
         comparisons.map(({ item, result }) => {
           const comparison = result?.comparison;
           const recommendedId = comparison && "recommendedOptionId" in comparison ? comparison.recommendedOptionId : undefined;
+          const choice = choiceByItemId.get(item.id);
+          const isDone = item.status === "purchased" || item.status === "cancelled";
 
           return (
             <section key={item.id} className="glass-panel rounded-2xl p-5">
@@ -319,11 +242,12 @@ export default async function PurchasePlanDetailPage({
                     )}
                     {item.actualPriceMinor !== null && " actually paid"}
                     {item.deadline ? ` · needed by ${formatDate(item.deadline)}` : ""}
+                    {item.maxInstallments ? ` · up to ${item.maxInstallments}x` : ""}
                   </p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <Badge variant="outline" className="text-[10px]">
-                    {PRIORITY_LABEL[item.priority] ?? item.priority}
+                    {isDone ? STATUS_LABEL[item.status] : PRIORITY_LABEL[item.priority] ?? item.priority}
                   </Badge>
                   <PurchaseItemActions
                     item={{
@@ -336,140 +260,347 @@ export default async function PurchasePlanDetailPage({
                       deadline: item.deadline,
                       status: item.status,
                       notes: item.notes,
+                      maxInstallments: item.maxInstallments,
                     }}
                     currencyCode={plan.currencyCode}
                   />
                 </div>
               </header>
 
-              <PaymentOptionsSection
-                purchaseItemId={item.id}
-                currencyCode={plan.currencyCode}
-                options={item.paymentOptions.map((option) => ({
-                  id: option.id,
-                  paymentMethod: option.paymentMethod,
-                  cardId: option.cardId,
-                  cashPriceMinor: option.cashPriceMinor,
-                  installments: option.installments,
-                  installmentAmountMinor: option.installmentAmountMinor,
-                  totalCostMinor: option.totalCostMinor,
-                  firstPaymentDate: option.firstPaymentDate,
-                }))}
-                cards={cardOptions}
-                selectedPaymentOptionId={item.selectedPaymentOptionId}
-              />
-
-              {!comparison || comparison.status !== "OK" ? (
-                <div className="mt-4 flex gap-2.5 rounded-xl bg-muted/50 p-4">
-                  <HugeiconsIcon
-                    icon={InformationCircleIcon}
-                    className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                    strokeWidth={2}
-                  />
-                  <div className="min-w-0 space-y-1">
-                    <p className="text-sm font-medium">
-                      {comparison?.status === "NO_FEASIBLE_OPTION"
-                        ? "No option works right now"
-                        : "Not enough to compare yet"}
-                    </p>
-                    <ul className="space-y-0.5 text-xs text-muted-foreground">
-                      {(comparison?.blockers ?? ["No payment option is registered for this item."]).map(
-                        (blocker) => (
-                          <li key={blocker}>{blocker}</li>
-                        ),
+              {!isDone && (
+                <div className="mt-3">
+                  {choice ? (
+                    <div
+                      className={cn(
+                        "rounded-xl border p-4",
+                        overridden.has(item.id) ? "border-border bg-muted/40" : "border-primary/40 bg-primary/5",
                       )}
-                    </ul>
-                  </div>
-                </div>
-              ) : null}
-
-              {comparison && comparison.options.length > 0 ? (
-                <ul className="mt-4 space-y-3">
-                  {comparison.options.map((option) => {
-                    const recommended = option.id === recommendedId;
-                    return (
-                      <li
-                        key={option.id}
-                        className={cn(
-                          "rounded-xl border p-4",
-                          recommended ? "border-primary/40 bg-primary/5" : "border-border",
-                          !option.feasible && "opacity-70",
-                        )}
-                      >
-                        <div className="flex flex-wrap items-baseline justify-between gap-2">
-                          <span className="flex items-center gap-1.5 text-sm font-medium">
-                            {option.label}
-                            {recommended && (
-                              <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
-                                <HugeiconsIcon
-                                  icon={CheckmarkCircle02Icon}
-                                  className="size-3.5"
-                                  strokeWidth={2}
-                                />
-                                Recommended
-                              </span>
+                    >
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-sm font-medium">
+                          {choice.optionLabel}
+                          <span
+                            className={cn(
+                              "inline-flex items-center gap-1 text-xs font-medium",
+                              overridden.has(item.id) ? "text-muted-foreground" : "text-primary",
                             )}
+                          >
+                            <HugeiconsIcon icon={CheckmarkCircle02Icon} className="size-3.5" strokeWidth={2} />
+                            {overridden.has(item.id) ? "Chosen by you" : "Recommended"}
                           </span>
-                          <span className="font-amount text-sm tabular-nums">
-                            {formatMoney(option.totalCostMinor, plan.currencyCode)}
-                          </span>
-                        </div>
-
-                        <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
-                          <div>
-                            <dt className="text-muted-foreground">Lowest balance</dt>
-                            <dd className="font-amount tabular-nums">
-                              {formatMoney(option.minimumBalanceMinor, plan.currencyCode)}
-                              <span className="ml-1 text-muted-foreground">
-                                on {formatDate(option.minimumBalanceDate)}
-                              </span>
-                            </dd>
-                          </div>
-                          <div>
-                            <dt className="text-muted-foreground">Last payment</dt>
-                            <dd>{option.lastPaymentDate ? formatDate(option.lastPaymentDate) : "—"}</dd>
-                          </div>
-                          <div>
-                            <dt className="text-muted-foreground">Safe to spend after</dt>
-                            <dd className="font-amount tabular-nums">
-                              {formatMoney(option.safeToSpendAfterMinor, plan.currencyCode)}
-                            </dd>
-                          </div>
-                        </dl>
-
-                        {option.rejections.length > 0 && (
-                          <ul className="mt-2 flex flex-wrap gap-1.5">
-                            {option.rejections.map((rejection) => (
-                              <li
-                                key={rejection}
-                                className="rounded-full bg-destructive/10 px-2 py-0.5 text-[0.625rem] font-medium text-destructive"
-                              >
-                                {REJECTION_LABEL[rejection] ?? rejection}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-
+                        </span>
+                        <span className="font-amount text-sm tabular-nums">
+                          {formatMoney(choice.totalCostMinor, plan.currencyCode)}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {choice.installments > 1
+                          ? `${choice.installments}x`
+                          : "In full"}
+                        {choice.lastPaymentDate ? `, settled by ${formatDate(choice.lastPaymentDate)}` : ""}
+                      </p>
+                      {choice.reasons.length > 0 && (
                         <details className="mt-2 group">
                           <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
                             Why
                           </summary>
                           <ul className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
-                            {explain(option, plan.currencyCode).map((line) => (
-                              <li key={line}>{line}</li>
+                            {choice.reasons.map((reason, index) => (
+                              <li key={index}>{reason}</li>
                             ))}
                           </ul>
                         </details>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : null}
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl bg-muted/50 p-4 text-xs text-muted-foreground">
+                      {recommendation?.status === "INSUFFICIENT_DATA"
+                        ? "Not enough to go on yet."
+                        : "Not part of the plan the engine could work out — see the blockers above."}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <details className="mt-4 group">
+                <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
+                  Manual options
+                </summary>
+                <div className="mt-2">
+                  <PaymentOptionsSection
+                    purchaseItemId={item.id}
+                    currencyCode={plan.currencyCode}
+                    options={item.paymentOptions.map((option) => ({
+                      id: option.id,
+                      paymentMethod: option.paymentMethod,
+                      cardId: option.cardId,
+                      cashPriceMinor: option.cashPriceMinor,
+                      installments: option.installments,
+                      installmentAmountMinor: option.installmentAmountMinor,
+                      totalCostMinor: option.totalCostMinor,
+                      firstPaymentDate: option.firstPaymentDate,
+                    }))}
+                    cards={cardOptions}
+                    selectedPaymentOptionId={item.selectedPaymentOptionId}
+                  />
+
+                  {!comparison || comparison.status !== "OK" ? (
+                    <div className="mt-4 flex gap-2.5 rounded-xl bg-muted/50 p-4">
+                      <HugeiconsIcon
+                        icon={InformationCircleIcon}
+                        className="mt-0.5 size-4 shrink-0 text-muted-foreground"
+                        strokeWidth={2}
+                      />
+                      <div className="min-w-0 space-y-1">
+                        <p className="text-sm font-medium">
+                          {comparison?.status === "NO_FEASIBLE_OPTION"
+                            ? "No option works right now"
+                            : "Not enough to compare yet"}
+                        </p>
+                        <ul className="space-y-0.5 text-xs text-muted-foreground">
+                          {(comparison?.blockers ?? ["No payment option is registered for this item."]).map(
+                            (blocker) => (
+                              <li key={blocker}>{blocker}</li>
+                            ),
+                          )}
+                        </ul>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {comparison && comparison.options.length > 0 ? (
+                    <ul className="mt-4 space-y-3">
+                      {comparison.options.map((option) => {
+                        const isRecommended = option.id === recommendedId;
+                        return (
+                          <li
+                            key={option.id}
+                            className={cn(
+                              "rounded-xl border p-4",
+                              isRecommended ? "border-primary/40 bg-primary/5" : "border-border",
+                              !option.feasible && "opacity-70",
+                            )}
+                          >
+                            <div className="flex flex-wrap items-baseline justify-between gap-2">
+                              <span className="flex items-center gap-1.5 text-sm font-medium">
+                                {option.label}
+                                {isRecommended && (
+                                  <span className="inline-flex items-center gap-1 text-xs font-medium text-primary">
+                                    <HugeiconsIcon
+                                      icon={CheckmarkCircle02Icon}
+                                      className="size-3.5"
+                                      strokeWidth={2}
+                                    />
+                                    Recommended
+                                  </span>
+                                )}
+                              </span>
+                              <span className="font-amount text-sm tabular-nums">
+                                {formatMoney(option.totalCostMinor, plan.currencyCode)}
+                              </span>
+                            </div>
+
+                            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+                              <div>
+                                <dt className="text-muted-foreground">Lowest balance</dt>
+                                <dd className="font-amount tabular-nums">
+                                  {formatMoney(option.minimumBalanceMinor, plan.currencyCode)}
+                                  <span className="ml-1 text-muted-foreground">
+                                    on {formatDate(option.minimumBalanceDate)}
+                                  </span>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt className="text-muted-foreground">Last payment</dt>
+                                <dd>{option.lastPaymentDate ? formatDate(option.lastPaymentDate) : "—"}</dd>
+                              </div>
+                              <div>
+                                <dt className="text-muted-foreground">Safe to spend after</dt>
+                                <dd className="font-amount tabular-nums">
+                                  {formatMoney(option.safeToSpendAfterMinor, plan.currencyCode)}
+                                </dd>
+                              </div>
+                            </dl>
+
+                            {option.rejections.length > 0 && (
+                              <ul className="mt-2 flex flex-wrap gap-1.5">
+                                {option.rejections.map((rejection) => (
+                                  <li
+                                    key={rejection}
+                                    className="rounded-full bg-destructive/10 px-2 py-0.5 text-[0.625rem] font-medium text-destructive"
+                                  >
+                                    {REJECTION_LABEL[rejection] ?? rejection}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+
+                            <details className="mt-2 group">
+                              <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
+                                Why
+                              </summary>
+                              <ul className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+                                {explain(option, plan.currencyCode).map((line) => (
+                                  <li key={line}>{line}</li>
+                                ))}
+                              </ul>
+                            </details>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : null}
+                </div>
+              </details>
             </section>
           );
         })
       )}
     </div>
+  );
+}
+
+function RecommendationVerdict({
+  recommendation,
+  simulation,
+  planChartData,
+  monthlyEntries,
+  currencyCode,
+  targetDate,
+}: {
+  recommendation: PurchasePlanRecommendation | undefined;
+  simulation: PurchasePlanSimulation | undefined;
+  planChartData: Array<{ date: string; afterMinor: number; beforeMinor: number }>;
+  monthlyEntries: Array<[string, number]>;
+  currencyCode: string;
+  targetDate: string | null;
+}) {
+  if (!recommendation) return null;
+
+  if (recommendation.status === "INSUFFICIENT_DATA") {
+    return (
+      <div className="flex items-start gap-2 rounded-xl border border-border bg-muted/40 p-4 text-sm text-muted-foreground">
+        <HugeiconsIcon icon={InformationCircleIcon} className="mt-0.5 size-4 shrink-0" />
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Not enough to recommend yet</p>
+          <ul className="space-y-0.5 text-xs">
+            {recommendation.blockers.map((blocker) => (
+              <li key={blocker}>{blocker}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    );
+  }
+
+  if (recommendation.status === "NO_FEASIBLE_PLAN") {
+    return (
+      <section className="glass-panel space-y-4 rounded-2xl p-5">
+        <div className="flex items-center gap-2">
+          <HugeiconsIcon icon={Alert02Icon} className="size-5 text-destructive" />
+          <h3 className="text-sm font-semibold">This list does not fit as configured</h3>
+        </div>
+        {recommendation.shortfallMinor !== undefined && (
+          <p className="text-sm">
+            Short by {formatMoney(recommendation.shortfallMinor, currencyCode)}
+            {recommendation.shortfallDate ? ` around ${formatDate(recommendation.shortfallDate)}` : ""}.
+          </p>
+        )}
+        <ul className="space-y-1 text-xs text-muted-foreground">
+          {recommendation.blockers.map((blocker) => (
+            <li key={blocker}>{blocker}</li>
+          ))}
+        </ul>
+      </section>
+    );
+  }
+
+  // OK — the basket fits, and `simulation` is the verdict for the chosen set.
+  if (!simulation) return null;
+
+  return (
+    <section className="glass-panel space-y-5 rounded-2xl p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <HugeiconsIcon
+            icon={simulation.feasible ? CheckmarkCircle02Icon : Alert02Icon}
+            className={cn("size-5", simulation.feasible ? "text-success" : "text-destructive")}
+          />
+          <h3 className="text-sm font-semibold">
+            {simulation.feasible
+              ? targetDate
+                ? `Fits, all of it, by ${formatDate(targetDate)}`
+                : "Fits, all of it"
+              : "Does not fit as configured"}
+          </h3>
+        </div>
+        <span className="font-amount text-sm tabular-nums text-muted-foreground">
+          {formatMoney(simulation.totalCostMinor, currencyCode)} total
+        </span>
+      </div>
+
+      <div className="grid gap-6 sm:grid-cols-2">
+        <BeforeAfter
+          label="Minimum balance"
+          beforeMinor={simulation.minimumBalanceBeforeMinor}
+          afterMinor={simulation.minimumBalanceAfterMinor}
+          note={`on ${formatDate(simulation.minimumBalanceAfterDate)}`}
+          currencyCode={currencyCode}
+        />
+        <BeforeAfter
+          label="Safe to spend"
+          beforeMinor={simulation.safeToSpendBeforeMinor}
+          afterMinor={simulation.safeToSpendAfterMinor}
+          currencyCode={currencyCode}
+        />
+      </div>
+
+      <div>
+        <span className="micro-label">Balance, vs without this plan</span>
+        <div className="mt-3">
+          <SimulationBalanceChart data={planChartData} currencyCode={currencyCode} />
+        </div>
+      </div>
+
+      {monthlyEntries.length > 0 && (
+        <div>
+          <span className="micro-label">Cash the plan adds, by month</span>
+          <ul className="mt-2 divide-y divide-dashed">
+            {monthlyEntries.map(([month, amountMinor]) => (
+              <li key={month} className="flex items-center justify-between py-1.5 text-xs first:pt-0 last:pb-0">
+                <span className="text-muted-foreground">{month}</span>
+                <span className="font-amount tabular-nums">{formatMoney(amountMinor, currencyCode)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {simulation.cards.length > 0 && (
+        <div>
+          <span className="micro-label">Card load</span>
+          <ul className="mt-2 divide-y divide-dashed">
+            {simulation.cards.map((card) => (
+              <li key={card.cardId} className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0">
+                <span>{card.label}</span>
+                <span className="flex items-center gap-2">
+                  <span className="font-amount tabular-nums text-muted-foreground">
+                    {formatMoney(card.committedMinor + card.planChargedMinor, currencyCode)}
+                    {" / "}
+                    {formatMoney(card.creditLimitMinor, currencyCode)}
+                  </span>
+                  {card.exceededMinor > 0 && (
+                    <Badge variant="destructive" className="text-[10px]">
+                      +{formatMoney(card.exceededMinor, currencyCode)} over
+                    </Badge>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
   );
 }
 

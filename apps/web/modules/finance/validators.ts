@@ -140,6 +140,8 @@ export const createPurchaseItemSchema = z.object({
   deadline: isoDate.nullish(),
   status: purchaseItemStatusSchema.default("idea"),
   notes: z.string().max(2000).optional(),
+  /** Cap on how many installments this item can be split into; null means no restriction. */
+  maxInstallments: z.coerce.number().int().min(1).nullish(),
 });
 
 export const updatePurchaseItemSchema = createPurchaseItemSchema

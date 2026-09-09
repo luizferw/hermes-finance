@@ -1,0 +1,2 @@
+ALTER TABLE "purchase_items" ADD COLUMN "max_installments" smallint;--> statement-breakpoint
+ALTER TABLE "purchase_items" ADD CONSTRAINT "purchase_items_max_installments_positive" CHECK ("purchase_items"."max_installments" IS NULL OR "purchase_items"."max_installments" >= 1);

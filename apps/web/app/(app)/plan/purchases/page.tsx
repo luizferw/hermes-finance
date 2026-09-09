@@ -182,6 +182,7 @@ export default async function PurchasesPage() {
                             deadline: item.deadline,
                             status: item.status,
                             notes: item.notes,
+                            maxInstallments: item.maxInstallments,
                           }}
                           currencyCode={plan.currencyCode}
                         />

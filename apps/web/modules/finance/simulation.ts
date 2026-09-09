@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, eq, gte } from "drizzle-orm";
+import { and, asc, eq, gte, inArray } from "drizzle-orm";
 import { creditCardBillingCycles, creditCards, db, paymentOptions, purchaseItems } from "@kosh/db";
 import { todayIso } from "@kosh/domain";
 import { nominalCycleDueDates, nominalCycleFor, type ForecastEvent } from "@hermes-finance/forecast";
@@ -49,11 +49,54 @@ export interface PurchaseOptionInput {
  * whenever they have been observed, and only the tail beyond them falls back to
  * the card's nominal closing and due days.
  */
+/**
+ * Everything about a user's cards that resolving an option needs, read once.
+ *
+ * Recommending a plan asks for a hundred-odd candidates — every item against
+ * every card at every installment count — and each one used to re-read the
+ * card, its billing cycles and the whole installment ledger. Loading it once
+ * per request turns hundreds of queries into three.
+ */
+export interface CardContext {
+  cards: Awaited<ReturnType<typeof listCreditCards>>;
+  byId: Map<string, { defaultClosingDay: number; defaultDueDay: number }>;
+  /** Observed cycle due dates per card, ascending. */
+  cycleDueDatesByCard: Map<string, string[]>;
+}
+
+export async function loadCardContext(userId: string): Promise<CardContext> {
+  const cards = await listCreditCards(userId);
+  const byId = new Map(
+    cards.map((card) => [
+      card.id,
+      { defaultClosingDay: card.defaultClosingDay, defaultDueDay: card.defaultDueDay },
+    ]),
+  );
+  const cycleDueDatesByCard = new Map<string, string[]>();
+  if (cards.length > 0) {
+    const cycles = await db.query.creditCardBillingCycles.findMany({
+      where: inArray(
+        creditCardBillingCycles.creditCardId,
+        cards.map((card) => card.id),
+      ),
+      orderBy: [asc(creditCardBillingCycles.dueAt)],
+      columns: { creditCardId: true, dueAt: true },
+    });
+    for (const cycle of cycles) {
+      const list = cycleDueDatesByCard.get(cycle.creditCardId) ?? [];
+      list.push(cycle.dueAt);
+      cycleDueDatesByCard.set(cycle.creditCardId, list);
+    }
+  }
+  return { cards, byId, cycleDueDatesByCard };
+}
+
 async function resolveSettlementDates(
   userId: string,
   option: PurchaseOptionInput,
   purchaseDate: string,
   installmentCount: number,
+  context?: CardContext,
 ): Promise<{ dates: string[]; cardId?: string }> {
   if (option.method !== "credit_card" || !option.cardId) {
     // PIX, boleto, cash and debit settle on the purchase date itself.
@@ -62,35 +105,44 @@ async function resolveSettlementDates(
 
   // Scoped to the caller: the agent and MCP tools take `cardId` straight from
   // their input, so an unscoped lookup would settle a simulation against
-  // another tenant's closing and due days.
-  const card = await db.query.creditCards.findFirst({
-    where: and(eq(creditCards.id, option.cardId), eq(creditCards.userId, userId)),
-  });
+  // another tenant's closing and due days. A supplied context is already
+  // scoped, having been built from this user's own cards.
+  const card =
+    context?.byId.get(option.cardId) ??
+    (await db.query.creditCards.findFirst({
+      where: and(eq(creditCards.id, option.cardId), eq(creditCards.userId, userId)),
+    }));
   if (!card) throw new Error(`credit card ${option.cardId} was not found`);
 
   if (option.firstPaymentDate) {
     return {
       dates: nominalCycleDueDates(option.firstPaymentDate, card.defaultClosingDay, card.defaultDueDay, installmentCount),
-      cardId: card.id,
+      cardId: option.cardId,
     };
   }
 
   const nominal = nominalCycleFor(purchaseDate, card.defaultClosingDay, card.defaultDueDay);
-  const observed = await db.query.creditCardBillingCycles.findMany({
-    where: and(
-      eq(creditCardBillingCycles.creditCardId, card.id),
-      gte(creditCardBillingCycles.dueAt, nominal.dueAt),
-    ),
-    orderBy: [asc(creditCardBillingCycles.dueAt)],
-    limit: installmentCount,
-  });
+  const observed = context
+    ? (context.cycleDueDatesByCard.get(option.cardId) ?? [])
+        .filter((dueAt) => dueAt >= nominal.dueAt)
+        .slice(0, installmentCount)
+    : (
+        await db.query.creditCardBillingCycles.findMany({
+          where: and(
+            eq(creditCardBillingCycles.creditCardId, option.cardId),
+            gte(creditCardBillingCycles.dueAt, nominal.dueAt),
+          ),
+          orderBy: [asc(creditCardBillingCycles.dueAt)],
+          limit: installmentCount,
+        })
+      ).map((cycle) => cycle.dueAt);
 
-  const dates = observed.map((cycle) => cycle.dueAt);
+  const dates = [...observed];
   if (dates.length < installmentCount) {
     const fallback = nominalCycleDueDates(purchaseDate, card.defaultClosingDay, card.defaultDueDay, installmentCount);
     dates.push(...fallback.slice(dates.length));
   }
-  return { dates: dates.slice(0, installmentCount), cardId: card.id };
+  return { dates: dates.slice(0, installmentCount), cardId: option.cardId };
 }
 
 /**
@@ -102,10 +154,11 @@ async function resolveSettlementDates(
 export async function toEnginePaymentOption(
   userId: string,
   option: PurchaseOptionInput,
+  context?: CardContext,
 ): Promise<PaymentOption> {
   const purchaseDate = option.purchaseDate ?? todayIso();
   const installmentCount = Math.max(1, option.installments ?? 1);
-  const { dates, cardId } = await resolveSettlementDates(userId, option, purchaseDate, installmentCount);
+  const { dates, cardId } = await resolveSettlementDates(userId, option, purchaseDate, installmentCount, context);
 
   const perInstallment =
     option.installmentAmountMinor ?? Math.floor(option.amountMinor / installmentCount);
@@ -126,7 +179,7 @@ export async function toEnginePaymentOption(
 
   let card: PaymentOption["card"];
   if (cardId) {
-    const cards = await listCreditCards(userId);
+    const cards = context?.cards ?? (await listCreditCards(userId));
     const match = cards.find((item) => item.id === cardId);
     if (match) {
       card = {

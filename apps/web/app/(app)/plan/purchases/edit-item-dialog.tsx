@@ -57,6 +57,8 @@ export interface EditablePurchaseItem {
   deadline: string | null;
   status: "idea" | "planned" | "ready" | "purchased" | "cancelled";
   notes: string | null;
+  /** Cap on how many installments this item can be split into; null means no restriction. */
+  maxInstallments: number | null;
 }
 
 /** Items carry no currency of their own — they are priced in the plan's. */
@@ -83,6 +85,7 @@ export function EditPurchaseItemDialog({
       deadline: item.deadline,
       status: item.status,
       notes: item.notes ?? "",
+      maxInstallments: item.maxInstallments,
     },
   });
   const errors = form.formState.errors;
@@ -99,6 +102,7 @@ export function EditPurchaseItemDialog({
         deadline: item.deadline,
         status: item.status,
         notes: item.notes ?? "",
+        maxInstallments: item.maxInstallments,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -229,6 +233,20 @@ export function EditPurchaseItemDialog({
                 {errors.deadline && <FieldError>{errors.deadline.message}</FieldError>}
               </Field>
             </div>
+
+            <Field data-invalid={!!errors.maxInstallments}>
+              <FieldLabel htmlFor="edit-item-max-installments">Can only be split into</FieldLabel>
+              <Input
+                id="edit-item-max-installments"
+                type="number"
+                step="1"
+                min="1"
+                inputMode="numeric"
+                placeholder="No restriction"
+                {...form.register("maxInstallments", { setValueAs: emptyToNull })}
+              />
+              {errors.maxInstallments && <FieldError>{errors.maxInstallments.message}</FieldError>}
+            </Field>
 
             <Field>
               <FieldLabel htmlFor="edit-item-notes">Notes</FieldLabel>

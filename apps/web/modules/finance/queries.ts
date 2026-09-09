@@ -22,6 +22,7 @@ import {
   projectRecurrences,
   projectStatements,
   nominalCycleFor,
+  nominalCycleDueDates,
   type BillingCycle,
   type Confidence,
   type CycleCharge,
@@ -30,8 +31,16 @@ import {
   type RecurrenceInterval,
   type RecurrenceRule,
 } from "@hermes-finance/forecast";
-import { calculateSafeToSpend, simulatePurchasePlan, type PlanItemOption } from "@hermes-finance/planning";
-import { toEnginePaymentOption } from "./simulation";
+import {
+  calculateSafeToSpend,
+  recommendPurchasePlan,
+  simulatePurchasePlan,
+  type PaymentOption,
+  type PlanItemOption,
+  type PurchasePlanRecommendation,
+  type RecommendationCandidateItem,
+} from "@hermes-finance/planning";
+import { loadCardContext, toEnginePaymentOption } from "./simulation";
 
 const CONFIDENCE: Record<string, Confidence> = {
   actual: "ACTUAL",
@@ -832,6 +841,165 @@ export async function getPurchasePlanSimulation(userId: string, planId: string) 
   });
 
   return { plan, simulation, unconfiguredItems };
+}
+
+/** Installment counts a card candidate is generated at (PRD-inverted plan flow). */
+const CANDIDATE_INSTALLMENT_COUNTS = [1, 2, 3, 4, 5, 6, 10, 12] as const;
+
+export interface PurchasePlanRecommendationResult {
+  plan: NonNullable<Awaited<ReturnType<typeof getPurchasePlan>>>;
+  /** Undefined only when the plan has no active item to pay for. */
+  recommendation?: PurchasePlanRecommendation;
+  /** Items whose candidate list is their own manually chosen option, not generated ones. */
+  overriddenItemIds: string[];
+  /** Whether the user has any active credit card — card candidates need one. */
+  hasCards: boolean;
+}
+
+/**
+ * Recommends how to pay for every still-open item in a plan.
+ *
+ * This inverts the older per-item comparison: the user only supplies name,
+ * price and deadline per item, and this builds every way each one could
+ * plausibly be paid — in full, or on each active card at a spread of
+ * installment counts — then hands them to `recommendPurchasePlan`, which
+ * decides. Nothing here picks a winner; it only proposes candidates.
+ *
+ * An item with a manually chosen `selectedPaymentOptionId` gets exactly one
+ * candidate — that option — so the engine's answer respects the user's own
+ * decision instead of second-guessing it with alternatives they didn't ask for.
+ *
+ * Candidate count is bounded by generating installment counts up front and
+ * discarding, before any engine call, ones whose nominal last settlement
+ * already falls after the item's deadline — a card cycle estimate computed
+ * from the card's closing/due days alone, no database round trip. What
+ * survives still needs `toEnginePaymentOption` to place it on the card's real
+ * billing cycles, which is the actual per-candidate cost.
+ */
+export async function getPurchasePlanRecommendation(
+  userId: string,
+  planId: string,
+): Promise<PurchasePlanRecommendationResult | undefined> {
+  const plan = await getPurchasePlan(userId, planId);
+  if (!plan) return undefined;
+
+  const active = plan.items.filter((item) => item.status !== "cancelled" && item.status !== "purchased");
+  // One read for every candidate this function is about to resolve: a nine-item
+  // plan across two cards asks for well over a hundred, and each used to
+  // re-read the cards, their cycles and the installment ledger on its own.
+  const cardContext = await loadCardContext(userId);
+  const cards = cardContext.cards;
+
+  if (active.length === 0) {
+    return {
+      plan,
+      recommendation: { status: "INSUFFICIENT_DATA", choices: [], blockers: ["this plan has no active item yet"] },
+      overriddenItemIds: [],
+      hasCards: cards.length > 0,
+    };
+  }
+
+  const horizonDays = 365;
+  const [{ forecast }, hardReserveMinor, softReserves] = await Promise.all([
+    buildUserForecastDetailed(userId, horizonDays),
+    getHardReserveMinor(userId),
+    getSoftReserves(userId),
+  ]);
+
+  const overriddenItemIds: string[] = [];
+  const items: RecommendationCandidateItem[] = await Promise.all(
+    active.map(async (item): Promise<RecommendationCandidateItem> => {
+      const priceMinor = item.actualPriceMinor ?? item.estimatedPriceMinor;
+      const purchaseDate = item.earliestPurchaseDate ?? todayIso();
+      const deadline = item.deadline ?? undefined;
+
+      const stored = item.selectedPaymentOptionId
+        ? item.paymentOptions.find((option) => option.id === item.selectedPaymentOptionId)
+        : undefined;
+
+      let candidates: PaymentOption[];
+      if (stored) {
+        overriddenItemIds.push(item.id);
+        candidates = [
+          await toEnginePaymentOption(userId, {
+            id: stored.id,
+            label: item.name,
+            method: stored.paymentMethod,
+            amountMinor: stored.cashPriceMinor ?? stored.totalCostMinor,
+            cardId: stored.cardId,
+            installments: stored.installments,
+            installmentAmountMinor: stored.installmentAmountMinor,
+            purchaseDate,
+            firstPaymentDate: stored.firstPaymentDate,
+          }, cardContext),
+        ];
+      } else {
+        const proposals: Array<{
+          id: string;
+          label: string;
+          cardId?: string;
+          installments: number;
+        }> = [{ id: `${item.id}:full`, label: "In full", installments: 1 }];
+
+        for (const card of cards) {
+          for (const count of CANDIDATE_INSTALLMENT_COUNTS) {
+            if (item.maxInstallments != null && count > item.maxInstallments) continue;
+            // Nominal estimate only, no database round trip: cheap enough to
+            // rule out a doomed candidate before paying for a real one.
+            const nominalDates = nominalCycleDueDates(purchaseDate, card.defaultClosingDay, card.defaultDueDay, count);
+            if (deadline && nominalDates[nominalDates.length - 1]! > deadline) continue;
+            proposals.push({
+              id: `${item.id}:card:${card.id}:${count}`,
+              label: `${count}x on ${card.name}`,
+              cardId: card.id,
+              installments: count,
+            });
+          }
+        }
+
+        candidates = await Promise.all(
+          proposals.map((proposal) =>
+            toEnginePaymentOption(userId, {
+              id: proposal.id,
+              label: proposal.label,
+              method: proposal.cardId ? "credit_card" : "cash",
+              amountMinor: priceMinor,
+              cardId: proposal.cardId ?? null,
+              installments: proposal.installments,
+              purchaseDate,
+            }, cardContext),
+          ),
+        );
+      }
+
+      return {
+        itemId: item.id,
+        label: item.name,
+        deadline,
+        maxInstallments: item.maxInstallments ?? undefined,
+        candidates,
+      };
+    }),
+  );
+
+  const recommendation = recommendPurchasePlan({
+    forecastInput: {
+      asOf: forecast.asOf,
+      horizonEnd: forecast.horizonEnd,
+      balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
+      events: forecast.events,
+    },
+    hardReserveMinor,
+    softReserves: softReserves.map((reserve) => ({
+      id: reserve.id,
+      name: reserve.name,
+      amountMinor: reserve.amountMinor,
+    })),
+    targetDate: plan.targetDate ?? undefined,
+    items,
+  });
+
+  return { plan, recommendation, overriddenItemIds, hasCards: cards.length > 0 };
 }
 
 /**
