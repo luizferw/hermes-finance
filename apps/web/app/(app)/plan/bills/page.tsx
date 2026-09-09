@@ -73,6 +73,7 @@ export default async function BillsPage() {
             nextDueDate: bill.nextDueDate,
             lastPaidDate: bill.lastPaidDate,
             isActive: bill.isActive,
+            amountStrategy: bill.amountStrategy,
             accountName: bill.account?.name ?? null,
             category: bill.category,
             state,

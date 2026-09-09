@@ -29,6 +29,7 @@ export interface BillRow {
   nextDueDate: string;
   lastPaidDate: string | null;
   isActive: boolean;
+  amountStrategy: "fixed" | "variable";
   accountName: string | null;
   category: { id: string; name: string; color: string | null } | null;
   state: BillState;
@@ -164,6 +165,18 @@ export function BillList({ bills }: { bills: BillRow[] }) {
                     }
                   >
                     {bill.isActive ? "Pause" : "Resume"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const next = bill.amountStrategy === "fixed" ? "variable" : "fixed";
+                      act(
+                        bill.id,
+                        () => updateBill(bill.id, { amountStrategy: next }),
+                        `${bill.name} set to ${next}`,
+                      );
+                    }}
+                  >
+                    {bill.amountStrategy === "fixed" ? "Mark as variable" : "Mark as fixed"}
                   </DropdownMenuItem>
                   <DropdownMenuItem
                     variant="destructive"

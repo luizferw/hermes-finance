@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import {
   accounts,
@@ -396,27 +396,55 @@ export async function updateBillingCycle(cycleId: string, input: UpdateBillingCy
 }
 
 /** Marks a cycle's statement as arrived, with its confirmed real total. */
-export async function reconcileBillingCycle(cycleId: string, input: ReconcileBillingCycleInput) {
-  const user = await requireUser();
+/**
+ * Reconciles a billing cycle against the real statement (PRD §29).
+ *
+ * `confirmedTotal` is what the physical/PDF statement says. The system's own
+ * expectation is the sum of installments it has billed to this cycle —
+ * purchases it already knows about. Interest and fees have no dedicated
+ * column yet, so a real fee shows up exactly as a discrepancy would: the two
+ * numbers won't match. Rather than accept whatever total is typed in, a
+ * mismatch forces `needs_review` regardless of what status was requested —
+ * marking a cycle "paid" or "closed" when the numbers don't add up would be
+ * worse than leaving it visibly unresolved.
+ */
+export async function reconcileBillingCycleCore(
+  userId: string,
+  cycleId: string,
+  input: ReconcileBillingCycleInput,
+) {
   const data = reconcileBillingCycleSchema.parse(input);
-  const existing = await loadOwnedBillingCycle(user.id, cycleId);
+  const existing = await loadOwnedBillingCycle(userId, cycleId);
+
+  const billed = await db.query.installments.findMany({
+    where: and(eq(installments.billingCycleId, cycleId), ne(installments.status, "cancelled")),
+  });
+  const expectedMinor = billed.reduce((total, item) => total + item.amountMinor, 0);
+  const confirmedTotalMinor = majorToMinor(data.confirmedTotal, existing.creditCard.currencyCode);
+  const discrepancyMinor = confirmedTotalMinor - expectedMinor;
+  const status = discrepancyMinor === 0 ? data.status : "needs_review";
 
   await db
     .update(creditCardBillingCycles)
-    .set({
-      confirmedTotalMinor: majorToMinor(data.confirmedTotal, existing.creditCard.currencyCode),
-      status: data.status,
-    })
+    .set({ confirmedTotalMinor, status })
     .where(eq(creditCardBillingCycles.id, cycleId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card_cycle.reconciled",
     entityType: "credit_card_billing_cycle",
     entityId: cycleId,
-    data: { status: data.status },
+    data: { status, discrepancyMinor },
   });
+
+  return { status, expectedMinor, confirmedTotalMinor, discrepancyMinor };
+}
+
+export async function reconcileBillingCycle(cycleId: string, input: ReconcileBillingCycleInput) {
+  const user = await requireUser();
+  const result = await reconcileBillingCycleCore(user.id, cycleId, input);
   revalidateFinance();
+  return result;
 }
 
 // --- card purchases + installments --------------------------------------------------

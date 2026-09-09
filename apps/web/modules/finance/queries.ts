@@ -183,23 +183,47 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     });
   }
 
-  // 2. Bills: a known amount on a known date.
+  // 2. Bills: a fixed one always projects at its typed amount. A variable
+  // one (PRD §9.10) prefers the amount of whichever transaction last actually
+  // paid it — real history beats a manually typed guess — and only falls
+  // back to the typed estimate until that history exists.
   const activeBills = await db.query.bills.findMany({
     where: and(eq(bills.userId, userId), eq(bills.isActive, true), eq(bills.currencyCode, settings.currencyCode)),
   });
-  const billRules: RecurrenceRule[] = activeBills.map((bill) => ({
-    id: `bill:${bill.id}`,
-    sourceType: "bill",
-    amountMinor: -bill.expectedAmountMinor,
-    interval: toRecurrenceInterval(bill.recurrence),
-    startDate: bill.nextDueDate,
-    // `expectedAmountMinor` is a manually entered figure, never a fact
-    // confirmed by a real transaction — CONFIRMED overstated it. HIGH matches
-    // the sibling `recurring_transactions` source just below, which carries
-    // the same provenance (the user told us this is coming, no AmountStrategy
-    // — §9.10 — exists yet to tell a fixed bill from a rough one).
-    confidence: "HIGH",
-  }));
+  const variableBillIds = activeBills.filter((bill) => bill.amountStrategy === "variable").map((bill) => bill.id);
+  const lastPaidMinorByBill = new Map<string, number>();
+  if (variableBillIds.length > 0) {
+    const paidTransactions = await db.query.transactions.findMany({
+      where: inArray(transactions.billId, variableBillIds),
+      orderBy: [desc(transactions.date)],
+      columns: { billId: true, amountMinor: true },
+    });
+    for (const paid of paidTransactions) {
+      // Rows arrive most-recent-first; keep only each bill's first (latest) hit.
+      if (paid.billId && !lastPaidMinorByBill.has(paid.billId)) {
+        lastPaidMinorByBill.set(paid.billId, Math.abs(paid.amountMinor));
+      }
+    }
+  }
+  const billRules: RecurrenceRule[] = activeBills.map((bill) => {
+    const lastPaidMinor = lastPaidMinorByBill.get(bill.id);
+    const amountMinor = lastPaidMinor ?? bill.expectedAmountMinor;
+    // A fixed bill is HIGH — the same provenance as the sibling
+    // recurring_transactions source below (typed, never a confirmed fact).
+    // A variable one backed by real payment history is MEDIUM — better than a
+    // guess, still a projection for a future date. With no history yet it is
+    // LOW: an unverified manual figure for an account known to fluctuate.
+    const confidence: Confidence =
+      bill.amountStrategy === "fixed" ? "HIGH" : lastPaidMinor !== undefined ? "MEDIUM" : "LOW";
+    return {
+      id: `bill:${bill.id}`,
+      sourceType: "bill",
+      amountMinor: -amountMinor,
+      interval: toRecurrenceInterval(bill.recurrence),
+      startDate: bill.nextDueDate,
+      confidence,
+    };
+  });
   events.push(
     ...tagLabels(
       projectRecurrences(billRules, range),

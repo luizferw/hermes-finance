@@ -37,6 +37,7 @@ export async function createBill(input: CreateBillInput) {
       expectedAmountMinor: majorToMinor(data.expectedAmount, data.currencyCode),
       currencyCode: data.currencyCode,
       recurrence: data.recurrence,
+      amountStrategy: data.amountStrategy,
       dueDay: Number(data.nextDueDate.slice(8, 10)),
       nextDueDate: data.nextDueDate,
       accountId: data.accountId ?? null,
@@ -76,6 +77,7 @@ export async function updateBill(billId: string, input: UpdateBillInput) {
           ? majorToMinor(data.expectedAmount, currency)
           : existing.expectedAmountMinor,
       recurrence: data.recurrence ?? existing.recurrence,
+      amountStrategy: data.amountStrategy ?? existing.amountStrategy,
       nextDueDate: data.nextDueDate ?? existing.nextDueDate,
       dueDay: data.nextDueDate
         ? Number(data.nextDueDate.slice(8, 10))

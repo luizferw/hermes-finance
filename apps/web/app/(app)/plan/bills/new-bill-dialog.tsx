@@ -39,6 +39,11 @@ const RECURRENCES = [
   { value: "yearly", label: "Yearly" },
 ] as const;
 
+const AMOUNT_STRATEGIES = [
+  { value: "fixed", label: "Fixed", hint: "Always the same amount" },
+  { value: "variable", label: "Variable", hint: "Changes each time — e.g. electricity" },
+] as const;
+
 export function NewBillDialog({
   accounts,
   categories,
@@ -57,6 +62,7 @@ export function NewBillDialog({
       expectedAmount: undefined as unknown as number,
       currencyCode: defaultCurrency,
       recurrence: "monthly",
+      amountStrategy: "fixed",
       nextDueDate: todayIso(),
       accountId: null,
       categoryId: null,
@@ -148,6 +154,27 @@ export function NewBillDialog({
                         {RECURRENCES.map((option) => (
                           <SelectItem key={option.value} value={option.value}>
                             {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
+              />
+              <Controller
+                control={form.control}
+                name="amountStrategy"
+                render={({ field }) => (
+                  <Field>
+                    <FieldLabel>Amount</FieldLabel>
+                    <Select value={field.value} onValueChange={field.onChange}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {AMOUNT_STRATEGIES.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label} — {option.hint}
                           </SelectItem>
                         ))}
                       </SelectContent>

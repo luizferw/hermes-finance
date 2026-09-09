@@ -62,7 +62,7 @@ export type UpdateCreditCardInput = z.infer<typeof updateCreditCardSchema>;
 
 // --- credit card billing cycles ----------------------------------------------
 
-export const cardCycleStatusSchema = z.enum(["open", "closed", "paid", "overdue"]);
+export const cardCycleStatusSchema = z.enum(["open", "closed", "paid", "overdue", "needs_review"]);
 
 export const createBillingCycleSchema = z.object({
   creditCardId: z.string().uuid(),

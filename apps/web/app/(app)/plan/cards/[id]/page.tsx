@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { NewPurchaseDialog } from "./new-purchase-dialog";
 import { EditCardDialog } from "./edit-card-dialog";
+import { ReconcileCycleDialog } from "./reconcile-cycle-dialog";
 
 export const metadata: Metadata = { title: "Card statement" };
 
@@ -18,6 +19,7 @@ const STATUS_LABEL: Record<string, string> = {
   closed: "Closed",
   paid: "Paid",
   overdue: "Overdue",
+  needs_review: "Needs review",
 };
 
 export default async function CardDetailPage({
@@ -80,6 +82,7 @@ export default async function CardDetailPage({
         <ul className="divide-y divide-dashed">
           {cycles.map((cycle) => {
             const overdue = cycle.status === "overdue";
+            const needsReview = cycle.status === "needs_review";
             return (
               <li
                 key={cycle.id}
@@ -102,14 +105,21 @@ export default async function CardDetailPage({
                         : "Estimated"}
                   </Badge>
                   <Badge
-                    variant={overdue ? "destructive" : "outline"}
-                    className={cn("text-[10px]", overdue && "text-destructive")}
+                    variant={overdue || needsReview ? "destructive" : "outline"}
+                    className={cn("text-[10px]", (overdue || needsReview) && "text-destructive")}
                   >
                     {STATUS_LABEL[cycle.status] ?? cycle.status}
                   </Badge>
                   <span className="font-amount w-28 text-right text-sm tabular-nums">
                     {formatMoney(cycle.totalMinor, card.currencyCode)}
                   </span>
+                  {cycle.source === "recorded" && !cycle.isReconciled && (
+                    <ReconcileCycleDialog
+                      cycleId={cycle.id}
+                      statementMonth={cycle.statementMonth}
+                      currencyCode={card.currencyCode}
+                    />
+                  )}
                 </div>
               </li>
             );

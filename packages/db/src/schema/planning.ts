@@ -13,7 +13,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { recurrenceIntervalEnum, transactionTypeEnum } from "./enums";
+import { amountStrategyEnum, recurrenceIntervalEnum, transactionTypeEnum } from "./enums";
 import { encryptedText, timestamps } from "./helpers";
 import { users } from "./auth";
 import { accounts } from "./accounts";
@@ -98,6 +98,9 @@ export const bills = pgTable(
     recurrence: recurrenceIntervalEnum("recurrence")
       .notNull()
       .default("monthly"),
+    amountStrategy: amountStrategyEnum("amount_strategy")
+      .notNull()
+      .default("fixed"),
     /** Day of month payment is due (1-31), used to roll nextDueDate forward. */
     dueDay: smallint("due_day"),
     nextDueDate: date("next_due_date", { mode: "string" }).notNull(),

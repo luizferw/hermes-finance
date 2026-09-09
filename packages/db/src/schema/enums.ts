@@ -56,6 +56,14 @@ export const recurrenceIntervalEnum = pgEnum("recurrence_interval", [
   "yearly",
 ]);
 
+/**
+ * PRD §9.10, scoped down: a fixed bill projects at its typed amount with
+ * high confidence; a variable one prefers the amount of the transaction that
+ * last actually paid it — real history beats a manually typed guess — and
+ * only falls back to the typed amount when no such history exists yet.
+ */
+export const amountStrategyEnum = pgEnum("amount_strategy", ["fixed", "variable"]);
+
 export const ruleConditionFieldEnum = pgEnum("rule_condition_field", [
   "description_contains",
   "amount_equals",

@@ -20,7 +20,7 @@ import { transactions } from "./transactions";
 
 export const confidenceEnum = pgEnum("forecast_confidence", ["actual", "confirmed", "high", "medium", "low"]);
 export const reserveKindEnum = pgEnum("financial_reserve_kind", ["hard", "soft"]);
-export const cardCycleStatusEnum = pgEnum("credit_card_cycle_status", ["open", "closed", "paid", "overdue"]);
+export const cardCycleStatusEnum = pgEnum("credit_card_cycle_status", ["open", "closed", "paid", "overdue", "needs_review"]);
 export const installmentStatusEnum = pgEnum("installment_status", ["projected", "billed", "paid", "cancelled"]);
 export const purchasePlanStatusEnum = pgEnum("purchase_plan_status", ["active", "completed", "archived"]);
 export const purchaseItemPriorityEnum = pgEnum("purchase_item_priority", ["must_have", "high", "medium", "low", "optional"]);

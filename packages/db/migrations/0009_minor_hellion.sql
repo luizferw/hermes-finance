@@ -1,0 +1,1 @@
+ALTER TYPE "public"."credit_card_cycle_status" ADD VALUE 'needs_review';

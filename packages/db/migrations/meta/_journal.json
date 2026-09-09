@@ -64,6 +64,20 @@
       "when": 1788783142810,
       "tag": "0008_illegal_shinobi_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788913408766,
+      "tag": "0009_minor_hellion",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788914120101,
+      "tag": "0010_glorious_king_cobra",
+      "breakpoints": true
     }
   ]
 }
