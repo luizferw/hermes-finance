@@ -60,7 +60,15 @@ export default async function PurchasesPage() {
             What you&apos;re planning to buy, and how it would fit against your money.
           </p>
         </div>
-        <NewPurchasePlanDialog defaultCurrency={settings.currencyCode} />
+        <div className="flex shrink-0 items-center gap-2">
+          <Link
+            href="/plan/simulate"
+            className="inline-flex items-center gap-1 rounded-md border border-input px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"
+          >
+            Simulate a purchase
+          </Link>
+          <NewPurchasePlanDialog defaultCurrency={settings.currencyCode} />
+        </div>
       </div>
 
       {plans.length === 0 ? (

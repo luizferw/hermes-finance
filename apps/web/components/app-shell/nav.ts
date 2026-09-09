@@ -1,5 +1,6 @@
 import {
   ArrowDataTransferHorizontalIcon,
+  Calculator01Icon,
   Calendar03Icon,
   ChartLineData01Icon,
   Compass01Icon,
@@ -65,6 +66,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { title: "Commitments", href: "/plan/commitments", icon: Calendar03Icon },
       { title: "Cards", href: "/plan/cards", icon: CreditCardIcon },
       { title: "Purchases", href: "/plan/purchases", icon: ShoppingBag01Icon },
+      { title: "Simulate", href: "/plan/simulate", icon: Calculator01Icon },
       { title: "Reserves", href: "/plan/reserves", icon: Shield01Icon },
     ],
   },
