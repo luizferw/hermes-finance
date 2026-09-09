@@ -141,7 +141,7 @@ describe("recommendPurchasePlan", () => {
     expect(result.blockers.join(" ")).toContain("exceed the 1x it allows");
   });
 
-  it("respects each item's deadline over the plan's target date", () => {
+  it("lets instalments run past the deadline — it is when the item is needed", () => {
     const result = recommendPurchasePlan({
       forecastInput,
       hardReserveMinor: 0,
@@ -150,13 +150,33 @@ describe("recommendPurchasePlan", () => {
         item(
           "ac-install",
           [card("ac-install", 50_000, ["2026-10-10", "2026-11-10", "2026-12-10"])],
-          { deadline: "2026-10-31" },
+          { deadline: "2026-10-31", purchaseDate: "2026-09-15" },
+        ),
+      ],
+    });
+
+    // Bought in September, needed by October, paid off in December. Fine.
+    expect(result.status).toBe("OK");
+    expect(result.choices[0]!.installments).toBe(3);
+  });
+
+  it("rejects an item that cannot be bought before it is needed", () => {
+    const result = recommendPurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      targetDate: "2027-06-30",
+      items: [
+        item(
+          "ac-install",
+          [card("ac-install", 50_000, ["2026-12-10"])],
+          { deadline: "2026-10-31", purchaseDate: "2026-11-20" },
         ),
       ],
     });
 
     expect(result.status).toBe("NO_FEASIBLE_PLAN");
-    expect(result.blockers.join(" ")).toContain("finish after 2026-10-31");
+    expect(result.choices[0]!.fits).toBe(false);
+    expect(result.choices[0]!.rejections).toContain("DEADLINE_EXCEEDED");
   });
 
   it("spends one card's limit across items and stops when it runs out", () => {

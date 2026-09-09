@@ -457,8 +457,10 @@ export interface PlanItemOption {
   label: string;
   /** The one way this item is being paid. Alternatives belong to comparePaymentOptions. */
   option: PaymentOption;
-  /** Latest date this item may finish being paid. */
+  /** Latest date the item is needed by — when it must be bought, not paid off. */
   deadline?: DateString;
+  /** When the purchase happens. Compared against `deadline`. */
+  purchaseDate?: DateString;
 }
 
 export interface PlanItemContribution {
@@ -633,9 +635,11 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     const itemRejections: RejectionCode[] = [];
     const itemReasons: string[] = [];
     const limit = item.deadline ?? input.targetDate;
-    if (limit && lastPaymentDate && lastPaymentDate > limit) {
+    // The deadline is when the thing is needed, so it constrains the purchase.
+    // Instalments running past it are normal, not a rejection.
+    if (limit && item.purchaseDate && item.purchaseDate > limit) {
       itemRejections.push("DEADLINE_EXCEEDED");
-      itemReasons.push(`last payment on ${lastPaymentDate} falls after ${limit}`);
+      itemReasons.push(`cannot be bought until ${item.purchaseDate}, after ${limit}`);
     }
     return {
       itemId: item.itemId,
@@ -710,8 +714,15 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
 export interface RecommendationCandidateItem {
   itemId: string;
   label: string;
-  /** Latest date this item may finish being paid. */
+  /**
+   * Latest date the item is needed by — when it must be *bought*, not when it
+   * must be paid off. Conflating the two silently deleted every instalment
+   * plan that ran past the date, which is exactly the plan someone asks for
+   * when they say "I need it in December, split it over the year".
+   */
   deadline?: DateString;
+  /** When the purchase happens. Compared against `deadline`. */
+  purchaseDate?: DateString;
   /**
    * Cap on how many installments this item may be split into — a seller that
    * only takes 3x, or none at all (1). Enforced here as well as upstream: the
@@ -913,7 +924,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         },
       });
 
-      const breaksDeadline = Boolean(limitDate && lastPaymentDate && lastPaymentDate > limitDate);
+      const breaksDeadline = Boolean(
+        limitDate && item.purchaseDate && item.purchaseDate > limitDate,
+      );
       const card = option.card;
       const breaksCard = card
         ? card.committedMinor + (cardChargedMinor.get(card.cardId) ?? 0) + option.totalCostMinor >
@@ -1069,6 +1082,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       itemId: item.itemId,
       label: item.label,
       deadline: item.deadline,
+      purchaseDate: item.purchaseDate,
       option: item.candidates.find((candidate) => candidate.id === chosenById.get(item.itemId))!,
     })),
   });

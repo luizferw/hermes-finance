@@ -22,7 +22,6 @@ import {
   projectRecurrences,
   projectStatements,
   nominalCycleFor,
-  nominalCycleDueDates,
   type BillingCycle,
   type Confidence,
   type CycleCharge,
@@ -869,12 +868,11 @@ export interface PurchasePlanRecommendationResult {
  * candidate — that option — so the engine's answer respects the user's own
  * decision instead of second-guessing it with alternatives they didn't ask for.
  *
- * Candidate count is bounded by generating installment counts up front and
- * discarding, before any engine call, ones whose nominal last settlement
- * already falls after the item's deadline — a card cycle estimate computed
- * from the card's closing/due days alone, no database round trip. What
- * survives still needs `toEnginePaymentOption` to place it on the card's real
- * billing cycles, which is the actual per-candidate cost.
+ * An item's deadline is when it is *needed*, not when it must be paid off, so
+ * it does not bound the instalment count. Filtering candidates on their last
+ * settlement date deleted 4x through 12x for a list due in December and left
+ * every item stuck at 3x — the opposite of what someone asking "can I split
+ * this to make it fit" wants.
  */
 export async function getPurchasePlanRecommendation(
   userId: string,
@@ -944,10 +942,6 @@ export async function getPurchasePlanRecommendation(
         for (const card of cards) {
           for (const count of CANDIDATE_INSTALLMENT_COUNTS) {
             if (item.maxInstallments != null && count > item.maxInstallments) continue;
-            // Nominal estimate only, no database round trip: cheap enough to
-            // rule out a doomed candidate before paying for a real one.
-            const nominalDates = nominalCycleDueDates(purchaseDate, card.defaultClosingDay, card.defaultDueDay, count);
-            if (deadline && nominalDates[nominalDates.length - 1]! > deadline) continue;
             proposals.push({
               id: `${item.id}:card:${card.id}:${count}`,
               label: `${count}x on ${card.name}`,
@@ -976,6 +970,7 @@ export async function getPurchasePlanRecommendation(
         itemId: item.id,
         label: item.name,
         deadline,
+        purchaseDate,
         maxInstallments: item.maxInstallments ?? undefined,
         candidates,
       };

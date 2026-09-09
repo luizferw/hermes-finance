@@ -144,32 +144,60 @@ describe("simulatePurchasePlan", () => {
     expect(result.rejections).not.toContain("CREDIT_LIMIT_EXCEEDED");
   });
 
-  it("rejects an item whose last payment lands after the plan's target date", () => {
+  it("lets instalments run past the target date — the deadline is when it is needed", () => {
     const result = simulatePurchasePlan({
       forecastInput,
       hardReserveMinor: 0,
       targetDate: "2026-12-31",
       items: [
-        cardItem("stroller", 240_000, ["2026-11-10", "2026-12-10", "2027-01-10"], {
-          cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
-        }),
+        {
+          ...cardItem("stroller", 240_000, ["2026-11-10", "2026-12-10", "2027-01-10"], {
+            cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
+          }),
+          purchaseDate: "2026-10-20",
+        },
       ],
     });
 
-    expect(result.rejections).toContain("DEADLINE_EXCEEDED");
+    // Bought in October, needed by December, paid off in January. That is a
+    // normal instalment plan, not a violation.
+    expect(result.items[0]!.rejections).not.toContain("DEADLINE_EXCEEDED");
+    expect(result.rejections).not.toContain("DEADLINE_EXCEEDED");
+  });
+
+  it("rejects an item that cannot be bought before it is needed", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      targetDate: "2026-12-31",
+      items: [
+        {
+          ...cardItem("stroller", 240_000, ["2027-02-10"], {
+            cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
+          }),
+          purchaseDate: "2027-01-15",
+        },
+      ],
+    });
+
     expect(result.items[0]!.rejections).toContain("DEADLINE_EXCEEDED");
     expect(result.feasible).toBe(false);
   });
 
   it("prefers an item's own deadline over the plan's target date", () => {
-    const items = [cashItem("ac-install", 50_000, "2026-11-20", "2026-10-31")];
     const result = simulatePurchasePlan({
       forecastInput,
       hardReserveMinor: 0,
       targetDate: "2026-12-31",
-      items,
+      items: [
+        {
+          ...cashItem("ac-install", 50_000, "2026-11-20", "2026-10-31"),
+          purchaseDate: "2026-11-20",
+        },
+      ],
     });
 
+    // Needed by October, cannot be bought before November.
     expect(result.items[0]!.rejections).toContain("DEADLINE_EXCEEDED");
   });
 
