@@ -19,10 +19,10 @@ import type {
   MonthlyOutlookEntry,
   PurchasePlanRecommendation,
   PurchasePlanSimulation,
-  RecommendedChoice,
 } from "@hermes-finance/planning";
 import { Badge } from "@/components/ui/badge";
 import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
+import { PaymentPlanList } from "@/components/plan/payment-plan-list";
 import { cn } from "@/lib/utils";
 import { PurchaseItemActions } from "../item-actions";
 import { NewPurchaseItemDialog } from "./new-item-dialog";
@@ -103,27 +103,6 @@ function explain(option: ComparedOption, currencyCode: string): string[] {
 }
 
 /**
- * The one-glance answer to "how is this being paid" — installment count and
- * size, the card it lands on, and when it starts and finishes. Every value
- * comes straight from the chosen `RecommendedChoice`; nothing here divides
- * `totalCostMinor` by `installments` — the engine already did that.
- */
-function describeChoice(choice: RecommendedChoice, currencyCode: string): string {
-  const payment =
-    choice.installments > 1
-      ? `${choice.installments}× ${formatMoney(choice.installmentAmountMinor, currencyCode)}`
-      : `${formatMoney(choice.installmentAmountMinor, currencyCode)} in full`;
-  const onCard = choice.cardLabel ? ` on ${choice.cardLabel}` : "";
-  const span =
-    choice.installments > 1 && choice.firstPaymentDate && choice.lastPaymentDate
-      ? ` · ${formatDate(choice.firstPaymentDate)} → ${formatDate(choice.lastPaymentDate)}`
-      : choice.lastPaymentDate
-        ? ` · settled ${formatDate(choice.lastPaymentDate)}`
-        : "";
-  return `${payment}${onCard}${span}`;
-}
-
-/**
  * The purchase plan surface: a list to fill in, and the engine's answer for
  * how to pay for all of it.
  *
@@ -160,8 +139,12 @@ export default async function PurchasePlanDetailPage({
     })),
   );
 
-  const simulation = recommendation?.status === "OK" ? recommendation.simulation : undefined;
-  const choiceByItemId = new Map((recommendation?.choices ?? []).map((choice) => [choice.itemId, choice]));
+  // `simulation` is now returned on NO_FEASIBLE_PLAN too — the basket verdict
+  // for the least-bad set of choices, not only for a plan that fully fits.
+  const simulation =
+    recommendation && recommendation.status !== "INSUFFICIENT_DATA"
+      ? recommendation.simulation
+      : undefined;
   const overridden = new Set(overriddenItemIds);
 
   // Joined on the date, not the position — see the same reasoning that used
@@ -229,6 +212,15 @@ export default async function PurchasePlanDetailPage({
         </div>
       )}
 
+      {recommendation && recommendation.choices.length > 0 && (
+        <PaymentPlanList
+          choices={recommendation.choices}
+          overriddenItemIds={overridden}
+          currencyCode={plan.currencyCode}
+          rejectionLabel={REJECTION_LABEL}
+        />
+      )}
+
       {recommendation && (
         <RecommendationVerdict
           recommendation={recommendation}
@@ -247,7 +239,6 @@ export default async function PurchasePlanDetailPage({
         comparisons.map(({ item, result }) => {
           const comparison = result?.comparison;
           const recommendedId = comparison && "recommendedOptionId" in comparison ? comparison.recommendedOptionId : undefined;
-          const choice = choiceByItemId.get(item.id);
           const isDone = item.status === "purchased" || item.status === "cancelled";
 
           return (
@@ -286,49 +277,6 @@ export default async function PurchasePlanDetailPage({
                   />
                 </div>
               </header>
-
-              {!isDone && choice && (
-                <div className="mt-3">
-                  <div
-                      className={cn(
-                        "rounded-xl border p-4",
-                        overridden.has(item.id) ? "border-border bg-muted/40" : "border-primary/40 bg-primary/5",
-                      )}
-                    >
-                      <div className="flex flex-wrap items-baseline justify-between gap-2">
-                        <span className="flex items-center gap-1.5 text-sm font-medium">
-                          {choice.optionLabel}
-                          <span
-                            className={cn(
-                              "inline-flex items-center gap-1 text-xs font-medium",
-                              overridden.has(item.id) ? "text-muted-foreground" : "text-primary",
-                            )}
-                          >
-                            <HugeiconsIcon icon={CheckmarkCircle02Icon} className="size-3.5" strokeWidth={2} />
-                            {overridden.has(item.id) ? "Chosen by you" : "Recommended"}
-                          </span>
-                        </span>
-                        <span className="font-amount text-sm tabular-nums">
-                          {formatMoney(choice.totalCostMinor, plan.currencyCode)}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {describeChoice(choice, plan.currencyCode)}
-                      </p>
-                      <details className="mt-2 group">
-                        <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
-                          Why
-                        </summary>
-                        <p className="mt-1.5 text-xs text-muted-foreground">
-                          Leaves {formatMoney(choice.minimumBalanceMinor, plan.currencyCode)} on{" "}
-                          {formatDate(choice.minimumBalanceDate)} — the most cash of the{" "}
-                          {choice.workableCount} workable{" "}
-                          {choice.workableCount === 1 ? "way" : "ways"} to pay for it.
-                        </p>
-                    </details>
-                  </div>
-                </div>
-              )}
 
               <details className="mt-4 group">
                 <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
@@ -522,66 +470,11 @@ function RecommendationVerdict({
     );
   }
 
-  // NO_FEASIBLE_PLAN is the only status with nothing to show: no choice was
-  // committed for every item, so there is no simulation to render alongside
-  // the warning. An OK status can *also* carry a baselineBreach — the
-  // recommender still answers under a "do not make it worse" rule — so that
-  // case is handled below, together with the full plan.
-  if (recommendation.status === "NO_FEASIBLE_PLAN") {
-    const breach = recommendation.baselineBreach;
-    return (
-      <section className="glass-panel space-y-4 rounded-2xl p-5">
-        <div className="flex items-center gap-2">
-          <HugeiconsIcon icon={Alert02Icon} className="size-5 text-destructive" />
-          <h3 className="text-sm font-semibold">
-            {breach ? "Your forecast is already short" : "This list does not fit"}
-          </h3>
-        </div>
-
-        {breach ? (
-          <div className="space-y-1 text-sm">
-            <p>
-              Before buying anything, your balance drops to{" "}
-              <span className="font-amount tabular-nums text-destructive">
-                {formatMoney(breach.minimumBalanceMinor, currencyCode)}
-              </span>{" "}
-              on {formatDate(breach.minimumBalanceDate)}.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Nothing can be recommended against that. Record your accounts&apos; real
-              balances, or cover that gap first, and this list will be answerable.
-            </p>
-          </div>
-        ) : (
-          recommendation.shortfallMinor !== undefined && (
-            <p className="text-sm">
-              Short by{" "}
-              <span className="font-amount tabular-nums">
-                {formatMoney(recommendation.shortfallMinor, currencyCode)}
-              </span>
-              {recommendation.shortfallDate ? ` around ${formatDate(recommendation.shortfallDate)}` : ""}.
-            </p>
-          )
-        )}
-
-        {recommendation.blockedItems.length > 0 && (
-          <ul className="space-y-1.5 text-xs">
-            {recommendation.blockedItems.map((blocked) => (
-              <li key={blocked.itemId} className="flex flex-wrap gap-x-1.5">
-                <span className="font-medium text-foreground">{blocked.label}</span>
-                <span className="text-muted-foreground">
-                  {describeBlock(blocked, currencyCode)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    );
-  }
-
-  // OK — the basket fits, and `simulation` is the verdict for the chosen set.
-  if (!simulation) return null;
+  // `simulation` is now the basket verdict for whichever choices got made,
+  // whether or not everything fit — so both statuses render it the same way
+  // below. An OK status can *also* carry a baselineBreach — the recommender
+  // still answers under a "do not make it worse" rule.
+  const isFeasible = recommendation.status === "OK";
   const breach = recommendation.baselineBreach;
 
   return (
@@ -589,20 +482,22 @@ function RecommendationVerdict({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <HugeiconsIcon
-            icon={simulation.feasible ? CheckmarkCircle02Icon : Alert02Icon}
-            className={cn("size-5", simulation.feasible ? "text-success" : "text-destructive")}
+            icon={isFeasible ? CheckmarkCircle02Icon : Alert02Icon}
+            className={cn("size-5", isFeasible ? "text-success" : "text-destructive")}
           />
           <h3 className="text-sm font-semibold">
-            {simulation.feasible
+            {isFeasible
               ? targetDate
                 ? `Fits, all of it, by ${formatDate(targetDate)}`
                 : "Fits, all of it"
-              : "Does not fit as configured"}
+              : "This list does not fit"}
           </h3>
         </div>
-        <span className="font-amount text-sm tabular-nums text-muted-foreground">
-          {formatMoney(simulation.totalCostMinor, currencyCode)} total
-        </span>
+        {simulation && (
+          <span className="font-amount text-sm tabular-nums text-muted-foreground">
+            {formatMoney(simulation.totalCostMinor, currencyCode)} total
+          </span>
+        )}
       </div>
 
       {breach && (
@@ -613,64 +508,93 @@ function RecommendationVerdict({
             <span className="font-amount tabular-nums">
               {formatMoney(breach.minimumBalanceMinor, currencyCode)}
             </span>{" "}
-            on {formatDate(breach.minimumBalanceDate)}. This plan is chosen so as not to make that worse.
+            on {formatDate(breach.minimumBalanceDate)}. This plan is chosen so as not to make that
+            worse.
           </p>
         </div>
       )}
 
-      <div className="grid gap-6 sm:grid-cols-2">
-        <BeforeAfter
-          label="Minimum balance"
-          beforeMinor={simulation.minimumBalanceBeforeMinor}
-          afterMinor={simulation.minimumBalanceAfterMinor}
-          note={`on ${formatDate(simulation.minimumBalanceAfterDate)}`}
-          currencyCode={currencyCode}
-        />
-        <BeforeAfter
-          label="Safe to spend"
-          beforeMinor={simulation.safeToSpendBeforeMinor}
-          afterMinor={simulation.safeToSpendAfterMinor}
-          currencyCode={currencyCode}
-        />
-      </div>
-
-      {simulation.monthlyOutlook.length > 0 && (
-        <div>
-          <span className="micro-label">Month by month</span>
-          <MonthlyOutlookTable entries={simulation.monthlyOutlook} currencyCode={currencyCode} />
-        </div>
+      {!isFeasible && !breach && recommendation.shortfallMinor !== undefined && (
+        <p className="text-sm">
+          Short by{" "}
+          <span className="font-amount tabular-nums">
+            {formatMoney(recommendation.shortfallMinor, currencyCode)}
+          </span>
+          {recommendation.shortfallDate ? ` around ${formatDate(recommendation.shortfallDate)}` : ""}.
+        </p>
       )}
 
-      <div>
-        <span className="micro-label">Balance, vs without this plan</span>
-        <div className="mt-3">
-          <SimulationBalanceChart data={planChartData} currencyCode={currencyCode} />
-        </div>
-      </div>
+      {!isFeasible && recommendation.blockedItems.length > 0 && (
+        <ul className="space-y-1.5 text-xs">
+          {recommendation.blockedItems.map((blocked) => (
+            <li key={blocked.itemId} className="flex flex-wrap gap-x-1.5">
+              <span className="font-medium text-foreground">{blocked.label}</span>
+              <span className="text-muted-foreground">{describeBlock(blocked, currencyCode)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
 
-      {simulation.cards.length > 0 && (
-        <div>
-          <span className="micro-label">Card load</span>
-          <ul className="mt-2 divide-y divide-dashed">
-            {simulation.cards.map((card) => (
-              <li key={card.cardId} className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0">
-                <span>{card.label}</span>
-                <span className="flex items-center gap-2">
-                  <span className="font-amount tabular-nums text-muted-foreground">
-                    {formatMoney(card.committedMinor + card.planChargedMinor, currencyCode)}
-                    {" / "}
-                    {formatMoney(card.creditLimitMinor, currencyCode)}
-                  </span>
-                  {card.exceededMinor > 0 && (
-                    <Badge variant="destructive" className="text-[10px]">
-                      +{formatMoney(card.exceededMinor, currencyCode)} over
-                    </Badge>
-                  )}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {simulation && (
+        <>
+          <div className="grid gap-6 sm:grid-cols-2">
+            <BeforeAfter
+              label="Minimum balance"
+              beforeMinor={simulation.minimumBalanceBeforeMinor}
+              afterMinor={simulation.minimumBalanceAfterMinor}
+              note={`on ${formatDate(simulation.minimumBalanceAfterDate)}`}
+              currencyCode={currencyCode}
+            />
+            <BeforeAfter
+              label="Safe to spend"
+              beforeMinor={simulation.safeToSpendBeforeMinor}
+              afterMinor={simulation.safeToSpendAfterMinor}
+              currencyCode={currencyCode}
+            />
+          </div>
+
+          {simulation.monthlyOutlook.length > 0 && (
+            <div>
+              <span className="micro-label">Month by month</span>
+              <MonthlyOutlookTable entries={simulation.monthlyOutlook} currencyCode={currencyCode} />
+            </div>
+          )}
+
+          <div>
+            <span className="micro-label">Balance, vs without this plan</span>
+            <div className="mt-3">
+              <SimulationBalanceChart data={planChartData} currencyCode={currencyCode} />
+            </div>
+          </div>
+
+          {simulation.cards.length > 0 && (
+            <div>
+              <span className="micro-label">Card load</span>
+              <ul className="mt-2 divide-y divide-dashed">
+                {simulation.cards.map((card) => (
+                  <li
+                    key={card.cardId}
+                    className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0"
+                  >
+                    <span>{card.label}</span>
+                    <span className="flex items-center gap-2">
+                      <span className="font-amount tabular-nums text-muted-foreground">
+                        {formatMoney(card.committedMinor + card.planChargedMinor, currencyCode)}
+                        {" / "}
+                        {formatMoney(card.creditLimitMinor, currencyCode)}
+                      </span>
+                      {card.exceededMinor > 0 && (
+                        <Badge variant="destructive" className="text-[10px]">
+                          +{formatMoney(card.exceededMinor, currencyCode)} over
+                        </Badge>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

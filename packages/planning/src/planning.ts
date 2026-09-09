@@ -756,6 +756,15 @@ export interface RecommendedChoice {
   /** How many ways of paying it were workable at all, this one included. */
   workableCount: number;
   /**
+   * False when nothing worked for this item and this is only the least-bad
+   * way. "How would I pay for this" must always have an answer — a blank
+   * screen is not a more honest one — so the choice is still made, and
+   * labelled.
+   */
+  fits: boolean;
+  /** What this way breaks, when it does not fit. */
+  rejections: RejectionCode[];
+  /**
    * Why this way was picked, in minor units. Written for the agent, MCP and
    * the audit trail — a screen should render the structured fields above
    * through its own formatter instead of printing these.
@@ -939,9 +948,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     const acceptable = verdicts.filter((verdict) => verdict.acceptable).sort(byPreference);
     const picked = acceptable[0];
 
+    const nearest = [...verdicts].sort(byPreference)[0]!;
     if (!picked) {
       failed = true;
-      const nearest = [...verdicts].sort(byPreference)[0]!;
       if (!bestEffortTrough || nearest.minimumBalanceMinor < bestEffortTrough.minimumBalanceMinor) {
         bestEffortTrough = {
           minimumBalanceMinor: nearest.minimumBalanceMinor,
@@ -995,61 +1004,58 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         bestFloorBreachMinor: floorBreakers[0]?.minimumBalanceMinor,
         bestFloorBreachDate: floorBreakers[0]?.minimumBalanceDate,
       });
-      // Keep going: the remaining items still say something about the gap.
-      continue;
     }
 
-    chosenEvents.push(...picked.option.cashEvents);
-    if (picked.option.card) {
-      const card = picked.option.card;
+    // The least-bad candidate stands in when none worked, so every item is
+    // answered and the basket picture below is the real one.
+    const taken = picked ?? nearest;
+    const takenRejections: RejectionCode[] = [];
+    if (taken.breaksInstallmentCap || taken.breaksDeadline) takenRejections.push("DEADLINE_EXCEEDED");
+    if (taken.breaksCard) takenRejections.push("CREDIT_LIMIT_EXCEEDED");
+    if (taken.breaksFloor) {
+      takenRejections.push(alreadyShort ? "NEGATIVE_BALANCE" : "HARD_RESERVE_VIOLATED");
+    }
+    chosenEvents.push(...taken.option.cashEvents);
+    if (taken.option.card) {
+      const card = taken.option.card;
       cardChargedMinor.set(
         card.cardId,
-        (cardChargedMinor.get(card.cardId) ?? 0) + picked.option.totalCostMinor,
+        (cardChargedMinor.get(card.cardId) ?? 0) + taken.option.totalCostMinor,
       );
     }
 
-    const runnersUp = acceptable.length - 1;
-    const { lastPaymentDate } = summarizeOption(picked.option);
-    const settlements = [...picked.option.cashEvents].sort((left, right) =>
+    const runnersUp = Math.max(0, acceptable.length - 1);
+    const { lastPaymentDate } = summarizeOption(taken.option);
+    const settlements = [...taken.option.cashEvents].sort((left, right) =>
       left.expectedAt.localeCompare(right.expectedAt),
     );
     choices.push({
       itemId: item.itemId,
       label: item.label,
-      optionId: picked.option.id,
-      optionLabel: picked.option.label,
-      totalCostMinor: picked.option.totalCostMinor,
-      installments: picked.option.installments ?? 1,
-      installmentAmountMinor: Math.abs(settlements[0]?.amountMinor ?? picked.option.totalCostMinor),
+      optionId: taken.option.id,
+      optionLabel: taken.option.label,
+      totalCostMinor: taken.option.totalCostMinor,
+      installments: taken.option.installments ?? 1,
+      installmentAmountMinor: Math.abs(settlements[0]?.amountMinor ?? taken.option.totalCostMinor),
       firstPaymentDate: settlements[0]?.expectedAt,
       lastPaymentDate,
-      cardId: picked.option.card?.cardId,
-      cardLabel: picked.option.card?.label,
-      minimumBalanceMinor: picked.minimumBalanceMinor,
-      minimumBalanceDate: picked.minimumBalanceDate,
+      cardId: taken.option.card?.cardId,
+      cardLabel: taken.option.card?.label,
+      minimumBalanceMinor: taken.minimumBalanceMinor,
+      minimumBalanceDate: taken.minimumBalanceDate,
       workableCount: acceptable.length,
-      reasons: [
-        `leaves the balance at ${picked.minimumBalanceMinor} on ${picked.minimumBalanceDate}, the highest of ${acceptable.length} workable ${acceptable.length === 1 ? "way" : "ways"} to pay it`,
-        ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit but left less cash`] : []),
-        ...(limitDate && lastPaymentDate ? [`paid off by ${lastPaymentDate}, within ${limitDate}`] : []),
-      ],
+      fits: Boolean(picked),
+      rejections: takenRejections,
+      reasons: picked
+        ? [
+            `leaves the balance at ${taken.minimumBalanceMinor} on ${taken.minimumBalanceDate}, the highest of ${acceptable.length} workable ${acceptable.length === 1 ? "way" : "ways"} to pay it`,
+            ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit but left less cash`] : []),
+            ...(limitDate && lastPaymentDate ? [`paid off by ${lastPaymentDate}, within ${limitDate}`] : []),
+          ]
+        : [
+            `no way of paying it works; this is the least-bad, leaving ${taken.minimumBalanceMinor} on ${taken.minimumBalanceDate}`,
+          ],
     });
-  }
-
-  if (failed || choices.length !== ordered.length) {
-    const reserveGap =
-      bestEffortTrough && bestEffortTrough.minimumBalanceMinor < input.hardReserveMinor
-        ? input.hardReserveMinor - bestEffortTrough.minimumBalanceMinor
-        : undefined;
-    return {
-      status: "NO_FEASIBLE_PLAN",
-      choices,
-      blockedItems,
-      baselineBreach,
-      shortfallMinor: reserveGap,
-      shortfallDate: reserveGap !== undefined ? bestEffortTrough?.minimumBalanceDate : undefined,
-      blockers,
-    };
   }
 
   const chosenById = new Map(choices.map((choice) => [choice.itemId, choice.optionId]));
@@ -1066,6 +1072,23 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       option: item.candidates.find((candidate) => candidate.id === chosenById.get(item.itemId))!,
     })),
   });
+
+  if (failed) {
+    const reserveGap =
+      bestEffortTrough && bestEffortTrough.minimumBalanceMinor < input.hardReserveMinor
+        ? input.hardReserveMinor - bestEffortTrough.minimumBalanceMinor
+        : undefined;
+    return {
+      status: "NO_FEASIBLE_PLAN",
+      choices,
+      simulation,
+      blockedItems,
+      baselineBreach,
+      shortfallMinor: reserveGap,
+      shortfallDate: reserveGap !== undefined ? bestEffortTrough?.minimumBalanceDate : undefined,
+      blockers,
+    };
+  }
 
   return { status: "OK", choices, simulation, baselineBreach, blockedItems: [], blockers: [] };
 }

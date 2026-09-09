@@ -196,8 +196,13 @@ describe("recommendPurchasePlan", () => {
     expect(result.status).toBe("NO_FEASIBLE_PLAN");
     expect(result.shortfallMinor).toBeGreaterThan(0);
     expect(result.shortfallDate).toBe("2026-09-15");
-    // No item was deferred or dropped to make the answer look better.
-    expect(result.choices.length).toBeLessThan(2);
+    // No item is deferred, dropped, or left unanswered. "How would I pay for
+    // this" gets an answer even when the answer does not fit, flagged as such.
+    expect(result.choices).toHaveLength(2);
+    expect(result.choices.every((choice) => choice.fits)).toBe(false);
+    expect(result.choices.some((choice) => choice.rejections.length > 0)).toBe(true);
+    // And the basket picture is still built, so the month-by-month view exists.
+    expect(result.simulation).toBeDefined();
   });
 
   it("returns the basket verdict alongside the choices when everything fits", () => {
