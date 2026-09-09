@@ -330,3 +330,33 @@ describe("least-bad fallback", () => {
     expect(choice.rejections).not.toContain("CREDIT_LIMIT_EXCEEDED");
   });
 });
+
+describe("cash preservation when troughs tie", () => {
+  it("spreads further when the low point sits before every settlement", () => {
+    const result = recommendPurchasePlan({
+      forecastInput: {
+        ...forecastInput,
+        // The trough is in September, before any card bill lands, so every
+        // card option leaves it untouched and they all tie on it.
+        balances: [{ accountId: "cash", amountMinor: 100_000, observedAt: "2026-09-07" }],
+        events: [
+          { id: "rent", logicalKey: "bill:rent", expectedAt: "2026-09-10", amountMinor: -90_000, sourceType: "bill", confidence: "CONFIRMED" as const },
+          ...forecastInput.events,
+        ],
+      },
+      hardReserveMinor: 0,
+      items: [
+        item("stroller", [
+          card("stroller", 240_000, ["2026-10-10", "2026-11-10"]),
+          card("stroller", 240_000, [
+            "2026-10-10", "2026-11-10", "2026-12-10", "2027-01-10", "2027-02-10", "2027-03-10",
+          ]),
+        ]),
+      ],
+    });
+
+    // Both leave the September trough alone, so the tie is decided by what a
+    // single month has to absorb — R$400 rather than R$1,200.
+    expect(result.choices[0]!.installments).toBe(6);
+  });
+});

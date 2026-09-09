@@ -952,8 +952,17 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
 
     // Preserve cash: highest trough wins, then cheaper, then fewer
     // installments, then id. Every comparison is total and deterministic.
+    // Preserve cash: highest trough first. When troughs tie — and they tie far
+    // more often than they look like they should, because a trough that sits
+    // before every settlement is untouched by all of them — the deciding
+    // question is how much a single month has to absorb. Ranking by
+    // instalment count there was backwards: it handed the shortest plan the
+    // win precisely when spreading was free, so a card whose first bill lands
+    // after the low point came back as 2x instead of 12x.
     const byPreference = (left: CandidateVerdict, right: CandidateVerdict) =>
       right.minimumBalanceMinor - left.minimumBalanceMinor ||
+      summarizeOption(left.option).peakMonthlyOutflowMinor -
+        summarizeOption(right.option).peakMonthlyOutflowMinor ||
       left.option.totalCostMinor - right.option.totalCostMinor ||
       (left.option.installments ?? 1) - (right.option.installments ?? 1) ||
       left.option.id.localeCompare(right.option.id);
