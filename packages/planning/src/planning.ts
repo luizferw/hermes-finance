@@ -484,6 +484,18 @@ export interface CardLoad {
   exceededMinor: number;
 }
 
+export interface MonthlyOutlookEntry {
+  /** `YYYY-MM`. */
+  month: string;
+  /** Cash this plan takes out during the month. */
+  purchaseOutflowMinor: number;
+  /** Lowest the balance gets during the month, and the day it happens. */
+  minimumBalanceMinor: number;
+  minimumBalanceDate: DateString;
+  /** Where the balance ends the month. */
+  closingBalanceMinor: number;
+}
+
 export interface SimulatePurchasePlanInput {
   forecastInput: BuildForecastInput;
   hardReserveMinor: number;
@@ -509,6 +521,12 @@ export interface PurchasePlanSimulation {
   cards: CardLoad[];
   /** Cash the whole plan adds, keyed by `YYYY-MM`. */
   monthlyImpactMinor: Record<string, number>;
+  /**
+   * Month by month, what the plan takes out and what the balance does — the
+   * shape of the question "can I get through November". Derived from the same
+   * forecast the verdict is, so the two can never disagree.
+   */
+  monthlyOutlook: MonthlyOutlookEntry[];
   lastPaymentDate?: DateString;
   feasible: boolean;
   rejections: RejectionCode[];
@@ -646,7 +664,29 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
 
   const settlementDates = planEvents.map((event) => event.expectedAt).sort();
 
+  const outlookByMonth = new Map<string, MonthlyOutlookEntry>();
+  for (const day of after.forecast.days) {
+    const month = monthKey(day.date);
+    const entry = outlookByMonth.get(month);
+    if (!entry) {
+      outlookByMonth.set(month, {
+        month,
+        purchaseOutflowMinor: monthlyImpactMinor[month] ?? 0,
+        minimumBalanceMinor: day.closingBalanceMinor,
+        minimumBalanceDate: day.date,
+        closingBalanceMinor: day.closingBalanceMinor,
+      });
+      continue;
+    }
+    if (day.closingBalanceMinor < entry.minimumBalanceMinor) {
+      entry.minimumBalanceMinor = day.closingBalanceMinor;
+      entry.minimumBalanceDate = day.date;
+    }
+    entry.closingBalanceMinor = day.closingBalanceMinor;
+  }
+
   return {
+    monthlyOutlook: [...outlookByMonth.values()],
     totalCostMinor: input.items.reduce((total, item) => total + item.option.totalCostMinor, 0),
     items,
     safeToSpendBeforeMinor: before.safeToSpendMinor,
@@ -703,7 +743,13 @@ export interface RecommendedChoice {
   optionLabel: string;
   totalCostMinor: number;
   installments: number;
+  /** What each instalment costs. Equal to the total for a single payment. */
+  installmentAmountMinor: number;
+  firstPaymentDate?: DateString;
   lastPaymentDate?: DateString;
+  /** The card it is charged to, when it is charged to one. */
+  cardId?: string;
+  cardLabel?: string;
   /** Balance trough once this item is paid for this way. */
   minimumBalanceMinor: number;
   minimumBalanceDate: DateString;
@@ -822,25 +868,20 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     hardReserveMinor: input.hardReserveMinor,
     forecastInput: input.forecastInput,
   });
-  if (baseline.minimumBalanceMinor < floorMinor || baseline.hardReserveViolated) {
-    return {
-      status: "NO_FEASIBLE_PLAN",
-      choices: [],
-      blockedItems: [],
-      baselineBreach: {
+  const alreadyShort =
+    baseline.minimumBalanceMinor < floorMinor || baseline.hardReserveViolated;
+  const baselineBreach = alreadyShort
+    ? {
         minimumBalanceMinor: baseline.minimumBalanceMinor,
         minimumBalanceDate: baseline.minimumBalanceDate,
-      },
-      shortfallMinor: Math.max(
-        floorMinor - baseline.minimumBalanceMinor,
-        input.hardReserveMinor - baseline.minimumBalanceMinor,
-      ),
-      shortfallDate: baseline.minimumBalanceDate,
-      blockers: [
-        `before buying anything, the forecast already falls to ${baseline.minimumBalanceMinor} on ${baseline.minimumBalanceDate}`,
-      ],
-    };
-  }
+      }
+    : undefined;
+  // Refusing to answer at all was the wrong call. Someone whose October is
+  // already short still needs to know what their list would cost and when —
+  // they just must not be told a purchase is fine when it deepens the hole.
+  // So the bar becomes "do not make it worse": no candidate may push the
+  // trough below where it already sits. The breach is reported either way.
+  const effectiveFloorMinor = alreadyShort ? baseline.minimumBalanceMinor : floorMinor;
 
   const chosenEvents: ForecastEvent[] = [];
   const cardChargedMinor = new Map<string, number>();
@@ -869,7 +910,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         ? card.committedMinor + (cardChargedMinor.get(card.cardId) ?? 0) + option.totalCostMinor >
           card.creditLimitMinor
         : false;
-      const breaksFloor = result.minimumBalanceMinor < floorMinor || result.hardReserveViolated;
+      const breaksFloor =
+        result.minimumBalanceMinor < effectiveFloorMinor ||
+        (!alreadyShort && result.hardReserveViolated);
       const breaksInstallmentCap =
         item.maxInstallments !== undefined && (option.installments ?? 1) > item.maxInstallments;
 
@@ -967,6 +1010,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
 
     const runnersUp = acceptable.length - 1;
     const { lastPaymentDate } = summarizeOption(picked.option);
+    const settlements = [...picked.option.cashEvents].sort((left, right) =>
+      left.expectedAt.localeCompare(right.expectedAt),
+    );
     choices.push({
       itemId: item.itemId,
       label: item.label,
@@ -974,7 +1020,11 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       optionLabel: picked.option.label,
       totalCostMinor: picked.option.totalCostMinor,
       installments: picked.option.installments ?? 1,
+      installmentAmountMinor: Math.abs(settlements[0]?.amountMinor ?? picked.option.totalCostMinor),
+      firstPaymentDate: settlements[0]?.expectedAt,
       lastPaymentDate,
+      cardId: picked.option.card?.cardId,
+      cardLabel: picked.option.card?.label,
       minimumBalanceMinor: picked.minimumBalanceMinor,
       minimumBalanceDate: picked.minimumBalanceDate,
       workableCount: acceptable.length,
@@ -995,6 +1045,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       status: "NO_FEASIBLE_PLAN",
       choices,
       blockedItems,
+      baselineBreach,
       shortfallMinor: reserveGap,
       shortfallDate: reserveGap !== undefined ? bestEffortTrough?.minimumBalanceDate : undefined,
       blockers,
@@ -1016,5 +1067,5 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     })),
   });
 
-  return { status: "OK", choices, simulation, blockedItems: [], blockers: [] };
+  return { status: "OK", choices, simulation, baselineBreach, blockedItems: [], blockers: [] };
 }

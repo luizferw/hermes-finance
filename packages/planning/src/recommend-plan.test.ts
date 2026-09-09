@@ -217,31 +217,40 @@ describe("recommendPurchasePlan", () => {
     expect(result.simulation!.feasible).toBe(true);
   });
 
-  it("blames the forecast, not the items, when it is already under water", () => {
+  it("still answers when the forecast is already short, without deepening the hole", () => {
+    const underwater = {
+      ...forecastInput,
+      // A bill lands before the salary, so the trough is negative on its own.
+      balances: [{ accountId: "cash", amountMinor: -1_700, observedAt: "2026-09-07" }],
+      events: [
+        { id: "power", logicalKey: "bill:power", expectedAt: "2026-09-20", amountMinor: -25_000, sourceType: "bill", confidence: "CONFIRMED" as const },
+        ...forecastInput.events,
+      ],
+    };
+    const baselineTrough = -26_700;
+
     const result = recommendPurchasePlan({
-      forecastInput: {
-        ...forecastInput,
-        // Bills land before the salary does, so the trough is negative on its
-        // own — no purchase required.
-        balances: [{ accountId: "cash", amountMinor: -1_700, observedAt: "2026-09-07" }],
-        events: [
-          { id: "power", logicalKey: "bill:power", expectedAt: "2026-09-20", amountMinor: -25_000, sourceType: "bill", confidence: "CONFIRMED" },
-          ...forecastInput.events,
-        ],
-      },
+      forecastInput: underwater,
       hardReserveMinor: 0,
+      targetDate: "2027-06-30",
       items: [
-        item("gypsum", [cash("gypsum", 40_000, "2026-11-15")]),
-        item("floor", [cash("floor", 190_000, "2026-11-15")]),
+        item("gypsum", [
+          // Paying cash before the trough would deepen it; the card lands
+          // after the salary and leaves the low point exactly where it was.
+          cash("gypsum", 40_000, "2026-09-15"),
+          card("gypsum", 40_000, ["2026-10-10", "2026-11-10"]),
+        ]),
       ],
     });
 
-    expect(result.status).toBe("NO_FEASIBLE_PLAN");
-    expect(result.blockers).toHaveLength(1);
-    expect(result.blockers[0]).toContain("before buying anything");
-    expect(result.shortfallDate).toBe("2026-09-20");
-    // Not one blocker per item repeating the same pre-existing trough.
-    expect(result.blockers.join(" ")).not.toContain("gypsum");
+    expect(result.baselineBreach).toEqual({
+      minimumBalanceMinor: baselineTrough,
+      minimumBalanceDate: "2026-09-20",
+    });
+    expect(result.status).toBe("OK");
+    // The cash option would have made the existing trough worse.
+    expect(result.choices[0]!.optionId).toBe("gypsum:card:2");
+    expect(result.choices[0]!.minimumBalanceMinor).toBeGreaterThanOrEqual(baselineTrough);
   });
 
   it("says so plainly when there is nothing to choose from", () => {

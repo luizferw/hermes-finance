@@ -7,7 +7,7 @@ import {
   InformationCircleIcon,
 } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
-import { formatDate, formatMoney } from "@/lib/format";
+import { formatDate, formatMonth, formatMoney } from "@/lib/format";
 import {
   buildUserForecastDetailed,
   getPurchasePlanRecommendation,
@@ -16,8 +16,10 @@ import {
 import { compareStoredPaymentOptions } from "@/modules/finance/simulation";
 import type {
   BlockedItem,
+  MonthlyOutlookEntry,
   PurchasePlanRecommendation,
   PurchasePlanSimulation,
+  RecommendedChoice,
 } from "@hermes-finance/planning";
 import { Badge } from "@/components/ui/badge";
 import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
@@ -101,6 +103,27 @@ function explain(option: ComparedOption, currencyCode: string): string[] {
 }
 
 /**
+ * The one-glance answer to "how is this being paid" — installment count and
+ * size, the card it lands on, and when it starts and finishes. Every value
+ * comes straight from the chosen `RecommendedChoice`; nothing here divides
+ * `totalCostMinor` by `installments` — the engine already did that.
+ */
+function describeChoice(choice: RecommendedChoice, currencyCode: string): string {
+  const payment =
+    choice.installments > 1
+      ? `${choice.installments}× ${formatMoney(choice.installmentAmountMinor, currencyCode)}`
+      : `${formatMoney(choice.installmentAmountMinor, currencyCode)} in full`;
+  const onCard = choice.cardLabel ? ` on ${choice.cardLabel}` : "";
+  const span =
+    choice.installments > 1 && choice.firstPaymentDate && choice.lastPaymentDate
+      ? ` · ${formatDate(choice.firstPaymentDate)} → ${formatDate(choice.lastPaymentDate)}`
+      : choice.lastPaymentDate
+        ? ` · settled ${formatDate(choice.lastPaymentDate)}`
+        : "";
+  return `${payment}${onCard}${span}`;
+}
+
+/**
  * The purchase plan surface: a list to fill in, and the engine's answer for
  * how to pay for all of it.
  *
@@ -155,9 +178,6 @@ export default async function PurchasePlanDetailPage({
         if (beforeMinor === undefined) return [];
         return [{ date: day.date, afterMinor: day.closingBalanceMinor, beforeMinor }];
       })
-    : [];
-  const monthlyEntries = simulation
-    ? Object.entries(simulation.monthlyImpactMinor).sort(([a], [b]) => a.localeCompare(b))
     : [];
 
   return (
@@ -214,7 +234,6 @@ export default async function PurchasePlanDetailPage({
           recommendation={recommendation}
           simulation={simulation}
           planChartData={planChartData}
-          monthlyEntries={monthlyEntries}
           currencyCode={plan.currencyCode}
           targetDate={plan.targetDate}
         />
@@ -294,10 +313,7 @@ export default async function PurchasePlanDetailPage({
                         </span>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        {choice.installments > 1
-                          ? `${choice.installments}x`
-                          : "In full"}
-                        {choice.lastPaymentDate ? `, settled by ${formatDate(choice.lastPaymentDate)}` : ""}
+                        {describeChoice(choice, plan.currencyCode)}
                       </p>
                       <details className="mt-2 group">
                         <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
@@ -480,14 +496,12 @@ function RecommendationVerdict({
   recommendation,
   simulation,
   planChartData,
-  monthlyEntries,
   currencyCode,
   targetDate,
 }: {
   recommendation: PurchasePlanRecommendation | undefined;
   simulation: PurchasePlanSimulation | undefined;
   planChartData: Array<{ date: string; afterMinor: number; beforeMinor: number }>;
-  monthlyEntries: Array<[string, number]>;
   currencyCode: string;
   targetDate: string | null;
 }) {
@@ -508,6 +522,11 @@ function RecommendationVerdict({
     );
   }
 
+  // NO_FEASIBLE_PLAN is the only status with nothing to show: no choice was
+  // committed for every item, so there is no simulation to render alongside
+  // the warning. An OK status can *also* carry a baselineBreach — the
+  // recommender still answers under a "do not make it worse" rule — so that
+  // case is handled below, together with the full plan.
   if (recommendation.status === "NO_FEASIBLE_PLAN") {
     const breach = recommendation.baselineBreach;
     return (
@@ -563,6 +582,7 @@ function RecommendationVerdict({
 
   // OK — the basket fits, and `simulation` is the verdict for the chosen set.
   if (!simulation) return null;
+  const breach = recommendation.baselineBreach;
 
   return (
     <section className="glass-panel space-y-5 rounded-2xl p-5">
@@ -585,6 +605,19 @@ function RecommendationVerdict({
         </span>
       </div>
 
+      {breach && (
+        <div className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning-foreground">
+          <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-4 shrink-0" />
+          <p>
+            Before buying anything, your balance already drops to{" "}
+            <span className="font-amount tabular-nums">
+              {formatMoney(breach.minimumBalanceMinor, currencyCode)}
+            </span>{" "}
+            on {formatDate(breach.minimumBalanceDate)}. This plan is chosen so as not to make that worse.
+          </p>
+        </div>
+      )}
+
       <div className="grid gap-6 sm:grid-cols-2">
         <BeforeAfter
           label="Minimum balance"
@@ -601,26 +634,19 @@ function RecommendationVerdict({
         />
       </div>
 
+      {simulation.monthlyOutlook.length > 0 && (
+        <div>
+          <span className="micro-label">Month by month</span>
+          <MonthlyOutlookTable entries={simulation.monthlyOutlook} currencyCode={currencyCode} />
+        </div>
+      )}
+
       <div>
         <span className="micro-label">Balance, vs without this plan</span>
         <div className="mt-3">
           <SimulationBalanceChart data={planChartData} currencyCode={currencyCode} />
         </div>
       </div>
-
-      {monthlyEntries.length > 0 && (
-        <div>
-          <span className="micro-label">Cash the plan adds, by month</span>
-          <ul className="mt-2 divide-y divide-dashed">
-            {monthlyEntries.map(([month, amountMinor]) => (
-              <li key={month} className="flex items-center justify-between py-1.5 text-xs first:pt-0 last:pb-0">
-                <span className="text-muted-foreground">{month}</span>
-                <span className="font-amount tabular-nums">{formatMoney(amountMinor, currencyCode)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
 
       {simulation.cards.length > 0 && (
         <div>
@@ -676,6 +702,82 @@ function BeforeAfter({
         </span>
       </dd>
       {note && <p className="mt-0.5 text-xs text-muted-foreground">{note}</p>}
+    </div>
+  );
+}
+
+/**
+ * Drops trailing months where this plan does nothing — no outflow, and the
+ * low point never dips below zero — so a long horizon doesn't end in a wall
+ * of empty rows. A negative low point is never trimmed, even at the tail:
+ * it is exactly the kind of month this table exists to surface.
+ */
+function trimQuietTail(entries: MonthlyOutlookEntry[]): MonthlyOutlookEntry[] {
+  let end = entries.length;
+  while (end > 0) {
+    const entry = entries[end - 1]!;
+    if (entry.purchaseOutflowMinor !== 0 || entry.minimumBalanceMinor < 0) break;
+    end -= 1;
+  }
+  return entries.slice(0, end);
+}
+
+/**
+ * Answers "what does this cost me each month, and what's left". Every column
+ * is a field `simulatePurchasePlan` already computed on the same forecast the
+ * verdict above is — nothing here sums or nets minor units.
+ */
+function MonthlyOutlookTable({
+  entries,
+  currencyCode,
+}: {
+  entries: MonthlyOutlookEntry[];
+  currencyCode: string;
+}) {
+  const rows = trimQuietTail(entries);
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full min-w-[28rem] text-xs">
+        <thead>
+          <tr className="border-b border-border text-muted-foreground">
+            <th className="py-1.5 text-left font-normal">Month</th>
+            <th className="py-1.5 text-right font-normal">This plan takes out</th>
+            <th className="py-1.5 text-right font-normal">Low point</th>
+            <th className="py-1.5 text-right font-normal">Ends at</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-dashed">
+          {rows.map((entry) => {
+            const negative = entry.minimumBalanceMinor < 0;
+            return (
+              <tr key={entry.month}>
+                <td className="py-1.5 text-muted-foreground">{formatMonth(entry.month)}</td>
+                <td className="py-1.5 text-right font-amount tabular-nums">
+                  {entry.purchaseOutflowMinor > 0
+                    ? formatMoney(entry.purchaseOutflowMinor, currencyCode)
+                    : "—"}
+                </td>
+                <td
+                  className={cn(
+                    "py-1.5 text-right font-amount tabular-nums",
+                    negative && "font-medium text-destructive",
+                  )}
+                >
+                  {formatMoney(entry.minimumBalanceMinor, currencyCode)}
+                  <span className="ml-1 text-muted-foreground">
+                    on {formatDate(entry.minimumBalanceDate)}
+                  </span>
+                </td>
+                <td className="py-1.5 text-right font-amount tabular-nums">
+                  {formatMoney(entry.closingBalanceMinor, currencyCode)}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -200,3 +200,31 @@ describe("simulatePurchasePlan", () => {
     expect(result.monthlyImpactMinor["2026-11"]).toBe(120_000);
   });
 });
+
+describe("monthlyOutlook", () => {
+  it("reports, per month, what the plan takes out and what the balance does", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        cardItem("stroller", 240_000, ["2026-10-10", "2026-11-10"], {
+          cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
+        }),
+      ],
+    });
+
+    const october = result.monthlyOutlook.find((entry) => entry.month === "2026-10")!;
+    expect(october.purchaseOutflowMinor).toBe(120_000);
+    // The trough must be inside the month, never the whole horizon's.
+    expect(october.minimumBalanceDate.startsWith("2026-10")).toBe(true);
+    expect(october.minimumBalanceMinor).toBeLessThanOrEqual(october.closingBalanceMinor);
+
+    const september = result.monthlyOutlook.find((entry) => entry.month === "2026-09")!;
+    expect(september.purchaseOutflowMinor).toBe(0);
+
+    // Every month in the horizon is present and in order.
+    expect(result.monthlyOutlook[0]!.month).toBe("2026-09");
+    const months = result.monthlyOutlook.map((entry) => entry.month);
+    expect([...months].sort()).toEqual(months);
+  });
+});
