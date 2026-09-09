@@ -12,6 +12,7 @@ import { PurchaseItemActions } from "../item-actions";
 import { NewPurchaseItemDialog } from "./new-item-dialog";
 import { PaymentOptionsSection } from "./payment-options-section";
 import { PurchasePlanActions } from "../plan-actions";
+import { PlanTotalsLine } from "../plan-totals";
 
 export const metadata: Metadata = { title: "Payment options" };
 
@@ -112,6 +113,18 @@ export default async function PurchasePlanDetailPage({
             {plan.description ? `${plan.description} · ` : ""}
             {plan.targetDate ? `Target ${formatDate(plan.targetDate)}` : "No target date"}
           </p>
+          <PlanTotalsLine
+            className="mt-1"
+            totals={{
+              estimatedTotalMinor: plan.estimatedTotalMinor,
+              remainingEstimateMinor: plan.remainingEstimateMinor,
+              purchasedTotalMinor: plan.purchasedTotalMinor,
+              overBudgetMinor: plan.overBudgetMinor,
+              underBudgetMinor: plan.underBudgetMinor,
+              budgetMinor: plan.budgetMinor,
+              currencyCode: plan.currencyCode,
+            }}
+          />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <NewPurchaseItemDialog purchasePlanId={plan.id} currencyCode={plan.currencyCode} />
@@ -145,7 +158,11 @@ export default async function PurchasePlanDetailPage({
                 <div>
                   <h3 className="text-sm font-medium">{item.name}</h3>
                   <p className="text-xs text-muted-foreground">
-                    {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
+                    {formatMoney(
+                      item.actualPriceMinor ?? item.estimatedPriceMinor,
+                      plan.currencyCode,
+                    )}
+                    {item.actualPriceMinor !== null && " actually paid"}
                     {item.deadline ? ` · needed by ${formatDate(item.deadline)}` : ""}
                   </p>
                 </div>

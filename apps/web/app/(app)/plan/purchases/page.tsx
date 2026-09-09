@@ -18,6 +18,7 @@ import { cn } from "@/lib/utils";
 import { PurchaseItemActions } from "./item-actions";
 import { NewPurchasePlanDialog } from "./new-plan-dialog";
 import { PurchasePlanActions } from "./plan-actions";
+import { PlanTotalsLine } from "./plan-totals";
 
 export const metadata: Metadata = { title: "Purchases" };
 
@@ -84,6 +85,18 @@ export default async function PurchasesPage() {
                   {plan.description && (
                     <p className="mt-0.5 truncate text-xs text-muted-foreground">{plan.description}</p>
                   )}
+                  <PlanTotalsLine
+                    className="mt-1"
+                    totals={{
+                      estimatedTotalMinor: plan.estimatedTotalMinor,
+                      remainingEstimateMinor: plan.remainingEstimateMinor,
+                      purchasedTotalMinor: plan.purchasedTotalMinor,
+                      overBudgetMinor: plan.overBudgetMinor,
+                      underBudgetMinor: plan.underBudgetMinor,
+                      budgetMinor: plan.budgetMinor,
+                      currencyCode: plan.currencyCode,
+                    }}
+                  />
                 </div>
                 <div className="flex shrink-0 items-center gap-2.5">
                   <Badge variant="outline" className="text-[10px]">
@@ -151,7 +164,10 @@ export default async function PurchasesPage() {
                         </Badge>
                         {item.deadline && <span>by {formatDate(item.deadline)}</span>}
                         <span className="font-amount tabular-nums text-foreground">
-                          {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
+                          {formatMoney(
+                            item.actualPriceMinor ?? item.estimatedPriceMinor,
+                            plan.currencyCode,
+                          )}
                         </span>
                         <PurchaseItemActions
                           item={{

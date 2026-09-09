@@ -679,19 +679,70 @@ export async function getCardStatement(userId: string, cardId: string) {
   return { card, cycles };
 }
 
+type PlanItemTotals = {
+  /** Everything the plan still means to buy, plus what it already bought. */
+  estimatedTotalMinor: number;
+  /** The slice not bought yet — what the plan still commits you to. */
+  remainingEstimateMinor: number;
+  /** What the purchased items actually cost. */
+  purchasedTotalMinor: number;
+  /** How far past the budget the plan runs; 0 when it fits, null when unbudgeted. */
+  overBudgetMinor: number | null;
+  /** How much of the budget is still unspoken for; 0 when over, null when unbudgeted. */
+  underBudgetMinor: number | null;
+};
+
+/**
+ * What a plan adds up to.
+ *
+ * Summed here rather than in the page because the UI's job is to format a
+ * number someone else decided. A purchased item counts at what it actually
+ * cost, not at the guess it was created with; a cancelled one counts for
+ * nothing. Every item is priced in its plan's currency, which is what makes a
+ * plain sum legitimate.
+ */
+function totalsFor(
+  items: Array<{ status: string; estimatedPriceMinor: number; actualPriceMinor: number | null }>,
+  budgetMinor: number | null,
+): PlanItemTotals {
+  let estimatedTotalMinor = 0;
+  let remainingEstimateMinor = 0;
+  let purchasedTotalMinor = 0;
+
+  for (const item of items) {
+    if (item.status === "cancelled") continue;
+    const priced = item.actualPriceMinor ?? item.estimatedPriceMinor;
+    estimatedTotalMinor += priced;
+    if (item.status === "purchased") purchasedTotalMinor += priced;
+    else remainingEstimateMinor += priced;
+  }
+
+  return {
+    estimatedTotalMinor,
+    remainingEstimateMinor,
+    purchasedTotalMinor,
+    overBudgetMinor:
+      budgetMinor === null ? null : Math.max(0, estimatedTotalMinor - budgetMinor),
+    underBudgetMinor:
+      budgetMinor === null ? null : Math.max(0, budgetMinor - estimatedTotalMinor),
+  };
+}
+
 export async function listPurchasePlans(userId: string) {
-  return db.query.purchasePlans.findMany({
+  const plans = await db.query.purchasePlans.findMany({
     where: eq(purchasePlans.userId, userId),
     with: { items: { with: { paymentOptions: true } } },
     orderBy: [asc(purchasePlans.targetDate)],
   });
+  return plans.map((plan) => ({ ...plan, ...totalsFor(plan.items, plan.budgetMinor) }));
 }
 
 export async function getPurchasePlan(userId: string, id: string) {
-  return db.query.purchasePlans.findFirst({
+  const plan = await db.query.purchasePlans.findFirst({
     where: and(eq(purchasePlans.id, id), eq(purchasePlans.userId, userId)),
     with: { items: { with: { paymentOptions: true, simulations: true } } },
   });
+  return plan ? { ...plan, ...totalsFor(plan.items, plan.budgetMinor) } : undefined;
 }
 
 /**

@@ -50,6 +50,7 @@ export interface PurchaseOptionInput {
  * the card's nominal closing and due days.
  */
 async function resolveSettlementDates(
+  userId: string,
   option: PurchaseOptionInput,
   purchaseDate: string,
   installmentCount: number,
@@ -59,7 +60,12 @@ async function resolveSettlementDates(
     return { dates: [option.firstPaymentDate ?? purchaseDate] };
   }
 
-  const card = await db.query.creditCards.findFirst({ where: eq(creditCards.id, option.cardId) });
+  // Scoped to the caller: the agent and MCP tools take `cardId` straight from
+  // their input, so an unscoped lookup would settle a simulation against
+  // another tenant's closing and due days.
+  const card = await db.query.creditCards.findFirst({
+    where: and(eq(creditCards.id, option.cardId), eq(creditCards.userId, userId)),
+  });
   if (!card) throw new Error(`credit card ${option.cardId} was not found`);
 
   if (option.firstPaymentDate) {
@@ -99,7 +105,7 @@ export async function toEnginePaymentOption(
 ): Promise<PaymentOption> {
   const purchaseDate = option.purchaseDate ?? todayIso();
   const installmentCount = Math.max(1, option.installments ?? 1);
-  const { dates, cardId } = await resolveSettlementDates(option, purchaseDate, installmentCount);
+  const { dates, cardId } = await resolveSettlementDates(userId, option, purchaseDate, installmentCount);
 
   const perInstallment =
     option.installmentAmountMinor ?? Math.floor(option.amountMinor / installmentCount);
