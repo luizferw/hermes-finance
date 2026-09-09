@@ -765,13 +765,45 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
   }
 
   // Earliest deadline first: the most constrained item picks while the most
-  // room is still available. Ties broken on id so the order never depends on
-  // how the rows happened to arrive.
+  // room is still available. Then the most expensive, because a card's limit
+  // is scarce and shared — deciding a whole list in id order let a 400 item
+  // take installments that a 2400 item then could not, and the big one paid
+  // cash. Id last, so the order never depends on how the rows arrived.
+  const cheapestCandidateMinor = (item: RecommendationCandidateItem) =>
+    Math.min(...item.candidates.map((candidate) => candidate.totalCostMinor));
   const ordered = [...withCandidates].sort((left, right) => {
     const leftBy = left.deadline ?? input.targetDate ?? "9999-12-31";
     const rightBy = right.deadline ?? input.targetDate ?? "9999-12-31";
-    return leftBy.localeCompare(rightBy) || left.itemId.localeCompare(right.itemId);
+    return (
+      leftBy.localeCompare(rightBy) ||
+      cheapestCandidateMinor(right) - cheapestCandidateMinor(left) ||
+      left.itemId.localeCompare(right.itemId)
+    );
   });
+
+  // Measured before anything is bought. An item can only be blamed for a
+  // breach it causes: when the forecast is already under water, every
+  // candidate reports the same trough, and saying "this item leaves you at
+  // -643" nine times names the wrong culprit for a hole that was already
+  // there.
+  const baseline = calculateSafeToSpend({
+    hardReserveMinor: input.hardReserveMinor,
+    forecastInput: input.forecastInput,
+  });
+  if (baseline.minimumBalanceMinor < floorMinor || baseline.hardReserveViolated) {
+    return {
+      status: "NO_FEASIBLE_PLAN",
+      choices: [],
+      shortfallMinor: Math.max(
+        floorMinor - baseline.minimumBalanceMinor,
+        input.hardReserveMinor - baseline.minimumBalanceMinor,
+      ),
+      shortfallDate: baseline.minimumBalanceDate,
+      blockers: [
+        `before buying anything, the forecast already falls to ${baseline.minimumBalanceMinor} on ${baseline.minimumBalanceDate}`,
+      ],
+    };
+  }
 
   const chosenEvents: ForecastEvent[] = [];
   const cardChargedMinor = new Map<string, number>();
@@ -835,13 +867,40 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
           minimumBalanceDate: nearest.minimumBalanceDate,
         };
       }
-      const why = nearest.breaksInstallmentCap
-        ? `it cannot be split beyond ${item.maxInstallments}x, and nothing within that fits`
-        : nearest.breaksDeadline
-          ? `every way of paying it finishes after ${limitDate}`
-          : nearest.breaksCard
-            ? "every card option goes over its limit"
-            : `the best it can do leaves ${nearest.minimumBalanceMinor} on ${nearest.minimumBalanceDate}`;
+      // Every candidate's reason, not the top-ranked one's. The best-trough
+      // candidate is usually the longest instalment plan, so reporting only
+      // its failure blamed a deadline for items whose real wall was an
+      // exhausted card or the balance floor.
+      const capped = verdicts.filter((verdict) => verdict.breaksInstallmentCap).length;
+      const late = verdicts.filter(
+        (verdict) => !verdict.breaksInstallmentCap && verdict.breaksDeadline,
+      ).length;
+      const overCard = verdicts.filter(
+        (verdict) => !verdict.breaksInstallmentCap && !verdict.breaksDeadline && verdict.breaksCard,
+      ).length;
+      const floorBreakers = verdicts
+        .filter(
+          (verdict) =>
+            !verdict.breaksInstallmentCap &&
+            !verdict.breaksDeadline &&
+            !verdict.breaksCard &&
+            verdict.breaksFloor,
+        )
+        // Best of a bad set: quoting any other candidate's trough would put a
+        // number in the sentence that no rejected option actually produces.
+        .sort((left, right) => right.minimumBalanceMinor - left.minimumBalanceMinor);
+      const belowFloor = floorBreakers.length;
+      const parts: string[] = [];
+      if (capped > 0) parts.push(`${capped} exceed the ${item.maxInstallments}x it allows`);
+      if (late > 0) parts.push(`${late} finish after ${limitDate}`);
+      if (overCard > 0) parts.push(`${overCard} go over a card's remaining limit`);
+      if (belowFloor > 0) {
+        const best = floorBreakers[0]!;
+        parts.push(
+          `${belowFloor} would drop the balance to ${best.minimumBalanceMinor} on ${best.minimumBalanceDate}`,
+        );
+      }
+      const why = `no way of paying it works — ${parts.join(", ")}`;
       blockers.push(`${item.label}: ${why}`);
       // Keep going: the remaining items still say something about the gap.
       continue;

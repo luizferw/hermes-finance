@@ -138,7 +138,7 @@ describe("recommendPurchasePlan", () => {
     });
 
     expect(result.status).toBe("NO_FEASIBLE_PLAN");
-    expect(result.blockers.join(" ")).toContain("cannot be split beyond 1x");
+    expect(result.blockers.join(" ")).toContain("exceed the 1x it allows");
   });
 
   it("respects each item's deadline over the plan's target date", () => {
@@ -156,7 +156,7 @@ describe("recommendPurchasePlan", () => {
     });
 
     expect(result.status).toBe("NO_FEASIBLE_PLAN");
-    expect(result.blockers.join(" ")).toContain("finishes after 2026-10-31");
+    expect(result.blockers.join(" ")).toContain("finish after 2026-10-31");
   });
 
   it("spends one card's limit across items and stops when it runs out", () => {
@@ -176,7 +176,7 @@ describe("recommendPurchasePlan", () => {
     // The first fits on the card; the second cannot, and that is reported
     // rather than charged anyway.
     expect(result.status).toBe("NO_FEASIBLE_PLAN");
-    expect(result.blockers.join(" ")).toContain("over its limit");
+    expect(result.blockers.join(" ")).toContain("over a card's remaining limit");
   });
 
   it("reports how far short a list falls without dropping any item", () => {
@@ -215,6 +215,33 @@ describe("recommendPurchasePlan", () => {
     expect(result.simulation).toBeDefined();
     expect(result.simulation!.totalCostMinor).toBe(140_000);
     expect(result.simulation!.feasible).toBe(true);
+  });
+
+  it("blames the forecast, not the items, when it is already under water", () => {
+    const result = recommendPurchasePlan({
+      forecastInput: {
+        ...forecastInput,
+        // Bills land before the salary does, so the trough is negative on its
+        // own — no purchase required.
+        balances: [{ accountId: "cash", amountMinor: -1_700, observedAt: "2026-09-07" }],
+        events: [
+          { id: "power", logicalKey: "bill:power", expectedAt: "2026-09-20", amountMinor: -25_000, sourceType: "bill", confidence: "CONFIRMED" },
+          ...forecastInput.events,
+        ],
+      },
+      hardReserveMinor: 0,
+      items: [
+        item("gypsum", [cash("gypsum", 40_000, "2026-11-15")]),
+        item("floor", [cash("floor", 190_000, "2026-11-15")]),
+      ],
+    });
+
+    expect(result.status).toBe("NO_FEASIBLE_PLAN");
+    expect(result.blockers).toHaveLength(1);
+    expect(result.blockers[0]).toContain("before buying anything");
+    expect(result.shortfallDate).toBe("2026-09-20");
+    // Not one blocker per item repeating the same pre-existing trough.
+    expect(result.blockers.join(" ")).not.toContain("gypsum");
   });
 
   it("says so plainly when there is nothing to choose from", () => {
