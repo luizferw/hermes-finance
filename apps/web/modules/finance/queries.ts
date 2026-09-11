@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, inArray, lte, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne } from "drizzle-orm";
 import {
   accounts,
   bills,
@@ -32,12 +32,9 @@ import {
 } from "@hermes-finance/forecast";
 import {
   calculateSafeToSpend,
-  recommendPurchasePlan,
   simulatePurchasePlan,
-  type PaymentOption,
   type PlanItemOption,
-  type PurchasePlanRecommendation,
-  type RecommendationCandidateItem,
+  type PurchasePlanSimulation,
 } from "@hermes-finance/planning";
 import { loadCardContext, toEnginePaymentOption } from "./simulation";
 
@@ -193,6 +190,15 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     });
   }
 
+  // The cards are needed here, before the bills, to tell a bill paid out of a
+  // bank account from one charged to a card — the two settle on different
+  // dates, out of different pockets.
+  const cards = await db.query.creditCards.findMany({
+    where: and(eq(creditCards.userId, userId), eq(creditCards.active, true)),
+  });
+  const cardById = new Map(cards.map((card) => [card.id, card]));
+  const cardByAccountId = new Map(cards.map((card) => [card.accountId, card]));
+
   // 2. Bills: a fixed one always projects at its typed amount. A variable
   // one (PRD §9.10) prefers the amount of whichever transaction last actually
   // paid it — real history beats a manually typed guess — and only falls
@@ -215,7 +221,7 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
       }
     }
   }
-  const billRules: RecurrenceRule[] = activeBills.map((bill) => {
+  const ruleForBill = (bill: (typeof activeBills)[number]): RecurrenceRule => {
     const lastPaidMinor = lastPaidMinorByBill.get(bill.id);
     const amountMinor = lastPaidMinor ?? bill.expectedAmountMinor;
     // A fixed bill is HIGH — the same provenance as the sibling
@@ -233,12 +239,23 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
       startDate: bill.nextDueDate,
       confidence,
     };
-  });
+  };
+
+  // A bill charged to a credit card is not a cash event on its due date
+  // (PRD R4): the card pays it, and the money only leaves the bank when that
+  // card's statement settles. Projecting it here would take the cash weeks
+  // early and out of the wrong pocket, so these bills are held back and folded
+  // into their billing cycle in step 4 instead.
+  const cardBills = activeBills.filter(
+    (bill) => bill.accountId !== null && cardByAccountId.has(bill.accountId),
+  );
+  const cashBills = activeBills.filter((bill) => !cardBills.includes(bill));
+
   events.push(
     ...tagLabels(
-      projectRecurrences(billRules, range),
+      projectRecurrences(cashBills.map(ruleForBill), range),
       labels,
-      activeBills.map((bill) => [`recurring:bill:${bill.id}`, bill.name]),
+      cashBills.map((bill) => [`recurring:bill:${bill.id}`, bill.name]),
     ),
   );
 
@@ -269,10 +286,6 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
   );
 
   // 4. Credit-card statements: one cash settlement per billing cycle.
-  const cards = await db.query.creditCards.findMany({
-    where: and(eq(creditCards.userId, userId), eq(creditCards.active, true)),
-  });
-  const cardById = new Map(cards.map((card) => [card.id, card]));
   if (cards.length > 0) {
     const recordedCycles = await db.query.creditCardBillingCycles.findMany({
       where: and(
@@ -301,14 +314,93 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     // ledger transactions. Without deriving its statements the same way
     // `getCardStatement` does, the card's entire debt is invisible to the
     // forecast and to safe-to-spend, no matter how many transactions it has.
+    const cardAccounts = await db.query.accounts.findMany({
+      where: inArray(accounts.id, cards.map((card) => card.accountId)),
+      columns: { id: true, currentBalanceMinor: true },
+    });
+    const debtByAccountId = new Map(
+      cardAccounts.map((account) => [account.id, Math.max(0, -account.currentBalanceMinor)]),
+    );
+
     for (const card of cards) {
       const derived = await deriveLedgerCycles(userId, card);
+
+      // How much of each statement is still owed.
+      //
+      // A payment cannot be matched to a cycle by its own date: paying the
+      // August bill on 5 September posts inside September's period but settles
+      // August. Netting per period therefore cancels the wrong statement — it
+      // erases the charges you have not been billed for yet and leaves the ones
+      // you already paid. So the credits are not netted here at all.
+      //
+      // Instead the card account's balance — every charge less every payment,
+      // transfer legs included — is the real debt, and a card settles oldest
+      // first. What is left unpaid is the most recent charges, so the debt is
+      // handed out newest-first. A card paid off has a debt of zero and
+      // projects nothing, which is the point: a settled bill must stop taking
+      // cash out of the horizon.
+      let remainingDebtMinor = debtByAccountId.get(card.accountId) ?? 0;
+      const billedByMonth = new Map<string, number>();
+      const newestFirst = [...derived.entries()].sort(([left], [right]) => right.localeCompare(left));
+      for (const [month, entry] of newestFirst) {
+        if (remainingDebtMinor <= 0) break;
+        const billedMinor = Math.min(entry.chargesMinor, remainingDebtMinor);
+        remainingDebtMinor -= billedMinor;
+        billedByMonth.set(month, billedMinor);
+      }
+
       for (const [month, entry] of derived) {
         if (recordedMonths.has(`${card.id}:${month}`)) continue;
         if (entry.dueAt < asOf || entry.dueAt > horizonEnd) continue;
+        // Debt allocated to a cycle already past due is not projected: the
+        // forecast asks about what is still ahead, and an overdue statement
+        // has no future date to charge it on.
+        const billedMinor = billedByMonth.get(month) ?? 0;
+        if (billedMinor === 0) continue;
+
         const id = `derived:${card.id}:${month}`;
         billingCycles.push({ id, creditCardId: card.id, statementMonth: month, dueAt: entry.dueAt });
-        charges.push({ billingCycleId: id, amountMinor: entry.chargesMinor - entry.creditsMinor });
+        charges.push({ billingCycleId: id, amountMinor: billedMinor });
+      }
+    }
+
+    // The bills held back in step 2. Each occurrence is a charge on whichever
+    // statement was open on the day it posts, so the cash leaves on that
+    // statement's due date — the same rule a card purchase follows, because it
+    // is the same thing. A month the card has no cycle for yet gets one
+    // synthesized: without it the charge would land nowhere and the bill would
+    // vanish from the horizon entirely, which is worse than dating it early.
+    //
+    // The bill's own confidence is lost here, and deliberately: a statement is
+    // one cash event, and a mixed-provenance total has no single confidence to
+    // report. `projectStatements` rates it HIGH, or CONFIRMED once the real
+    // statement total is recorded.
+    const cycleIdByCardMonth = new Map(
+      billingCycles.map((cycle) => [`${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`, cycle.id]),
+    );
+    for (const bill of cardBills) {
+      const card = cardByAccountId.get(bill.accountId!)!;
+      for (const occurrence of projectRecurrences([ruleForBill(bill)], range)) {
+        const nominal = nominalCycleFor(
+          occurrence.expectedAt,
+          card.defaultClosingDay,
+          card.defaultDueDay,
+        );
+        if (nominal.dueAt < asOf || nominal.dueAt > horizonEnd) continue;
+        const key = `${card.id}:${nominal.statementMonth}`;
+        let cycleId = cycleIdByCardMonth.get(key);
+        if (cycleId === undefined) {
+          cycleId = `bill-cycle:${card.id}:${nominal.statementMonth}`;
+          cycleIdByCardMonth.set(key, cycleId);
+          billingCycles.push({
+            id: cycleId,
+            creditCardId: card.id,
+            statementMonth: nominal.statementMonth,
+            dueAt: nominal.dueAt,
+          });
+        }
+        // Charges are positive magnitudes; the rule's amount is an outflow.
+        charges.push({ billingCycleId: cycleId, amountMinor: Math.abs(occurrence.amountMinor) });
       }
     }
 
@@ -603,24 +695,51 @@ async function deriveLedgerCycles(
   userId: string,
   card: { id: string; accountId: string; defaultClosingDay: number; defaultDueDay: number },
 ): Promise<Map<string, DerivedLedgerCycle>> {
-  const ledger = await db.query.transactions.findMany({
-    where: and(eq(transactions.userId, userId), eq(transactions.accountId, card.accountId)),
-    columns: { date: true, amountMinor: true },
-  });
+  const [ownRows, incomingTransfers] = await Promise.all([
+    db.query.transactions.findMany({
+      where: and(
+        eq(transactions.userId, userId),
+        eq(transactions.accountId, card.accountId),
+        isNull(transactions.deletedAt),
+      ),
+      columns: { date: true, amountMinor: true },
+    }),
+    // Paying the bill from a bank account is a transfer, and a transfer is one
+    // row on the *source* account — its destination leg is derived, never
+    // stored (PRD R5). Reading only rows whose `accountId` is the card
+    // therefore sees every purchase and not one single payment, which is what
+    // made a settled card keep its debt forever.
+    db.query.transactions.findMany({
+      where: and(
+        eq(transactions.userId, userId),
+        eq(transactions.transferAccountId, card.accountId),
+        isNull(transactions.deletedAt),
+      ),
+      columns: { date: true, amountMinor: true },
+    }),
+  ]);
 
   const byMonth = new Map<string, DerivedLedgerCycle>();
-  for (const entry of ledger) {
-    const cycle = nominalCycleFor(entry.date, card.defaultClosingDay, card.defaultDueDay);
+  const post = (date: string, chargeMinor: number, creditMinor: number) => {
+    const cycle = nominalCycleFor(date, card.defaultClosingDay, card.defaultDueDay);
     const existing = byMonth.get(cycle.statementMonth) ?? {
       closesAt: cycle.closesAt,
       dueAt: cycle.dueAt,
       chargesMinor: 0,
       creditsMinor: 0,
     };
-    if (entry.amountMinor < 0) existing.chargesMinor += -entry.amountMinor;
-    else existing.creditsMinor += entry.amountMinor;
+    existing.chargesMinor += chargeMinor;
+    existing.creditsMinor += creditMinor;
     byMonth.set(cycle.statementMonth, existing);
+  };
+
+  for (const entry of ownRows) {
+    if (entry.amountMinor < 0) post(entry.date, -entry.amountMinor, 0);
+    else post(entry.date, 0, entry.amountMinor);
   }
+  // The stored leg is the outflow from the payer; on the card it is a credit.
+  for (const entry of incomingTransfers) post(entry.date, 0, Math.abs(entry.amountMinor));
+
   return byMonth;
 }
 
@@ -645,6 +764,7 @@ export async function getCardStatement(userId: string, cardId: string) {
   });
 
   const derived = await deriveLedgerCycles(userId, card);
+  const today = todayIso();
   const byMonth = new Map<string, CardStatementCycle>();
   for (const [month, entry] of derived) {
     byMonth.set(month, {
@@ -657,7 +777,16 @@ export async function getCardStatement(userId: string, cardId: string) {
       totalMinor: entry.chargesMinor - entry.creditsMinor,
       isReconciled: false,
       source: "derived",
-      status: "closed",
+      // A derived cycle carries no recorded status, so the only honest one is
+      // the one its own dates give: it is open until the day it closes. It was
+      // being stamped "closed" unconditionally, which told you the month you
+      // are still spending in had already shut.
+      //
+      // It never becomes "paid" or "overdue" here. Deciding that a payment
+      // settled a particular statement is reconciliation (PRD §29) — and it
+      // cannot be inferred from dates, since a bill is normally paid in the
+      // period *after* the one it belongs to.
+      status: today <= entry.closesAt ? "open" : "closed",
     });
   }
 
@@ -754,43 +883,48 @@ export async function getPurchasePlan(userId: string, id: string) {
   return plan ? { ...plan, ...totalsFor(plan.items, plan.budgetMinor) } : undefined;
 }
 
+export interface PurchasePlanImpactResult {
+  plan: NonNullable<Awaited<ReturnType<typeof getPurchasePlan>>>;
+  /** Undefined only when no item in the plan carries both an account and a purchase date. */
+  simulation?: PurchasePlanSimulation;
+  /** Items missing an account or a purchase date — excluded from the simulation, reported instead of silently dropped. */
+  unprojectedItems: Array<{ id: string; name: string }>;
+}
+
 /**
- * Whether the whole plan — not one item in isolation — fits by its target
- * date. Only items still ahead (not cancelled, not already purchased) count,
- * and only the ones with a settled payment choice: an item's chosen option is
- * its `selectedPaymentOptionId`, falling back to its only option when it has
- * exactly one. An item with no chosen option is left out of the simulation
- * and reported back separately — inventing a payment for it would answer a
- * question the user never configured.
+ * What this plan's items do to the horizon.
+ *
+ * Each item carries everything it needs to become one `PaymentOption`: a
+ * credit-card account settles it on that card's real cycles over its own
+ * `installments`; any other account settles it in full on the purchase date
+ * (`toEnginePaymentOption`'s existing dispatch, not reimplemented here). The
+ * result is handed straight to `simulatePurchasePlan`, which owns the verdict.
  */
-export async function getPurchasePlanSimulation(userId: string, planId: string) {
-  const plan = await db.query.purchasePlans.findFirst({
-    where: and(eq(purchasePlans.id, planId), eq(purchasePlans.userId, userId)),
-    with: { items: { with: { paymentOptions: true } } },
-  });
+export async function getPurchasePlanImpact(
+  userId: string,
+  planId: string,
+): Promise<PurchasePlanImpactResult | undefined> {
+  const plan = await getPurchasePlan(userId, planId);
   if (!plan) return undefined;
 
-  const active = plan.items.filter((item) => item.status !== "cancelled" && item.status !== "purchased");
+  // One read for every item this function resolves into a payment option,
+  // instead of each item re-reading the cards, their cycles and the
+  // installment ledger on its own.
+  const cardContext = await loadCardContext(userId);
+  const cardByAccountId = new Map(cardContext.cards.map((card) => [card.accountId, card]));
 
-  const unconfiguredItems: Array<{ id: string; name: string }> = [];
-  const resolved: Array<{
-    item: (typeof active)[number];
-    option: (typeof active)[number]["paymentOptions"][number];
-  }> = [];
-  for (const item of active) {
-    const chosen =
-      (item.selectedPaymentOptionId
-        ? item.paymentOptions.find((option) => option.id === item.selectedPaymentOptionId)
-        : undefined) ?? (item.paymentOptions.length === 1 ? item.paymentOptions[0] : undefined);
-    if (!chosen) {
-      unconfiguredItems.push({ id: item.id, name: item.name });
+  const unprojectedItems: Array<{ id: string; name: string }> = [];
+  const projectable: Array<(typeof plan.items)[number] & { accountId: string; purchaseDate: string }> = [];
+  for (const item of plan.items) {
+    if (!item.accountId || !item.purchaseDate) {
+      unprojectedItems.push({ id: item.id, name: item.name });
       continue;
     }
-    resolved.push({ item, option: chosen });
+    projectable.push({ ...item, accountId: item.accountId, purchaseDate: item.purchaseDate });
   }
 
-  if (resolved.length === 0) {
-    return { plan, simulation: undefined, unconfiguredItems };
+  if (projectable.length === 0) {
+    return { plan, simulation: undefined, unprojectedItems };
   }
 
   const horizonDays = 365;
@@ -801,25 +935,23 @@ export async function getPurchasePlanSimulation(userId: string, planId: string) 
   ]);
 
   const items: PlanItemOption[] = await Promise.all(
-    resolved.map(async ({ item, option }) => ({
-      itemId: item.id,
-      label: item.name,
-      // toEnginePaymentOption keys cash events off `option.id`, and every
-      // resolved item here carries a distinct payment_options row — so
-      // logicalKeys are unique across the plan without extra namespacing.
-      option: await toEnginePaymentOption(userId, {
-        id: option.id,
-        label: item.name,
-        method: option.paymentMethod,
-        amountMinor: option.cashPriceMinor ?? option.totalCostMinor,
-        cardId: option.cardId,
-        installments: option.installments,
-        installmentAmountMinor: option.installmentAmountMinor,
-        purchaseDate: item.earliestPurchaseDate,
-        firstPaymentDate: option.firstPaymentDate,
-      }),
-      deadline: item.deadline ?? undefined,
-    })),
+    projectable.map(async (item) => {
+      const card = cardByAccountId.get(item.accountId);
+      const option = await toEnginePaymentOption(
+        userId,
+        {
+          id: item.id,
+          label: item.name,
+          method: card ? "credit_card" : "cash",
+          amountMinor: item.estimatedPriceMinor,
+          cardId: card ? card.id : null,
+          installments: card ? item.installments : 1,
+          purchaseDate: item.purchaseDate,
+        },
+        cardContext,
+      );
+      return { itemId: item.id, label: item.name, option, purchaseDate: item.purchaseDate };
+    }),
   );
 
   const simulation = simulatePurchasePlan({
@@ -839,170 +971,9 @@ export async function getPurchasePlanSimulation(userId: string, planId: string) 
     items,
   });
 
-  return { plan, simulation, unconfiguredItems };
+  return { plan, simulation, unprojectedItems };
 }
 
-/** Installment counts a card candidate is generated at (PRD-inverted plan flow). */
-const CANDIDATE_INSTALLMENT_COUNTS = [1, 2, 3, 4, 5, 6, 10, 12] as const;
-
-export interface PurchasePlanRecommendationResult {
-  plan: NonNullable<Awaited<ReturnType<typeof getPurchasePlan>>>;
-  /** Undefined only when the plan has no active item to pay for. */
-  recommendation?: PurchasePlanRecommendation;
-  /** Items whose candidate list is their own manually chosen option, not generated ones. */
-  overriddenItemIds: string[];
-  /** Whether the user has any active credit card — card candidates need one. */
-  hasCards: boolean;
-}
-
-/**
- * Recommends how to pay for every still-open item in a plan.
- *
- * This inverts the older per-item comparison: the user only supplies name,
- * price and deadline per item, and this builds every way each one could
- * plausibly be paid — in full, or on each active card at a spread of
- * installment counts — then hands them to `recommendPurchasePlan`, which
- * decides. Nothing here picks a winner; it only proposes candidates.
- *
- * An item with a manually chosen `selectedPaymentOptionId` gets exactly one
- * candidate — that option — so the engine's answer respects the user's own
- * decision instead of second-guessing it with alternatives they didn't ask for.
- *
- * An item's deadline is when it is *needed*, not when it must be paid off, so
- * it does not bound the instalment count. Filtering candidates on their last
- * settlement date deleted 4x through 12x for a list due in December and left
- * every item stuck at 3x — the opposite of what someone asking "can I split
- * this to make it fit" wants.
- */
-export async function getPurchasePlanRecommendation(
-  userId: string,
-  planId: string,
-  /**
-   * `advisory` answers as if the purchases had already been made: the balance
-   * floor stops vetoing a way of paying and is reported instead. Card limits
-   * and deadlines stay hard.
-   */
-  balanceFloor: "enforce" | "advisory" = "enforce",
-): Promise<PurchasePlanRecommendationResult | undefined> {
-  const plan = await getPurchasePlan(userId, planId);
-  if (!plan) return undefined;
-
-  const active = plan.items.filter((item) => item.status !== "cancelled" && item.status !== "purchased");
-  // One read for every candidate this function is about to resolve: a nine-item
-  // plan across two cards asks for well over a hundred, and each used to
-  // re-read the cards, their cycles and the installment ledger on its own.
-  const cardContext = await loadCardContext(userId);
-  const cards = cardContext.cards;
-
-  if (active.length === 0) {
-    return {
-      plan,
-      recommendation: { status: "INSUFFICIENT_DATA", choices: [], blockedItems: [], blockers: ["this plan has no active item yet"] },
-      overriddenItemIds: [],
-      hasCards: cards.length > 0,
-    };
-  }
-
-  const horizonDays = 365;
-  const [{ forecast }, hardReserveMinor, softReserves] = await Promise.all([
-    buildUserForecastDetailed(userId, horizonDays),
-    getHardReserveMinor(userId),
-    getSoftReserves(userId),
-  ]);
-
-  const overriddenItemIds: string[] = [];
-  const items: RecommendationCandidateItem[] = await Promise.all(
-    active.map(async (item): Promise<RecommendationCandidateItem> => {
-      const priceMinor = item.actualPriceMinor ?? item.estimatedPriceMinor;
-      const purchaseDate = item.earliestPurchaseDate ?? todayIso();
-      const deadline = item.deadline ?? undefined;
-
-      const stored = item.selectedPaymentOptionId
-        ? item.paymentOptions.find((option) => option.id === item.selectedPaymentOptionId)
-        : undefined;
-
-      let candidates: PaymentOption[];
-      if (stored) {
-        overriddenItemIds.push(item.id);
-        candidates = [
-          await toEnginePaymentOption(userId, {
-            id: stored.id,
-            label: item.name,
-            method: stored.paymentMethod,
-            amountMinor: stored.cashPriceMinor ?? stored.totalCostMinor,
-            cardId: stored.cardId,
-            installments: stored.installments,
-            installmentAmountMinor: stored.installmentAmountMinor,
-            purchaseDate,
-            firstPaymentDate: stored.firstPaymentDate,
-          }, cardContext),
-        ];
-      } else {
-        const proposals: Array<{
-          id: string;
-          label: string;
-          cardId?: string;
-          installments: number;
-        }> = [{ id: `${item.id}:full`, label: "In full", installments: 1 }];
-
-        for (const card of cards) {
-          for (const count of CANDIDATE_INSTALLMENT_COUNTS) {
-            if (item.maxInstallments != null && count > item.maxInstallments) continue;
-            proposals.push({
-              id: `${item.id}:card:${card.id}:${count}`,
-              label: `${count}x on ${card.name}`,
-              cardId: card.id,
-              installments: count,
-            });
-          }
-        }
-
-        candidates = await Promise.all(
-          proposals.map((proposal) =>
-            toEnginePaymentOption(userId, {
-              id: proposal.id,
-              label: proposal.label,
-              method: proposal.cardId ? "credit_card" : "cash",
-              amountMinor: priceMinor,
-              cardId: proposal.cardId ?? null,
-              installments: proposal.installments,
-              purchaseDate,
-            }, cardContext),
-          ),
-        );
-      }
-
-      return {
-        itemId: item.id,
-        label: item.name,
-        deadline,
-        purchaseDate,
-        maxInstallments: item.maxInstallments ?? undefined,
-        candidates,
-      };
-    }),
-  );
-
-  const recommendation = recommendPurchasePlan({
-    balanceFloor,
-    forecastInput: {
-      asOf: forecast.asOf,
-      horizonEnd: forecast.horizonEnd,
-      balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
-      events: forecast.events,
-    },
-    hardReserveMinor,
-    softReserves: softReserves.map((reserve) => ({
-      id: reserve.id,
-      name: reserve.name,
-      amountMinor: reserve.amountMinor,
-    })),
-    targetDate: plan.targetDate ?? undefined,
-    items,
-  });
-
-  return { plan, recommendation, overriddenItemIds, hasCards: cards.length > 0 };
-}
 
 /**
  * Every purchase registered on a card, newest first, with the installment plan

@@ -177,6 +177,32 @@ describe("registry", () => {
       tool.input.safeParse({ options: Array.from({ length: 11 }, (_, i) => option(`o${i}`)) }).success,
     ).toBe(false);
   });
+
+  it("exposes recommend_purchase_plan as a read tool gated behind finance:read", () => {
+    const names = new Set(toolsForScopes(["finance:read"]).map((tool) => tool.name));
+    expect(names.has("recommend_purchase_plan")).toBe(true);
+    const tool = TOOL_BY_NAME.get("recommend_purchase_plan")!;
+    expect(tool.kind).toBe("read");
+    expect(tool.requiredScope).toBe("finance:read");
+    expect(toolsForScopes(["rules:read"]).some((t) => t.name === "recommend_purchase_plan")).toBe(false);
+  });
+
+  it("validates the recommend_purchase_plan item shape and bounds the list to 1..20 items", () => {
+    const tool = TOOL_BY_NAME.get("recommend_purchase_plan")!;
+    const item = (label: string) => ({ label, amount: 100 });
+    expect(tool.input.safeParse({ items: [] }).success).toBe(false);
+    expect(tool.input.safeParse({ items: [item("a")] }).success).toBe(true);
+    expect(
+      tool.input.safeParse({ items: Array.from({ length: 21 }, (_, i) => item(`i${i}`)) }).success,
+    ).toBe(false);
+    expect(tool.input.safeParse({ items: [{ label: "phone", amount: -1 }] }).success).toBe(false);
+    expect(
+      tool.input.safeParse({
+        items: [{ label: "phone", amount: 1200, neededBy: "2026-12-01", maxInstallments: 12 }],
+        targetDate: "2026-12-01",
+      }).success,
+    ).toBe(true);
+  });
 });
 
 /* ── agent loop with fakes (no DB, no model) ────────────────────────────── */

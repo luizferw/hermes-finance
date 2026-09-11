@@ -29,11 +29,24 @@ export type Scope =
   | "automations:read"
   | "automations:write";
 
-/** External MCP is deliberately read-only until Kosh has durable approvals. */
+/** Scopes used by the in-app chat, which remains read-only. */
 export const MCP_READ_SCOPES = [
   "finance:read",
   "rules:read",
   "automations:read",
+] as const satisfies readonly Scope[];
+
+/** Scopes eligible for an external MCP token. */
+export const MCP_SCOPES = [
+  "finance:read",
+  "transactions:write",
+  "plans:write",
+  "goals:write",
+  "reviews:write",
+  "rules:read",
+  "rules:write",
+  "automations:read",
+  "automations:write",
 ] as const satisfies readonly Scope[];
 
 /* ── Structured assistant response blocks ───────────────────────────────── */

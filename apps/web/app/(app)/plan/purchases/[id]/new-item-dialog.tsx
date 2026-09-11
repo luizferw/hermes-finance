@@ -28,72 +28,50 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
 
-/** An empty date or number input is "no value", not an unparseable one. */
+/** An empty date input is "no date", not an unparseable one. */
 const emptyToNull = (value: unknown) => (value === "" ? null : value);
 
-const PRIORITIES = [
-  { value: "must_have", label: "Must have" },
-  { value: "high", label: "High" },
-  { value: "medium", label: "Medium" },
-  { value: "low", label: "Low" },
-  { value: "optional", label: "Optional" },
-] as const;
-
-const STATUSES = [
-  { value: "idea", label: "Idea" },
-  { value: "planned", label: "Planned" },
-  { value: "ready", label: "Ready" },
-] as const;
-
 /**
- * Adds one thing to a plan. The estimated price is in the plan's currency —
- * items never carry their own, which is what lets the recommendation compare
- * them.
+ * Adds one thing to a plan: what it is, when it will be bought, what it
+ * costs, and which account pays for it. Nothing else — this is a wish, not a
+ * fact, and the horizon impact is computed from exactly these fields.
  *
- * This is a wish, not a fact: nothing here touches the ledger. The purchase
- * becomes a transaction only when it actually happens.
- *
- * Name, price, deadline and an optional installment cap are the whole primary
- * form — the recommendation engine only needs those to propose how to pay for
- * it. Priority, status, an earliest-purchase date and notes are all real
- * fields, but nobody typing a list of nine things should have to fill in five
- * fields per item just to get them recorded; they stay editable afterwards.
+ * Instalments only apply to a credit-card account, so the field only appears
+ * once one is picked.
  */
 export function NewPurchaseItemDialog({
   purchasePlanId,
   currencyCode,
+  accounts,
 }: {
   purchasePlanId: string;
   currencyCode: string;
+  accounts: Array<{ id: string; name: string; type: string }>;
 }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
-  const [moreOptionsOpen, setMoreOptionsOpen] = React.useState(false);
   const form = useForm({
     resolver: zodResolver(createPurchaseItemSchema),
     defaultValues: {
       purchasePlanId,
       name: "",
-      priority: "medium" as const,
-      estimatedPrice: undefined as unknown as number,
-      actualPrice: null,
-      earliestPurchaseDate: null,
-      deadline: null,
-      status: "idea" as const,
-      notes: "",
-      maxInstallments: null,
+      purchaseDate: null,
+      amount: undefined as unknown as number,
+      accountId: accounts[0]?.id ?? null,
+      installments: 1,
     },
   });
   const errors = form.formState.errors;
+  const accountId = form.watch("accountId");
+  const selectedAccount = accounts.find((account) => account.id === accountId);
+  const isCard = selectedAccount?.type === "credit_card";
 
   const onSubmit = form.handleSubmit(async (values) => {
     try {
       await createPurchaseItem(values);
       toast.success(`${values.name} added`);
       form.reset();
-      setMoreOptionsOpen(false);
       setOpen(false);
       router.refresh();
     } catch (err) {
@@ -113,7 +91,7 @@ export function NewPurchaseItemDialog({
         <DialogHeader>
           <DialogTitle>Add an item</DialogTitle>
           <DialogDescription>
-            Name, price and when you need it — that&apos;s enough to get a recommendation.
+            What it is, when it will be bought, what it costs, and which account pays for it.
             Prices are in {currencyCode}, the plan&apos;s currency.
           </DialogDescription>
         </DialogHeader>
@@ -126,117 +104,68 @@ export function NewPurchaseItemDialog({
             </Field>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field data-invalid={!!errors.estimatedPrice}>
-                <FieldLabel htmlFor="item-price">Price</FieldLabel>
+              <Field data-invalid={!!errors.amount}>
+                <FieldLabel htmlFor="item-amount">Amount</FieldLabel>
                 <Input
-                  id="item-price"
+                  id="item-amount"
                   type="number"
                   step="0.01"
                   min="0"
                   inputMode="decimal"
                   placeholder="0.00"
-                  {...form.register("estimatedPrice")}
+                  {...form.register("amount")}
                 />
-                {errors.estimatedPrice && (
-                  <FieldError>{errors.estimatedPrice.message}</FieldError>
-                )}
+                {errors.amount && <FieldError>{errors.amount.message}</FieldError>}
               </Field>
-              <Field data-invalid={!!errors.deadline}>
-                <FieldLabel htmlFor="item-deadline">Needed by</FieldLabel>
+              <Field data-invalid={!!errors.purchaseDate}>
+                <FieldLabel htmlFor="item-purchase-date">Purchase date</FieldLabel>
                 <Input
-                  id="item-deadline"
+                  id="item-purchase-date"
                   type="date"
-                  {...form.register("deadline", { setValueAs: emptyToNull })}
+                  {...form.register("purchaseDate", { setValueAs: emptyToNull })}
                 />
-                {errors.deadline && <FieldError>{errors.deadline.message}</FieldError>}
+                {errors.purchaseDate && <FieldError>{errors.purchaseDate.message}</FieldError>}
               </Field>
             </div>
 
-            <Field data-invalid={!!errors.maxInstallments}>
-              <FieldLabel htmlFor="item-max-installments">Can only be split into</FieldLabel>
-              <Input
-                id="item-max-installments"
-                type="number"
-                step="1"
-                min="1"
-                inputMode="numeric"
-                placeholder="No restriction, e.g. leave blank"
-                {...form.register("maxInstallments", { setValueAs: emptyToNull })}
-              />
-              {errors.maxInstallments && <FieldError>{errors.maxInstallments.message}</FieldError>}
-            </Field>
-
-            <details
-              open={moreOptionsOpen}
-              onToggle={(event) => setMoreOptionsOpen(event.currentTarget.open)}
-            >
-              <summary className="cursor-pointer list-none text-xs text-muted-foreground underline-offset-2 hover:underline">
-                More options
-              </summary>
-              <div className="mt-3 space-y-4">
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <Field data-invalid={!!errors.earliestPurchaseDate}>
-                    <FieldLabel htmlFor="item-earliest">Not before</FieldLabel>
-                    <Input
-                      id="item-earliest"
-                      type="date"
-                      {...form.register("earliestPurchaseDate", { setValueAs: emptyToNull })}
-                    />
-                    {errors.earliestPurchaseDate && (
-                      <FieldError>{errors.earliestPurchaseDate.message}</FieldError>
-                    )}
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Controller
+                control={form.control}
+                name="accountId"
+                render={({ field }) => (
+                  <Field data-invalid={!!errors.accountId}>
+                    <FieldLabel>Account</FieldLabel>
+                    <Select value={field.value ?? ""} onValueChange={field.onChange}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Pick an account" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {accounts.map((account) => (
+                          <SelectItem key={account.id} value={account.id}>
+                            {account.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {errors.accountId && <FieldError>{errors.accountId.message}</FieldError>}
                   </Field>
-                  <Controller
-                    control={form.control}
-                    name="priority"
-                    render={({ field }) => (
-                      <Field>
-                        <FieldLabel>Priority</FieldLabel>
-                        <Select value={field.value} onValueChange={field.onChange}>
-                          <SelectTrigger className="w-full">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {PRIORITIES.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </Field>
-                    )}
+                )}
+              />
+              {isCard && (
+                <Field data-invalid={!!errors.installments}>
+                  <FieldLabel htmlFor="item-installments">Instalments</FieldLabel>
+                  <Input
+                    id="item-installments"
+                    type="number"
+                    step="1"
+                    min="1"
+                    inputMode="numeric"
+                    {...form.register("installments")}
                   />
-                </div>
-
-                <Controller
-                  control={form.control}
-                  name="status"
-                  render={({ field }) => (
-                    <Field>
-                      <FieldLabel>Status</FieldLabel>
-                      <Select value={field.value} onValueChange={field.onChange}>
-                        <SelectTrigger className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {STATUSES.map((option) => (
-                            <SelectItem key={option.value} value={option.value}>
-                              {option.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </Field>
-                  )}
-                />
-
-                <Field>
-                  <FieldLabel htmlFor="item-notes">Notes</FieldLabel>
-                  <Textarea id="item-notes" rows={2} placeholder="Optional" {...form.register("notes")} />
+                  {errors.installments && <FieldError>{errors.installments.message}</FieldError>}
                 </Field>
-              </div>
-            </details>
+              )}
+            </div>
 
             <Button type="submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting && <Spinner />}

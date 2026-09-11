@@ -177,22 +177,27 @@ export const purchaseItems = pgTable("purchase_items", {
   status: purchaseItemStatusEnum("status").notNull().default("idea"),
   notes: text("notes"),
   /**
-   * Cap on how many installments this item may be split into — a seller that
-   * only takes 3x, or none at all (1). Null means no restriction. It is a fact
-   * about the world, so the recommender treats it as a hard constraint rather
-   * than a preference.
+   * When the purchase happens. Together with `accountId` and `installments`
+   * this is all the projection needs: the item stops being a question about
+   * how to pay and becomes a statement of intent whose cash impact can be
+   * drawn on the horizon.
+   */
+  purchaseDate: date("purchase_date", { mode: "string" }),
+  /** Where the money comes from. A credit-card account settles on its cycles. */
+  accountId: uuid("account_id").references(() => accounts.id, { onDelete: "set null" }),
+  /** Only meaningful on a credit-card account; 1 everywhere else. */
+  installments: smallint("installments").notNull().default(1),
+  /**
+   * Kept from the recommender era, which now lives behind an MCP tool that
+   * takes its inputs as arguments. Nothing in the app writes these any more;
+   * they are left in place rather than dropped because a destructive
+   * migration over real rows is a worse trade than three unused columns.
    */
   maxInstallments: smallint("max_installments"),
-  /**
-   * The one option this item is actually being paid by, out of the
-   * alternatives under it. Comparing options answers "which way is best";
-   * this answers "which way did I pick", which is what lets the plan's
-   * items be added up into a single simulation. Soft reference (no FK)
-   * because payment_options is declared after purchase_items.
-   */
   selectedPaymentOptionId: uuid("selected_payment_option_id"),
 }, (t) => [
   check("purchase_items_estimated_nonnegative", sql`${t.estimatedPriceMinor} >= 0`),
+  check("purchase_items_installments_positive", sql`${t.installments} >= 1`),
   check("purchase_items_max_installments_positive", sql`${t.maxInstallments} IS NULL OR ${t.maxInstallments} >= 1`),
   index("purchase_items_plan_idx").on(t.purchasePlanId),
 ]);

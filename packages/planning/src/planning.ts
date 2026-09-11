@@ -744,17 +744,6 @@ export interface RecommendPurchasePlanInput {
   minimumAllowedBalanceMinor?: number;
   /** The plan's target date; an item without its own deadline inherits it. */
   targetDate?: DateString;
-  /**
-   * What the balance floor means.
-   *
-   * `enforce` (the default) refuses a way of paying that sinks the balance
-   * below the floor. `advisory` lets it through and reports it instead —
-   * "assume I have already bought all of this, show me the damage". The
-   * breach is still recorded on the choice, so nothing is hidden; it just
-   * stops being a veto. A card's limit and an item's own deadline stay hard
-   * either way: the bank declines, and a date does not move.
-   */
-  balanceFloor?: "enforce" | "advisory";
   items: RecommendationCandidateItem[];
 }
 
@@ -913,7 +902,6 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
   // So the bar becomes "do not make it worse": no candidate may push the
   // trough below where it already sits. The breach is reported either way.
   const effectiveFloorMinor = alreadyShort ? baseline.minimumBalanceMinor : floorMinor;
-  const floorIsAdvisory = input.balanceFloor === "advisory";
 
   const chosenEvents: ForecastEvent[] = [];
   const cardChargedMinor = new Map<string, number>();
@@ -927,7 +915,6 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     const limitDate = item.deadline ?? input.targetDate;
 
     const verdicts = item.candidates.map((option): CandidateVerdict => {
-      const { lastPaymentDate } = summarizeOption(option);
       const result = calculateSafeToSpend({
         hardReserveMinor: input.hardReserveMinor,
         forecastInput: {
@@ -958,16 +945,10 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         breaksCard,
         breaksFloor,
         breaksInstallmentCap,
-        acceptable:
-          !breaksDeadline &&
-          !breaksCard &&
-          !breaksInstallmentCap &&
-          (floorIsAdvisory || !breaksFloor),
+        acceptable: !breaksDeadline && !breaksCard && !breaksInstallmentCap && !breaksFloor,
       };
     });
 
-    // Preserve cash: highest trough wins, then cheaper, then fewer
-    // installments, then id. Every comparison is total and deterministic.
     // Preserve cash: highest trough first. When troughs tie — and they tie far
     // more often than they look like they should, because a trough that sits
     // before every settlement is untouched by all of them — the deciding
@@ -995,7 +976,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       Number(verdict.breaksInstallmentCap) +
       Number(verdict.breaksDeadline) +
       Number(verdict.breaksCard) +
-      Number(floorIsAdvisory ? 0 : verdict.breaksFloor);
+      Number(verdict.breaksFloor);
     const nearest = [...verdicts].sort(
       (left, right) => brokenCount(left) - brokenCount(right) || byPreference(left, right),
     )[0]!;

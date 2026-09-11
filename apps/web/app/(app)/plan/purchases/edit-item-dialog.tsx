@@ -26,50 +26,30 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { Textarea } from "@/components/ui/textarea";
 
 /** An empty date input is "no date", not an unparseable one. */
 const emptyToNull = (value: unknown) => (value === "" ? null : value);
 
-const PRIORITIES = [
-  { value: "must_have", label: "Must have" },
-  { value: "high", label: "High" },
-  { value: "medium", label: "Medium" },
-  { value: "low", label: "Low" },
-  { value: "optional", label: "Optional" },
-] as const;
-
-const STATUSES = [
-  { value: "idea", label: "Idea" },
-  { value: "planned", label: "Planned" },
-  { value: "ready", label: "Ready" },
-  { value: "purchased", label: "Purchased" },
-  { value: "cancelled", label: "Cancelled" },
-] as const;
-
 export interface EditablePurchaseItem {
   id: string;
   name: string;
-  priority: "must_have" | "high" | "medium" | "low" | "optional";
   estimatedPriceMinor: number;
-  actualPriceMinor: number | null;
-  earliestPurchaseDate: string | null;
-  deadline: string | null;
-  status: "idea" | "planned" | "ready" | "purchased" | "cancelled";
-  notes: string | null;
-  /** Cap on how many installments this item can be split into; null means no restriction. */
-  maxInstallments: number | null;
+  purchaseDate: string | null;
+  accountId: string | null;
+  installments: number;
 }
 
 /** Items carry no currency of their own — they are priced in the plan's. */
 export function EditPurchaseItemDialog({
   item,
   currencyCode,
+  accounts,
   open,
   onOpenChange,
 }: {
   item: EditablePurchaseItem;
   currencyCode: string;
+  accounts: Array<{ id: string; name: string; type: string }>;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -78,31 +58,26 @@ export function EditPurchaseItemDialog({
     resolver: zodResolver(updatePurchaseItemSchema),
     defaultValues: {
       name: item.name,
-      priority: item.priority,
-      estimatedPrice: minorToMajor(item.estimatedPriceMinor, currencyCode),
-      actualPrice: item.actualPriceMinor != null ? minorToMajor(item.actualPriceMinor, currencyCode) : null,
-      earliestPurchaseDate: item.earliestPurchaseDate,
-      deadline: item.deadline,
-      status: item.status,
-      notes: item.notes ?? "",
-      maxInstallments: item.maxInstallments,
+      purchaseDate: item.purchaseDate,
+      amount: minorToMajor(item.estimatedPriceMinor, currencyCode),
+      accountId: item.accountId,
+      installments: item.installments,
     },
   });
   const errors = form.formState.errors;
+  const accountId = form.watch("accountId");
+  const selectedAccount = accounts.find((account) => account.id === accountId);
+  const isCard = selectedAccount?.type === "credit_card";
 
   // Re-seed the form whenever a different item is opened for editing.
   React.useEffect(() => {
     if (open) {
       form.reset({
         name: item.name,
-        priority: item.priority,
-        estimatedPrice: minorToMajor(item.estimatedPriceMinor, currencyCode),
-        actualPrice: item.actualPriceMinor != null ? minorToMajor(item.actualPriceMinor, currencyCode) : null,
-        earliestPurchaseDate: item.earliestPurchaseDate,
-        deadline: item.deadline,
-        status: item.status,
-        notes: item.notes ?? "",
-        maxInstallments: item.maxInstallments,
+        purchaseDate: item.purchaseDate,
+        amount: minorToMajor(item.estimatedPriceMinor, currencyCode),
+        accountId: item.accountId,
+        installments: item.installments,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -137,126 +112,67 @@ export function EditPurchaseItemDialog({
             </Field>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field data-invalid={!!errors.estimatedPrice}>
-                <FieldLabel htmlFor="edit-item-price">Estimated price</FieldLabel>
+              <Field data-invalid={!!errors.amount}>
+                <FieldLabel htmlFor="edit-item-amount">Amount</FieldLabel>
                 <Input
-                  id="edit-item-price"
+                  id="edit-item-amount"
                   type="number"
                   step="0.01"
                   min="0"
                   inputMode="decimal"
-                  {...form.register("estimatedPrice")}
+                  {...form.register("amount")}
                 />
-                {errors.estimatedPrice && (
-                  <FieldError>{errors.estimatedPrice.message}</FieldError>
-                )}
+                {errors.amount && <FieldError>{errors.amount.message}</FieldError>}
               </Field>
+              <Field data-invalid={!!errors.purchaseDate}>
+                <FieldLabel htmlFor="edit-item-purchase-date">Purchase date</FieldLabel>
+                <Input
+                  id="edit-item-purchase-date"
+                  type="date"
+                  {...form.register("purchaseDate", { setValueAs: emptyToNull })}
+                />
+                {errors.purchaseDate && <FieldError>{errors.purchaseDate.message}</FieldError>}
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
               <Controller
                 control={form.control}
-                name="priority"
+                name="accountId"
                 render={({ field }) => (
-                  <Field>
-                    <FieldLabel>Priority</FieldLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
+                  <Field data-invalid={!!errors.accountId}>
+                    <FieldLabel>Account</FieldLabel>
+                    <Select value={field.value ?? ""} onValueChange={field.onChange}>
                       <SelectTrigger className="w-full">
-                        <SelectValue />
+                        <SelectValue placeholder="Pick an account" />
                       </SelectTrigger>
                       <SelectContent>
-                        {PRIORITIES.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
+                        {accounts.map((account) => (
+                          <SelectItem key={account.id} value={account.id}>
+                            {account.name}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
+                    {errors.accountId && <FieldError>{errors.accountId.message}</FieldError>}
                   </Field>
                 )}
               />
+              {isCard && (
+                <Field data-invalid={!!errors.installments}>
+                  <FieldLabel htmlFor="edit-item-installments">Instalments</FieldLabel>
+                  <Input
+                    id="edit-item-installments"
+                    type="number"
+                    step="1"
+                    min="1"
+                    inputMode="numeric"
+                    {...form.register("installments")}
+                  />
+                  {errors.installments && <FieldError>{errors.installments.message}</FieldError>}
+                </Field>
+              )}
             </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field data-invalid={!!errors.actualPrice}>
-                <FieldLabel htmlFor="edit-item-actual">Actual price</FieldLabel>
-                <Input
-                  id="edit-item-actual"
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  inputMode="decimal"
-                  placeholder="Optional"
-                  {...form.register("actualPrice", { setValueAs: emptyToNull })}
-                />
-                {errors.actualPrice && <FieldError>{errors.actualPrice.message}</FieldError>}
-              </Field>
-              <Controller
-                control={form.control}
-                name="status"
-                render={({ field }) => (
-                  <Field>
-                    <FieldLabel>Status</FieldLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <SelectTrigger className="w-full">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {STATUSES.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </Field>
-                )}
-              />
-            </div>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Field data-invalid={!!errors.earliestPurchaseDate}>
-                <FieldLabel htmlFor="edit-item-earliest">Not before</FieldLabel>
-                <Input
-                  id="edit-item-earliest"
-                  type="date"
-                  {...form.register("earliestPurchaseDate", { setValueAs: emptyToNull })}
-                />
-                {errors.earliestPurchaseDate && (
-                  <FieldError>{errors.earliestPurchaseDate.message}</FieldError>
-                )}
-              </Field>
-              <Field data-invalid={!!errors.deadline}>
-                <FieldLabel htmlFor="edit-item-deadline">Needed by</FieldLabel>
-                <Input
-                  id="edit-item-deadline"
-                  type="date"
-                  {...form.register("deadline", { setValueAs: emptyToNull })}
-                />
-                {errors.deadline && <FieldError>{errors.deadline.message}</FieldError>}
-              </Field>
-            </div>
-
-            <Field data-invalid={!!errors.maxInstallments}>
-              <FieldLabel htmlFor="edit-item-max-installments">Can only be split into</FieldLabel>
-              <Input
-                id="edit-item-max-installments"
-                type="number"
-                step="1"
-                min="1"
-                inputMode="numeric"
-                placeholder="No restriction"
-                {...form.register("maxInstallments", { setValueAs: emptyToNull })}
-              />
-              {errors.maxInstallments && <FieldError>{errors.maxInstallments.message}</FieldError>}
-            </Field>
-
-            <Field>
-              <FieldLabel htmlFor="edit-item-notes">Notes</FieldLabel>
-              <Textarea
-                id="edit-item-notes"
-                rows={2}
-                placeholder="Optional"
-                {...form.register("notes")}
-              />
-            </Field>
 
             <Button type="submit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting && <Spinner />}

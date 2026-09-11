@@ -5,23 +5,27 @@ import { env } from "@/lib/env";
 import { getUserSettings } from "@/modules/settings/queries";
 import { MCP_TOOLS } from "@/modules/agent/registry";
 import { verifyMcpToken } from "@/modules/agent/mcp-tokens";
-import type { Scope, ToolContext } from "@/modules/agent/types";
+import type { ReadToolResult, Scope, ToolContext, WriteTool } from "@/modules/agent/types";
 import { logAudit } from "@/modules/shared/audit";
 
 /**
  * Kosh's real MCP server (Streamable HTTP) for external clients. Authenticated
  * by a scoped bearer token — never the browser session cookie — and tenant-
- * scoped to the token's user. External access is intentionally read-only;
- * writes remain in Kosh's authenticated confirmation flow.
+ * scoped to the token's user. Each registered tool verifies its required
+ * scope against the bearer token before execution.
  *
  * Disabled unless KOSH_MCP_ENABLED=true.
  */
 const baseHandler = createMcpHandler(
   (server) => {
     for (const tool of MCP_TOOLS) {
-      const shape =
+      const inputShape =
         (tool.input as unknown as { shape?: Record<string, z.ZodTypeAny> }).shape ??
         {};
+      const shape =
+        tool.kind === "write"
+          ? { ...inputShape, idempotencyKey: z.string().uuid() }
+          : inputShape;
       server.registerTool(
         tool.name,
         {
@@ -47,19 +51,35 @@ const baseHandler = createMcpHandler(
 
           try {
             const input = tool.input.parse(args);
-            const res = await tool.execute(ctx, input);
+            const res =
+              tool.kind === "read"
+                ? await tool.execute(ctx, input)
+                : await (tool as WriteTool).execute(
+                    ctx,
+                    (await tool.prepare(ctx, input)).payload,
+                    z.string().uuid().parse(args.idempotencyKey),
+                  );
             await logAudit({
               userId,
-              action: "agent.tool.read",
+              action: tool.kind === "read" ? "agent.tool.read" : "agent.tool.write",
               entityType: "agent_tool",
               entityId: tool.name,
               data: { source: "mcp", status: "completed" },
             });
-            return { content: [{ type: "text" as const, text: JSON.stringify(res.forModel) }] };
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(
+                    tool.kind === "read" ? (res as ReadToolResult).forModel : res,
+                  ),
+                },
+              ],
+            };
           } catch {
             await logAudit({
               userId,
-              action: "agent.tool.read",
+              action: tool.kind === "read" ? "agent.tool.read" : "agent.tool.write",
               entityType: "agent_tool",
               entityId: tool.name,
               data: { source: "mcp", status: "failed" },

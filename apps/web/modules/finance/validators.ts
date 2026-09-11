@@ -126,22 +126,15 @@ export type UpdatePurchasePlanInput = z.infer<typeof updatePurchasePlanSchema>;
 
 // --- purchase items --------------------------------------------------------------
 
-export const purchaseItemPrioritySchema = z.enum(["must_have", "high", "medium", "low", "optional"]);
-export const purchaseItemStatusSchema = z.enum(["idea", "planned", "ready", "purchased", "cancelled"]);
-
 export const createPurchaseItemSchema = z.object({
   purchasePlanId: z.string().uuid(),
   name: z.string().min(1, "Name is required").max(120),
-  priority: purchaseItemPrioritySchema.default("medium"),
+  purchaseDate: isoDate.nullish(),
   /** Major units. */
-  estimatedPrice: z.coerce.number().nonnegative("Estimated price must not be negative"),
-  actualPrice: z.coerce.number().nonnegative().nullish(),
-  earliestPurchaseDate: isoDate.nullish(),
-  deadline: isoDate.nullish(),
-  status: purchaseItemStatusSchema.default("idea"),
-  notes: z.string().max(2000).optional(),
-  /** Cap on how many installments this item can be split into; null means no restriction. */
-  maxInstallments: z.coerce.number().int().min(1).nullish(),
+  amount: z.coerce.number().nonnegative("Amount must not be negative"),
+  accountId: z.string().uuid().nullish(),
+  /** Only meaningful when accountId is a credit-card account. */
+  installments: z.coerce.number().int().min(1).default(1),
 });
 
 export const updatePurchaseItemSchema = createPurchaseItemSchema
@@ -150,46 +143,3 @@ export const updatePurchaseItemSchema = createPurchaseItemSchema
 
 export type CreatePurchaseItemInput = z.infer<typeof createPurchaseItemSchema>;
 export type UpdatePurchaseItemInput = z.infer<typeof updatePurchaseItemSchema>;
-
-// --- payment options --------------------------------------------------------------
-
-export const paymentMethodSchema = z.enum(["pix", "boleto", "cash", "credit_card", "debit_card"]);
-
-export const createPaymentOptionSchema = z
-  .object({
-    purchaseItemId: z.string().uuid(),
-    paymentMethod: paymentMethodSchema,
-    cardId: z.string().uuid().nullish(),
-    /** Major units; the one-shot cash price, when this option has one. */
-    cashPrice: z.coerce.number().nonnegative().nullish(),
-    installments: z.coerce.number().int().positive().nullish(),
-    /** Major units. */
-    installmentAmount: z.coerce.number().nonnegative().nullish(),
-    /** Major units; the total the plan costs end to end. */
-    totalCost: z.coerce.number().nonnegative("Total cost must not be negative"),
-    firstPaymentDate: isoDate.nullish(),
-  })
-  .refine((data) => data.paymentMethod !== "credit_card" || !!data.cardId, {
-    message: "cardId is required for credit_card payment options",
-    path: ["cardId"],
-  });
-
-export const updatePaymentOptionSchema = z.object({
-  paymentMethod: paymentMethodSchema.optional(),
-  cardId: z.string().uuid().nullish(),
-  cashPrice: z.coerce.number().nonnegative().nullish(),
-  installments: z.coerce.number().int().positive().nullish(),
-  installmentAmount: z.coerce.number().nonnegative().nullish(),
-  totalCost: z.coerce.number().nonnegative("Total cost must not be negative").optional(),
-  firstPaymentDate: isoDate.nullish(),
-});
-
-export type CreatePaymentOptionInput = z.infer<typeof createPaymentOptionSchema>;
-export type UpdatePaymentOptionInput = z.infer<typeof updatePaymentOptionSchema>;
-
-/** Records which of an item's options is the one actually paying for it. */
-export const selectPaymentOptionSchema = z.object({
-  paymentOptionId: z.string().uuid().nullable(),
-});
-
-export type SelectPaymentOptionInput = z.infer<typeof selectPaymentOptionSchema>;

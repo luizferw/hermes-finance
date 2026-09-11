@@ -19,9 +19,11 @@ import { EditPurchaseItemDialog, type EditablePurchaseItem } from "./edit-item-d
 export function PurchaseItemActions({
   item,
   currencyCode,
+  accounts,
 }: {
   item: EditablePurchaseItem;
   currencyCode: string;
+  accounts: Array<{ id: string; name: string; type: string }>;
 }) {
   const router = useRouter();
   const [editOpen, setEditOpen] = React.useState(false);
@@ -62,6 +64,7 @@ export function PurchaseItemActions({
       <EditPurchaseItemDialog
         item={item}
         currencyCode={currencyCode}
+        accounts={accounts}
         open={editOpen}
         onOpenChange={setEditOpen}
       />

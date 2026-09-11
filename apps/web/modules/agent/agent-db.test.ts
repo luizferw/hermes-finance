@@ -48,10 +48,11 @@ describe("idempotency gate", () => {
   });
 });
 
-describe("read tool isolation", () => {
-  it("exposes no write tools through MCP", () => {
+describe("MCP tool exposure", () => {
+  it("exposes read and write tools through MCP", () => {
     expect(MCP_TOOLS.length).toBeGreaterThan(0);
-    expect(MCP_TOOLS.every((tool) => tool.kind === "read")).toBe(true);
+    expect(MCP_TOOLS.some((tool) => tool.kind === "read")).toBe(true);
+    expect(MCP_TOOLS.some((tool) => tool.kind === "write")).toBe(true);
   });
 
   it("returns the demo user's accounts and nothing for a stranger", async () => {
@@ -313,9 +314,8 @@ describe("mcp scoped tokens", () => {
     expect(await verifyMcpToken(token)).toBeNull();
   });
 
-  it("does not grant legacy write scopes", async () => {
-    await expect(
-      createMcpToken(userId, "VITEST read-only", ["transactions:write"]),
-    ).rejects.toThrow("At least one read scope is required.");
+  it("grants configured write scopes", async () => {
+    const { token } = await createMcpToken(userId, "VITEST write", ["rules:write"]);
+    expect((await verifyMcpToken(token))?.scopes).toEqual(["rules:write"]);
   });
 });

@@ -5,10 +5,13 @@ import { todayIso } from "@kosh/domain";
 import { nominalCycleDueDates, nominalCycleFor, type ForecastEvent } from "@hermes-finance/forecast";
 import {
   comparePaymentOptions,
+  recommendPurchasePlan,
   simulatePurchase,
   type PaymentComparison,
   type PaymentOption,
+  type PurchasePlanRecommendation,
   type PurchaseSimulation,
+  type RecommendationCandidateItem,
   type SoftReserve,
 } from "@hermes-finance/planning";
 import {
@@ -317,4 +320,111 @@ export async function compareStoredPaymentOptions(userId: string, purchaseItemId
   );
 
   return { item, comparison };
+}
+
+/** Installment counts a candidate is generated at, capped by the item's own `maxInstallments`. */
+const CANDIDATE_INSTALLMENT_COUNTS = [1, 2, 3, 4, 5, 6, 10, 12] as const;
+
+export interface PlanCandidateItemInput {
+  label: string;
+  /** Cash price of the item, in integer minor units. */
+  amountMinor: number;
+  /** Latest date the item is *needed* by — not when it must be paid off. */
+  neededBy?: string;
+  /** Cap on how many installments this item may be split into. */
+  maxInstallments?: number;
+}
+
+export interface RecommendPlanContext {
+  horizonDays?: number;
+  /** The whole plan's target date; an item without its own `neededBy` inherits it. */
+  targetDate?: string;
+}
+
+/**
+ * Recommends how to pay for an ad-hoc shopping list, without any of it living
+ * in `purchase_plans`.
+ *
+ * Mirrors `getPurchasePlanRecommendation` in `./queries.ts`: for every item,
+ * generates paying in full plus every active card at each candidate
+ * installment count (capped by the item's own `maxInstallments`), then hands
+ * the whole basket to the engine in one call. `loadCardContext` is read once
+ * for every candidate here, not once per candidate — the same reason it
+ * exists in `getPurchasePlanRecommendation`.
+ *
+ * Item ids are synthesized from their position in the list, which keeps every
+ * cash event's `logicalKey` unique across the call without the caller having
+ * to invent ids of its own.
+ */
+export async function recommendUserPurchasePlan(
+  userId: string,
+  items: PlanCandidateItemInput[],
+  context: RecommendPlanContext = {},
+): Promise<PurchasePlanRecommendation> {
+  const horizonDays = context.horizonDays ?? 365;
+  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+  const { hardReserveMinor, softReserves } = await loadReserves(userId);
+  const cardContext = await loadCardContext(userId);
+  const cards = cardContext.cards;
+  const purchaseDate = todayIso();
+
+  const candidateItems: RecommendationCandidateItem[] = await Promise.all(
+    items.map(async (item, index) => {
+      const itemKey = `item${index}`;
+      const proposals: Array<{ id: string; label: string; cardId?: string; installments: number }> = [
+        { id: `${itemKey}:full`, label: "In full", installments: 1 },
+      ];
+      for (const card of cards) {
+        for (const count of CANDIDATE_INSTALLMENT_COUNTS) {
+          if (item.maxInstallments != null && count > item.maxInstallments) continue;
+          proposals.push({
+            id: `${itemKey}:card:${card.id}:${count}`,
+            label: `${count}x on ${card.name}`,
+            cardId: card.id,
+            installments: count,
+          });
+        }
+      }
+
+      const candidates: PaymentOption[] = await Promise.all(
+        proposals.map((proposal) =>
+          toEnginePaymentOption(
+            userId,
+            {
+              id: proposal.id,
+              label: proposal.label,
+              method: proposal.cardId ? "credit_card" : "cash",
+              amountMinor: item.amountMinor,
+              cardId: proposal.cardId ?? null,
+              installments: proposal.installments,
+              purchaseDate,
+            },
+            cardContext,
+          ),
+        ),
+      );
+
+      return {
+        itemId: itemKey,
+        label: item.label,
+        deadline: item.neededBy,
+        purchaseDate,
+        maxInstallments: item.maxInstallments,
+        candidates,
+      };
+    }),
+  );
+
+  return recommendPurchasePlan({
+    forecastInput: {
+      asOf: forecast.asOf,
+      horizonEnd: forecast.horizonEnd,
+      balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
+      events: forecast.events,
+    },
+    hardReserveMinor,
+    softReserves,
+    targetDate: context.targetDate,
+    items: candidateItems,
+  });
 }

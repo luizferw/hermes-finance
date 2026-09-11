@@ -3,6 +3,7 @@ import { z, type ZodType } from "zod";
 import {
   addMonthsClamped,
   formatMoney,
+  majorToMinor,
   todayIso,
 } from "@kosh/domain";
 import { getNetWorthSummary, listAccounts } from "@/modules/accounts/queries";
@@ -33,7 +34,11 @@ import {
   listCreditCards,
   listPurchasePlans,
 } from "@/modules/finance/queries";
-import { compareUserPaymentOptions, simulateUserPurchase } from "@/modules/finance/simulation";
+import {
+  compareUserPaymentOptions,
+  recommendUserPurchasePlan,
+  simulateUserPurchase,
+} from "@/modules/finance/simulation";
 import { listCategories } from "@/modules/taxonomy/queries";
 import {
   createTransactionCore,
@@ -171,6 +176,17 @@ const simulationContextInput = z
     maxLastPaymentDate: isoDateSchema.optional(),
   })
   .default(() => ({ horizonDays: 30 }));
+
+/* ── purchase plan recommendation input (shopping list, not persisted;
+   the engine generates the candidates from the user's own cards) ────── */
+
+const planRecommendationItemInput = z.object({
+  label: z.string().min(1).max(150),
+  /** Cash price of the item, in major units. */
+  amount: z.number().positive(),
+  neededBy: isoDateSchema.optional(),
+  maxInstallments: z.number().int().min(1).max(60).optional(),
+});
 
 /* ── rule construction (narrow, typed; values resolved to owned ids) ──────── */
 
@@ -1177,6 +1193,72 @@ const readTools: ReadTool[] = [
       };
     },
   }),
+
+  read({
+    name: "recommend_purchase_plan",
+    title: "Recommend a purchase plan",
+    description:
+      "Given a shopping list (items with an amount and, optionally, a needed-by date and an installment cap), the engine generates every plausible way to pay each item — in full, or on each of the user's active cards at a spread of installment counts — and decides the cash-preserving way to pay the whole basket. Never invents a recommendation: NO_FEASIBLE_PLAN and INSUFFICIENT_DATA are propagated as-is, not softened into a suggestion.",
+    requiredScope: "finance:read",
+    input: z.object({
+      items: z.array(planRecommendationItemInput).min(1).max(20),
+      targetDate: isoDateSchema.optional().describe("plan-level deadline; an item without its own neededBy inherits it"),
+    }),
+    async execute(ctx, args) {
+      const items = args.items.map((item) => ({
+        label: item.label,
+        amountMinor: majorToMinor(item.amount, ctx.currency),
+        neededBy: item.neededBy,
+        maxInstallments: item.maxInstallments,
+      }));
+      const result = await recommendUserPurchasePlan(ctx.userId, items, {
+        targetDate: args.targetDate,
+      });
+      return {
+        forModel: {
+          currency: ctx.currency,
+          status: result.status,
+          blockers: result.blockers,
+          baselineBreach: result.baselineBreach,
+          shortfallMinor: result.shortfallMinor,
+          shortfallDate: result.shortfallDate,
+          choices: result.choices.map((choice) => ({
+            itemId: choice.itemId,
+            label: choice.label,
+            optionLabel: choice.optionLabel,
+            totalCostMinor: choice.totalCostMinor,
+            installments: choice.installments,
+            installmentAmountMinor: choice.installmentAmountMinor,
+            firstPaymentDate: choice.firstPaymentDate,
+            lastPaymentDate: choice.lastPaymentDate,
+            cardLabel: choice.cardLabel,
+            minimumBalanceMinor: choice.minimumBalanceMinor,
+            minimumBalanceDate: choice.minimumBalanceDate,
+            workableCount: choice.workableCount,
+            fits: choice.fits,
+            rejections: choice.rejections,
+            reasons: choice.reasons,
+          })),
+          blockedItems: result.blockedItems,
+          simulation: result.simulation
+            ? {
+                totalCostMinor: result.simulation.totalCostMinor,
+                safeToSpendBeforeMinor: result.simulation.safeToSpendBeforeMinor,
+                safeToSpendAfterMinor: result.simulation.safeToSpendAfterMinor,
+                minimumBalanceBeforeMinor: result.simulation.minimumBalanceBeforeMinor,
+                minimumBalanceBeforeDate: result.simulation.minimumBalanceBeforeDate,
+                minimumBalanceAfterMinor: result.simulation.minimumBalanceAfterMinor,
+                minimumBalanceAfterDate: result.simulation.minimumBalanceAfterDate,
+                hardReserveViolated: result.simulation.hardReserveViolated,
+                softReserveImpacts: result.simulation.softReserveImpacts,
+                cards: result.simulation.cards,
+                monthlyOutlook: result.simulation.monthlyOutlook,
+              }
+            : undefined,
+        },
+      };
+    },
+  }),
 ];
 
 /* ── WRITE TOOLS ────────────────────────────────────────────────────────── */
@@ -1469,7 +1551,7 @@ const writeTools: WriteTool[] = [
 /* ── the registry ───────────────────────────────────────────────────────── */
 
 export const TOOLS: Tool[] = [...readTools, ...writeTools];
-export const MCP_TOOLS: ReadTool[] = readTools;
+export const MCP_TOOLS: Tool[] = TOOLS;
 export const TOOL_BY_NAME = new Map<string, Tool>(TOOLS.map((t) => [t.name, t]));
 
 export function toolsForScopes(scopes: Scope[]): Tool[] {

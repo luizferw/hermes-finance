@@ -4,6 +4,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowRight01Icon, ShoppingBag01Icon } from "@hugeicons/core-free-icons";
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMoney } from "@/lib/format";
+import { listAccounts } from "@/modules/accounts/queries";
 import { listPurchasePlans } from "@/modules/finance/queries";
 import { getUserSettings } from "@/modules/settings/queries";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +15,6 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
-import { cn } from "@/lib/utils";
 import { PurchaseItemActions } from "./item-actions";
 import { NewPurchasePlanDialog } from "./new-plan-dialog";
 import { PurchasePlanActions } from "./plan-actions";
@@ -28,28 +28,19 @@ const PLAN_STATUS_LABEL: Record<string, string> = {
   archived: "Archived",
 };
 
-const PRIORITY_LABEL: Record<string, string> = {
-  must_have: "Must have",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-  optional: "Optional",
-};
-
-const ITEM_STATUS_LABEL: Record<string, string> = {
-  idea: "Idea",
-  planned: "Planned",
-  ready: "Ready",
-  purchased: "Purchased",
-  cancelled: "Cancelled",
-};
-
 export default async function PurchasesPage() {
   const user = await requireUser();
-  const [plans, settings] = await Promise.all([
+  const [plans, settings, accounts] = await Promise.all([
     listPurchasePlans(user.id),
     getUserSettings(user.id),
+    listAccounts(user.id),
   ]);
+  const accountOptions = accounts.map((account) => ({
+    id: account.id,
+    name: account.name,
+    type: account.type,
+  }));
+  const accountById = new Map(accountOptions.map((account) => [account.id, account]));
 
   return (
     <div className="space-y-5">
@@ -113,7 +104,7 @@ export default async function PurchasesPage() {
                     href={`/plan/purchases/${plan.id}`}
                     className="group inline-flex items-center gap-0.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
                   >
-                    Compare payment options
+                    See horizon impact
                     <HugeiconsIcon
                       icon={ArrowRight01Icon}
                       className="size-3.5 transition-transform duration-[var(--duration-state)] ease-[var(--ease-out-quint)] group-hover:translate-x-0.5"
@@ -138,57 +129,43 @@ export default async function PurchasesPage() {
                 <p className="mt-3 text-xs text-muted-foreground">No items in this plan yet.</p>
               ) : (
                 <ul className="mt-3 divide-y divide-dashed">
-                  {plan.items.map((item) => (
-                    <li
-                      key={item.id}
-                      className="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
-                    >
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span
-                          className={cn(
-                            "size-1.5 shrink-0 rounded-full",
-                            item.priority === "must_have"
-                              ? "bg-destructive"
-                              : item.priority === "high"
-                                ? "bg-warning"
-                                : "bg-muted-foreground/40",
+                  {plan.items.map((item) => {
+                    const account = item.accountId ? accountById.get(item.accountId) : undefined;
+                    return (
+                      <li
+                        key={item.id}
+                        className="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm">{item.name}</span>
+                          {item.purchaseDate && (
+                            <span className="shrink-0 text-xs text-muted-foreground">
+                              {formatDate(item.purchaseDate)}
+                            </span>
                           )}
-                          aria-hidden
-                        />
-                        <span className="truncate text-sm">{item.name}</span>
-                        <span className="shrink-0 text-xs text-muted-foreground">
-                          {PRIORITY_LABEL[item.priority] ?? item.priority}
-                        </span>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
-                        <Badge variant="outline" className="text-[10px]">
-                          {ITEM_STATUS_LABEL[item.status] ?? item.status}
-                        </Badge>
-                        {item.deadline && <span>by {formatDate(item.deadline)}</span>}
-                        <span className="font-amount tabular-nums text-foreground">
-                          {formatMoney(
-                            item.actualPriceMinor ?? item.estimatedPriceMinor,
-                            plan.currencyCode,
-                          )}
-                        </span>
-                        <PurchaseItemActions
-                          item={{
-                            id: item.id,
-                            name: item.name,
-                            priority: item.priority,
-                            estimatedPriceMinor: item.estimatedPriceMinor,
-                            actualPriceMinor: item.actualPriceMinor,
-                            earliestPurchaseDate: item.earliestPurchaseDate,
-                            deadline: item.deadline,
-                            status: item.status,
-                            notes: item.notes,
-                            maxInstallments: item.maxInstallments,
-                          }}
-                          currencyCode={plan.currencyCode}
-                        />
-                      </div>
-                    </li>
-                  ))}
+                        </div>
+                        <div className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
+                          {account && <Badge variant="outline" className="text-[10px]">{account.name}</Badge>}
+                          {item.installments > 1 && <span>{item.installments}×</span>}
+                          <span className="font-amount tabular-nums text-foreground">
+                            {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
+                          </span>
+                          <PurchaseItemActions
+                            item={{
+                              id: item.id,
+                              name: item.name,
+                              estimatedPriceMinor: item.estimatedPriceMinor,
+                              purchaseDate: item.purchaseDate,
+                              accountId: item.accountId,
+                              installments: item.installments,
+                            }}
+                            currencyCode={plan.currencyCode}
+                            accounts={accountOptions}
+                          />
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
             </li>

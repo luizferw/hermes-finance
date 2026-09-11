@@ -4,9 +4,9 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { mintMcpToken, revokeToken } from "@/modules/agent/actions";
-import { MCP_READ_SCOPES, type Scope } from "@/modules/agent/types";
+import { MCP_SCOPES, type Scope } from "@/modules/agent/types";
 
-const SCOPES: Scope[] = [...MCP_READ_SCOPES];
+const SCOPES: Scope[] = [...MCP_SCOPES];
 
 interface TokenView {
   id: string;
@@ -59,7 +59,7 @@ export function McpTokenManager({
     <div>
       <h2 className="micro-label">External MCP tokens</h2>
       <p className="mt-2 text-xs text-muted-foreground">
-        External MCP access is read-only. Changes must be made and confirmed inside Kosh.
+        Scopes control this token&apos;s external MCP access. Write scopes can change your financial data immediately.
       </p>
       {!mcpEnabled && (
         <p className="mt-2 text-xs text-warning">

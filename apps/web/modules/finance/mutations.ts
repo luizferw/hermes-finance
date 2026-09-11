@@ -12,7 +12,6 @@ import {
   financialReserves,
   installmentPlans,
   installments,
-  paymentOptions,
   purchaseItems,
   purchasePlans,
   transactions,
@@ -33,32 +32,26 @@ import {
   createBillingCycleSchema,
   createCreditCardSchema,
   createFinancialReserveSchema,
-  createPaymentOptionSchema,
   createPurchaseItemSchema,
   createPurchasePlanSchema,
   reconcileBillingCycleSchema,
   registerCardPurchaseSchema,
-  selectPaymentOptionSchema,
   updateBillingCycleSchema,
   updateCreditCardSchema,
   updateFinancialReserveSchema,
-  updatePaymentOptionSchema,
   updatePurchaseItemSchema,
   updatePurchasePlanSchema,
   upsertBalanceSnapshotSchema,
   type CreateBillingCycleInput,
   type CreateCreditCardInput,
   type CreateFinancialReserveInput,
-  type CreatePaymentOptionInput,
   type CreatePurchaseItemInput,
   type CreatePurchasePlanInput,
   type ReconcileBillingCycleInput,
   type RegisterCardPurchaseInput,
-  type SelectPaymentOptionInput,
   type UpdateBillingCycleInput,
   type UpdateCreditCardInput,
   type UpdateFinancialReserveInput,
-  type UpdatePaymentOptionInput,
   type UpdatePurchaseItemInput,
   type UpdatePurchasePlanInput,
   type UpsertBalanceSnapshotInput,
@@ -117,17 +110,6 @@ async function loadOwnedPurchaseItem(userId: string, itemId: string) {
   });
   if (!row || row.purchasePlan.userId !== userId) {
     throw new ApiError(404, "not_found", "Purchase item not found.");
-  }
-  return row;
-}
-
-async function loadOwnedPaymentOption(userId: string, optionId: string) {
-  const row = await db.query.paymentOptions.findFirst({
-    where: eq(paymentOptions.id, optionId),
-    with: { purchaseItem: { with: { purchasePlan: true } } },
-  });
-  if (!row || row.purchaseItem.purchasePlan.userId !== userId) {
-    throw new ApiError(404, "not_found", "Payment option not found.");
   }
   return row;
 }
@@ -756,20 +738,17 @@ export async function createPurchaseItem(input: CreatePurchaseItemInput) {
   const user = await requireUser();
   const data = createPurchaseItemSchema.parse(input);
   const plan = await loadOwnedPurchasePlan(user.id, data.purchasePlanId);
+  await assertAccountsOwned(user.id, [data.accountId]);
 
   const [item] = await db
     .insert(purchaseItems)
     .values({
       purchasePlanId: plan.id,
       name: data.name,
-      priority: data.priority,
-      estimatedPriceMinor: majorToMinor(data.estimatedPrice, plan.currencyCode),
-      actualPriceMinor: data.actualPrice != null ? majorToMinor(data.actualPrice, plan.currencyCode) : null,
-      earliestPurchaseDate: data.earliestPurchaseDate ?? null,
-      deadline: data.deadline ?? null,
-      status: data.status,
-      notes: data.notes,
-      maxInstallments: data.maxInstallments ?? null,
+      purchaseDate: data.purchaseDate ?? null,
+      estimatedPriceMinor: majorToMinor(data.amount, plan.currencyCode),
+      accountId: data.accountId ?? null,
+      installments: data.installments,
     })
     .returning();
 
@@ -789,28 +768,17 @@ export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseIt
   const data = updatePurchaseItemSchema.parse(input);
   const existing = await loadOwnedPurchaseItem(user.id, itemId);
   const currency = existing.purchasePlan.currencyCode;
+  if (data.accountId !== undefined) await assertAccountsOwned(user.id, [data.accountId]);
 
   await db
     .update(purchaseItems)
     .set({
       name: data.name ?? existing.name,
-      priority: data.priority ?? existing.priority,
+      purchaseDate: data.purchaseDate === undefined ? existing.purchaseDate : data.purchaseDate,
       estimatedPriceMinor:
-        data.estimatedPrice !== undefined
-          ? majorToMinor(data.estimatedPrice, currency)
-          : existing.estimatedPriceMinor,
-      actualPriceMinor:
-        data.actualPrice !== undefined
-          ? data.actualPrice == null
-            ? null
-            : majorToMinor(data.actualPrice, currency)
-          : existing.actualPriceMinor,
-      earliestPurchaseDate:
-        data.earliestPurchaseDate === undefined ? existing.earliestPurchaseDate : data.earliestPurchaseDate,
-      deadline: data.deadline === undefined ? existing.deadline : data.deadline,
-      status: data.status ?? existing.status,
-      notes: data.notes ?? existing.notes,
-      maxInstallments: data.maxInstallments === undefined ? existing.maxInstallments : data.maxInstallments,
+        data.amount !== undefined ? majorToMinor(data.amount, currency) : existing.estimatedPriceMinor,
+      accountId: data.accountId === undefined ? existing.accountId : data.accountId,
+      installments: data.installments ?? existing.installments,
     })
     .where(eq(purchaseItems.id, itemId));
 
@@ -838,138 +806,3 @@ export async function deletePurchaseItem(itemId: string) {
   revalidateFinance();
 }
 
-// --- payment options -----------------------------------------------------------------
-
-export async function createPaymentOption(input: CreatePaymentOptionInput) {
-  const user = await requireUser();
-  const data = createPaymentOptionSchema.parse(input);
-  const item = await loadOwnedPurchaseItem(user.id, data.purchaseItemId);
-  const currency = item.purchasePlan.currencyCode;
-  if (data.cardId) await loadOwnedCreditCard(user.id, data.cardId);
-
-  const existingOptions = await db.query.paymentOptions.findMany({
-    where: eq(paymentOptions.purchaseItemId, item.id),
-    columns: { id: true },
-  });
-
-  const [option] = await db
-    .insert(paymentOptions)
-    .values({
-      purchaseItemId: item.id,
-      paymentMethod: data.paymentMethod,
-      cardId: data.cardId ?? null,
-      cashPriceMinor: data.cashPrice != null ? majorToMinor(data.cashPrice, currency) : null,
-      installments: data.installments ?? null,
-      installmentAmountMinor: data.installmentAmount != null ? majorToMinor(data.installmentAmount, currency) : null,
-      totalCostMinor: majorToMinor(data.totalCost, currency),
-      firstPaymentDate: data.firstPaymentDate ?? null,
-    })
-    .returning();
-
-  // With nine items to configure, the item's only option is the obvious
-  // choice — auto-selecting it skips a click that has only one right answer.
-  if (existingOptions.length === 0) {
-    await db
-      .update(purchaseItems)
-      .set({ selectedPaymentOptionId: option!.id })
-      .where(eq(purchaseItems.id, item.id));
-  }
-
-  await logAudit({
-    userId: user.id,
-    action: "payment_option.created",
-    entityType: "payment_option",
-    entityId: option!.id,
-    data: { source: data.paymentMethod },
-  });
-  revalidateFinance();
-  return option!;
-}
-
-export async function updatePaymentOption(optionId: string, input: UpdatePaymentOptionInput) {
-  const user = await requireUser();
-  const data = updatePaymentOptionSchema.parse(input);
-  const existing = await loadOwnedPaymentOption(user.id, optionId);
-  const currency = existing.purchaseItem.purchasePlan.currencyCode;
-  if (data.cardId) await loadOwnedCreditCard(user.id, data.cardId);
-
-  await db
-    .update(paymentOptions)
-    .set({
-      paymentMethod: data.paymentMethod ?? existing.paymentMethod,
-      cardId: data.cardId === undefined ? existing.cardId : data.cardId,
-      cashPriceMinor:
-        data.cashPrice !== undefined
-          ? data.cashPrice == null
-            ? null
-            : majorToMinor(data.cashPrice, currency)
-          : existing.cashPriceMinor,
-      installments: data.installments === undefined ? existing.installments : data.installments,
-      installmentAmountMinor:
-        data.installmentAmount !== undefined
-          ? data.installmentAmount == null
-            ? null
-            : majorToMinor(data.installmentAmount, currency)
-          : existing.installmentAmountMinor,
-      totalCostMinor: data.totalCost !== undefined ? majorToMinor(data.totalCost, currency) : existing.totalCostMinor,
-      firstPaymentDate: data.firstPaymentDate === undefined ? existing.firstPaymentDate : data.firstPaymentDate,
-    })
-    .where(eq(paymentOptions.id, optionId));
-
-  await logAudit({
-    userId: user.id,
-    action: "payment_option.updated",
-    entityType: "payment_option",
-    entityId: optionId,
-    data: { changed: Object.keys(data) },
-  });
-  revalidateFinance();
-}
-
-export async function deletePaymentOption(optionId: string) {
-  const user = await requireUser();
-  const existing = await loadOwnedPaymentOption(user.id, optionId);
-  await db.delete(paymentOptions).where(eq(paymentOptions.id, optionId));
-  // selectedPaymentOptionId is a soft reference (no FK, no cascade) — clear it
-  // ourselves so a deleted option never lingers as an item's "chosen" one.
-  if (existing.purchaseItem.selectedPaymentOptionId === optionId) {
-    await db
-      .update(purchaseItems)
-      .set({ selectedPaymentOptionId: null })
-      .where(eq(purchaseItems.id, existing.purchaseItemId));
-  }
-  await logAudit({
-    userId: user.id,
-    action: "payment_option.deleted",
-    entityType: "payment_option",
-    entityId: optionId,
-  });
-  revalidateFinance();
-}
-
-export async function selectPaymentOption(itemId: string, input: SelectPaymentOptionInput) {
-  const user = await requireUser();
-  const data = selectPaymentOptionSchema.parse(input);
-  const item = await loadOwnedPurchaseItem(user.id, itemId);
-
-  if (data.paymentOptionId) {
-    const option = await loadOwnedPaymentOption(user.id, data.paymentOptionId);
-    if (option.purchaseItemId !== item.id) {
-      throw new ApiError(404, "not_found", "Payment option not found.");
-    }
-  }
-
-  await db
-    .update(purchaseItems)
-    .set({ selectedPaymentOptionId: data.paymentOptionId })
-    .where(eq(purchaseItems.id, item.id));
-
-  await logAudit({
-    userId: user.id,
-    action: "purchase_item.payment_option_selected",
-    entityType: "purchase_item",
-    entityId: item.id,
-    data: { paymentOptionId: data.paymentOptionId },
-  });
-  revalidateFinance();
-}

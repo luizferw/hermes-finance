@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { db, mcpAccessTokens } from "@kosh/db";
 import { logAudit } from "@/modules/shared/audit";
-import { MCP_READ_SCOPES, type Scope } from "./types";
+import { MCP_SCOPES, type Scope } from "./types";
 
 const PREFIX = "kosh_mcp_";
 
@@ -11,9 +11,9 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function readScopes(scopes: readonly string[]): Scope[] {
+function supportedScopes(scopes: readonly string[]): Scope[] {
   return scopes.filter((scope): scope is Scope =>
-    (MCP_READ_SCOPES as readonly string[]).includes(scope),
+    (MCP_SCOPES as readonly string[]).includes(scope),
   );
 }
 
@@ -27,8 +27,8 @@ export async function createMcpToken(
   name: string,
   scopes: Scope[],
 ): Promise<{ id: string; token: string }> {
-  const safeScopes = readScopes(scopes);
-  if (safeScopes.length === 0) throw new Error("At least one read scope is required.");
+  const safeScopes = supportedScopes(scopes);
+  if (safeScopes.length === 0) throw new Error("At least one supported scope is required.");
   const token = PREFIX + randomBytes(32).toString("base64url");
   const [row] = await db
     .insert(mcpAccessTokens)
@@ -57,7 +57,7 @@ export async function listMcpTokens(userId: string) {
     .from(mcpAccessTokens)
     .where(eq(mcpAccessTokens.userId, userId))
     .orderBy(desc(mcpAccessTokens.createdAt));
-  return rows.map((row) => ({ ...row, scopes: readScopes(row.scopes) }));
+  return rows.map((row) => ({ ...row, scopes: supportedScopes(row.scopes) }));
 }
 
 export async function revokeMcpToken(userId: string, id: string): Promise<void> {
@@ -93,5 +93,5 @@ export async function verifyMcpToken(
     .update(mcpAccessTokens)
     .set({ lastUsedAt: new Date() })
     .where(eq(mcpAccessTokens.id, row.id));
-  return { userId: row.userId, scopes: readScopes(row.scopes) };
+  return { userId: row.userId, scopes: supportedScopes(row.scopes) };
 }

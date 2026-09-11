@@ -5,9 +5,9 @@ import { requireUser } from "@/lib/session";
 import { env } from "@/lib/env";
 import { ApiError } from "@/modules/shared/api";
 import { createMcpToken, revokeMcpToken } from "./mcp-tokens";
-import { MCP_READ_SCOPES, type Scope } from "./types";
+import { MCP_SCOPES, type Scope } from "./types";
 
-const scopeEnum = z.enum(MCP_READ_SCOPES);
+const scopeEnum = z.enum(MCP_SCOPES);
 
 const mintSchema = z.object({
   name: z.string().min(1).max(80),
