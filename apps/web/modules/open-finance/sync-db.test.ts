@@ -933,3 +933,70 @@ describe("the category the provider suggests", () => {
     expect(await categoryOf("a")).toBe("Categoria escolhida");
   });
 });
+
+describe("parcels of one purchase", () => {
+  /**
+   * The provider sends one transaction per parcel and rounds the purchase total
+   * differently on each. Matching on that total made every parcel its own plan,
+   * so a twelve-month purchase projected its tail twelve times (PRD R3).
+   */
+  it("join one plan even when the provider's total drifts by a cent", async () => {
+    const connectionId = await freshConnection();
+    const parcel = (id: string, n: number, total: number, date: string) =>
+      tx({
+        id,
+        accountId: "prov-card",
+        amount: 20.07,
+        date,
+        description: "Geladeira",
+        creditCardMetadata: {
+          installmentNumber: n,
+          totalInstallments: 12,
+          // 240.87 on one parcel, 240.83 on the next — the same purchase.
+          totalAmount: total,
+          cardNumber: null,
+          billId: null,
+        },
+      });
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [cardAccount()],
+        transactions: {
+          "prov-card": [
+            parcel("p1", 1, 240.87, "2026-01-05T00:00:00.000Z"),
+            parcel("p2", 2, 240.83, "2026-02-05T00:00:00.000Z"),
+            parcel("p3", 3, 240.85, "2026-03-05T00:00:00.000Z"),
+          ],
+        },
+      }),
+      now: NOW,
+    });
+
+    const account = await accountFor("prov-card");
+    const card = await db.query.creditCards.findFirst({
+      where: eq(creditCards.accountId, account!.id),
+    });
+    const purchases = await db
+      .select({ id: creditCardPurchases.id })
+      .from(creditCardPurchases)
+      .where(eq(creditCardPurchases.creditCardId, card!.id));
+    expect(purchases).toHaveLength(1);
+
+    const plans = await db
+      .select({ id: installmentPlans.id })
+      .from(installmentPlans)
+      .where(eq(installmentPlans.creditCardPurchaseId, purchases[0]!.id));
+    expect(plans).toHaveLength(1);
+
+    const parcels = await db
+      .select({ number: installments.number, status: installments.status })
+      .from(installments)
+      .where(eq(installments.installmentPlanId, plans[0]!.id));
+    // Twelve parcels, not thirty-six: 1 to 3 settled, the rest still ahead.
+    expect(parcels).toHaveLength(12);
+    const billed = parcels.filter((p) => p.status === "billed").map((p) => p.number).sort();
+    expect(billed).toEqual([1, 2, 3]);
+  });
+});

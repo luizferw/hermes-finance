@@ -268,9 +268,17 @@ export async function registerSyncedPurchase(
 /**
  * Mark an already-projected installment as billed when its charge arrives.
  *
- * The plan is found through the sibling transactions of the same card that carry
- * the provider's installment tag, which is how two parcels of the same purchase
- * recognise each other across syncs.
+ * The provider gives no purchase id, so the plan a parcel belongs to has to be
+ * recognised from the parcel itself. The first version matched on the plan's
+ * total amount and the merchant name, and both fail on real data: the provider
+ * rounds `totalAmount` differently on each parcel of the same purchase (240.87
+ * against 240.83), and the merchant is frequently null. Every parcel then became
+ * a plan of its own, so one twelve-month purchase projected a tail twelve times
+ * over and the forecast counted the same money again and again (PRD R3).
+ *
+ * What is actually stable is the parcel: its number, its term, and the amount
+ * charged every month. A projected installment already waiting at that number,
+ * on this card, for that amount, is the one this charge settles.
  */
 async function claimExistingInstallment(
   trx: Trx,
@@ -278,15 +286,15 @@ async function claimExistingInstallment(
 ): Promise<boolean> {
   const { row } = args;
   if (!row.installment) return false;
+  const amountMinor = Math.abs(row.amountMinor);
 
-  const plans = await trx
+  const candidates = await trx
     .select({
-      planId: installmentPlans.id,
-      totalInstallments: installmentPlans.totalInstallments,
-      totalAmountMinor: creditCardPurchases.totalAmountMinor,
-      merchant: creditCardPurchases.merchant,
+      installmentId: installments.id,
+      amountMinor: installments.amountMinor,
     })
-    .from(installmentPlans)
+    .from(installments)
+    .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
     .innerJoin(
       creditCardPurchases,
       eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId),
@@ -295,29 +303,30 @@ async function claimExistingInstallment(
       and(
         eq(creditCardPurchases.creditCardId, args.creditCardId),
         eq(installmentPlans.totalInstallments, row.installment.total),
+        eq(installments.number, row.installment.number),
+        eq(installments.status, "projected"),
       ),
     );
 
-  const wantedTotal = row.installment.totalAmountMinor;
-  const match = plans.find(
-    (plan) =>
-      (wantedTotal === null || plan.totalAmountMinor === wantedTotal) &&
-      (row.merchant === null || plan.merchant === row.merchant),
+  // The provider's rounding moves a parcel by a cent or two between the
+  // projection and the charge, so an exact amount would miss the match it is
+  // meant to find. A real of slack is far tighter than the gap between two
+  // genuinely different purchases.
+  const withinRounding = candidates.filter(
+    (candidate) => Math.abs(candidate.amountMinor - amountMinor) <= 100,
   );
-  if (!match) return false;
+  if (withinRounding.length === 0) return false;
 
-  const [updated] = await trx
+  const closest = withinRounding.sort(
+    (left, right) =>
+      Math.abs(left.amountMinor - amountMinor) - Math.abs(right.amountMinor - amountMinor),
+  )[0]!;
+
+  await trx
     .update(installments)
-    .set({ status: "billed", amountMinor: Math.abs(row.amountMinor), transactionId: args.transactionId })
-    .where(
-      and(
-        eq(installments.installmentPlanId, match.planId),
-        eq(installments.number, row.installment.number),
-      ),
-    )
-    .returning({ id: installments.id });
-
-  return Boolean(updated);
+    .set({ status: "billed", amountMinor, transactionId: args.transactionId })
+    .where(eq(installments.id, closest.installmentId));
+  return true;
 }
 
 /**

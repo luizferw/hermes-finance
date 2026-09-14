@@ -660,7 +660,11 @@ async function syncCardSide(
     isoDay(args.now),
   );
 
-  for (const row of rows) {
+  // Oldest first, so parcel 1 is always seen before parcel 2. The provider
+  // returns newest first, and in that order a later parcel creates the plan and
+  // the earlier one cannot join it — every purchase then becomes several
+  // overlapping plans, each projecting its own tail (PRD R3).
+  for (const row of [...rows].sort((left, right) => left.date.localeCompare(right.date))) {
     const [stored] = await trx
       .select({ id: transactions.id })
       .from(transactions)
