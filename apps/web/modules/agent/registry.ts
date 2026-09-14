@@ -39,6 +39,7 @@ import {
   recommendUserPurchasePlan,
   simulateUserPurchase,
 } from "@/modules/finance/simulation";
+import { listConnections } from "@/modules/open-finance/queries";
 import { listCategories } from "@/modules/taxonomy/queries";
 import {
   createTransactionCore,
@@ -947,6 +948,50 @@ const readTools: ReadTool[] = [
             utilizationPercent: card.utilizationPercent,
             defaultClosingDay: card.defaultClosingDay,
             defaultDueDay: card.defaultDueDay,
+          })),
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_open_finance_status",
+    title: "Open Finance status",
+    description:
+      "Bank connections synced through Open Finance: institution, connection state, how old the provider's data is, consent expiry, and the result of the last sync. Use this to answer why a balance looks out of date instead of guessing.",
+    requiredScope: "finance:read",
+    input: z.object({}),
+    async execute(ctx) {
+      const connections = await listConnections(ctx.userId);
+      return {
+        forModel: {
+          connections: connections.map((connection) => ({
+            id: connection.id,
+            institution: connection.connectorName,
+            label: connection.label,
+            status: connection.status,
+            // The age of the provider's data, which is the freshness the user
+            // actually experiences (PRD R8) — not the time of our last attempt.
+            dataAgeDays: connection.dataAgeDays,
+            consentExpired: connection.consentExpired,
+            lastSyncStatus: connection.lastSyncStatus,
+            lastSyncError: connection.lastSyncError,
+            lastRun: connection.lastRun
+              ? {
+                  status: connection.lastRun.status,
+                  seen: connection.lastRun.recordsSeen,
+                  created: connection.lastRun.recordsCreated,
+                  duplicates: connection.lastRun.duplicates,
+                  needsReview: connection.lastRun.needsReview,
+                  skipped: connection.lastRun.skipped,
+                }
+              : null,
+            accounts: connection.links.map((link) => ({
+              providerName: link.providerName,
+              linkedAccount: link.accountName,
+              linkMode: link.linkMode,
+              decision: link.linkDecisionNote,
+            })),
           })),
         },
       };

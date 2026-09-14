@@ -9,6 +9,7 @@ Next.js (web)          MCP / Hermes
         queries.ts · simulation.ts · mutations.ts
                 │
 ┌───────────────┴────────────────┐
+│ packages/open-finance          │  normalização Pluggy (puro) + cliente REST
 │ packages/planning              │  safe-to-spend, simulação, comparador
 │ packages/forecast              │  projeção diária, recorrências, faturas, parcelas
 │ packages/domain (Kosh)         │  ledger, imports (CSV/OFX), regras, categorias
@@ -20,6 +21,7 @@ Next.js (web)          MCP / Hermes
 
 - `forecast` recebe snapshots e eventos normalizados, em *integer minor units*, e devolve somente dados determinísticos. Não conhece React, Next.js, PostgreSQL nem MCP.
 - `planning` usa o Forecast; não recalcula saldo fora dele.
+- `open-finance` traduz payloads de provedor em fatos normalizados e não conhece o banco. Um provedor novo entra por aqui e não toca no Forecast (PRD §51).
 - Web, MCP e Telegram são adaptadores: não acessam tabelas para fazer cálculo.
 - Uma `Transaction` é fato. Um evento previsto é separado e resolvido quando o fato correspondente existir.
 - Compra no cartão é despesa econômica; settlement de fatura é impacto de caixa e não cria uma segunda despesa categorizada.
@@ -37,6 +39,17 @@ Next.js (web)          MCP / Hermes
 | `expandInstallmentTail()` | Só `N+1 … M`; a última parcela absorve o resto da divisão. |
 | `nominalCycleFor()` / `nominalCycleDueDates()` | Em qual fatura uma compra cai, a partir dos dias de fechamento e vencimento. |
 | `resolveProjectedEvents()` | Liga um fato à sua projeção, tirando-a do conjunto ativo. |
+
+### `@hermes-finance/open-finance`
+
+| Função | Garantia |
+| --- | --- |
+| `amountToMinor()` | Float em unidade maior → inteiro em unidade menor, sem multiplicação em ponto flutuante. |
+| `brazilianCalendarDay()` | Meia-noite UTC é lida como data; horário real é deslocado para GMT-3. |
+| `normalizeTransaction()` | Resolve o sinal por tipo de conta e pula a perna de pagamento da fatura (R4). |
+| `statusFor()` | `PENDING` fica fora do saldo no banco e vira fato no cartão. |
+| `matchAccountCandidate()` | Nunca escolhe entre duas contas igualmente plausíveis (§14). |
+| `createPluggyClient()` | Único ponto com IO. Só leitura: não existe método que escreva na Pluggy. |
 
 ### `@hermes-finance/planning`
 

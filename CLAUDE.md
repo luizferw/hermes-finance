@@ -9,7 +9,8 @@ extended with a deterministic forecast/planning engine. `origin` is the fork,
 `upstream` is Kosh — see `docs/UPSTREAM.md`.
 
 **The fork stays additive.** Kosh's infrastructure (auth, Next.js, Drizzle schema, jobs, backup,
-MCP) is preserved as-is; Hermes work goes into `packages/forecast`, `packages/planning`, and new
+MCP) is preserved as-is; Hermes work goes into `packages/forecast`, `packages/planning`,
+`packages/open-finance`, and new
 tables. No existing Kosh table has been altered, which is what keeps upstream merges predictable.
 Weigh that before editing anything under `packages/db/src/schema/` that Kosh already owned.
 
@@ -99,14 +100,17 @@ it; systemd respawns it and a follow-up `pnpm start` then dies with `EADDRINUSE`
 
 ```
 apps/web ──► @kosh/db · @kosh/domain · @hermes-finance/forecast · @hermes-finance/planning
-                                        ▲
-                             planning ──┘
+                     ·  @hermes-finance/open-finance  ▲
+                             planning ────────────────┘
 ```
 
 - `@kosh/db` — the **only** package that touches IO: Drizzle schema, client, migrations, seeds, crypto.
 - `@kosh/domain` — pure: ledger, budgets, confidence, CSV/OFX parsing, rule matching, money helpers.
 - `@hermes-finance/forecast` — pure: daily projection, recurrences, statements, installments.
 - `@hermes-finance/planning` — safe-to-spend and payment-option comparison; depends on `forecast` only.
+- `@hermes-finance/open-finance` — Pluggy: pure normalization (money, dates, signs, account matching)
+  plus the only file in the workspace that talks to a third-party API. Read-only by construction.
+  See `docs/OPEN-FINANCE.md`.
 
 The pure packages know nothing of React, Next.js, Postgres, or MCP. They take normalized
 integer-minor-unit facts and return deterministic results.
