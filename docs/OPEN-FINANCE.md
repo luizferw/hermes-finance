@@ -119,12 +119,25 @@ A categoria é zerada na conversão: transferência entre contas próprias não 
 despesa (R5), então qualquer categoria que uma regra tenha adivinhado está errada por
 definição.
 
-### Saldo de abertura é resolvido de trás para frente
+### Saldo de abertura é resolvido de trás para frente, e a cada sync
 
 Doze meses de histórico não somam um saldo construído em anos. Numa conta **criada** pelo
 sync, a diferença vai para `opening_balance_minor` — que é o que essa coluna significa — em
-vez de virar transação de ajuste inventada. Roda uma vez, e **nunca** em conta que já era
-sua: reescrever o saldo inicial de alguém reescreve o histórico dela.
+vez de virar transação de ajuste inventada.
+
+É recalculado em **todo** sync, não uma vez só. A primeira versão resolvia uma vez e isso
+estava errado: qualquer coisa que depois mude o conteúdo da janela — um lançamento que
+chega atrasado, uma releitura, um pagamento de fatura que vira transferência — deixa a
+diferença antiga congelada e a conta passa a contar aquele dinheiro duas vezes. Foi
+exatamente o que aconteceu quando o pareamento entrou: o saldo do cartão ficou **positivo**
+e a tela de cartões mostrou limite todo disponível num cartão que devia R$ 10 mil.
+
+O provedor informa o saldo verdadeiro a cada run, então a correção está sempre disponível;
+não aplicá-la é a única forma de divergir. Cada correção fica registrada em
+`stats.openingBalanceCorrections` do run.
+
+**Nunca** roda em conta que já era sua: reescrever o saldo inicial de alguém reescreve o
+histórico dela. Nessas, a diferença é reportada como drift e nada é tocado.
 
 ### Contas duplicadas
 

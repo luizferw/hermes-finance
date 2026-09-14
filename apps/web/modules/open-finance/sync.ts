@@ -243,11 +243,6 @@ export async function syncConnection(
           account: incoming,
           providerBalanceMinor: incoming.balanceMinor,
           observedAt,
-          // Not `createdAccount`: an account created by a run that then failed
-          // mid-way would never get its opening balance solved, because the
-          // next run finds the link already there. `openingBalanceDerivedAt` is
-          // the real once-only guard, and it is checked inside.
-          derivedOpeningBalance: resolved.mode === "auto_created",
           now: now(),
           stats,
           createdIds,
@@ -276,6 +271,10 @@ export async function syncConnection(
     // leave the card short by exactly the amount that was paid.
     const toRecompute = [...new Set([...touched, ...paired.touchedAccountIds])];
     if (toRecompute.length > 0) await recomputeAccountBalances(toRecompute);
+
+    // Last of all, because everything above changes what the ledger contains.
+    const corrected = await reconcileDerivedOpeningBalances(userId);
+    if (corrected.length > 0) stats.openingBalanceCorrections = corrected;
   } catch (error) {
     status = "error";
     message = failureMessage(error);
@@ -388,7 +387,6 @@ interface SyncAccountArgs {
   account: NormalizedAccount;
   providerBalanceMinor: number;
   observedAt: string;
-  derivedOpeningBalance: boolean;
   now: Date;
   stats: OpenFinanceSyncStats;
   createdIds: string[];
@@ -567,10 +565,6 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
 
     await recomputeAccountBalances([args.accountId], trx);
 
-    if (args.derivedOpeningBalance && !link?.openingBalanceDerivedAt) {
-      await deriveOpeningBalance(trx, args);
-    }
-
     await trx
       .update(openFinanceAccountLinks)
       .set({
@@ -685,47 +679,88 @@ async function syncCardSide(
 }
 
 /**
- * Back-solve the opening balance so the ledger lands on the bank's number.
+ * Keep an auto-created account's ledger landing on the balance the bank reports.
  *
- * An auto-created account starts empty and receives at most twelve months of
- * history, so the sum of what arrived is not the balance — the missing years
- * are. Rather than invent an adjustment transaction, the difference goes into
- * the opening balance, which is exactly what that column means. Runs once, on
- * the account's first sync, and never on an account the user already owned:
- * rewriting someone's own opening balance would silently rewrite their history.
+ * These accounts start empty and receive at most twelve months of history, so
+ * the sum of what arrived is never the balance — the years before the window
+ * are. That difference belongs in the opening balance, which is exactly what
+ * that column means, rather than in an invented adjustment transaction.
+ *
+ * It is re-solved on every sync rather than once. The first version solved it
+ * once and that was wrong: anything which later changes what the window contains
+ * — a late posting, a re-read, a bill payment that becomes a transfer — leaves
+ * the old difference baked in and the account counts that money twice. The
+ * provider states the true balance every run, so the correction is always
+ * available; not applying it is the only way to drift.
+ *
+ * It never runs on an account the user already owned. Rewriting someone's own
+ * opening balance would silently rewrite their history, so for those the
+ * difference is reported as drift and left alone.
  */
-async function deriveOpeningBalance(trx: Trx, args: SyncAccountArgs): Promise<void> {
-  const [account] = await trx
+async function reconcileDerivedOpeningBalances(
+  userId: string,
+): Promise<{ accountId: string; correctionMinor: number }[]> {
+  const links = await db
     .select({
-      currentBalanceMinor: accounts.currentBalanceMinor,
-      openingBalanceMinor: accounts.openingBalanceMinor,
+      accountId: openFinanceAccountLinks.accountId,
+      linkId: openFinanceAccountLinks.id,
+      providerBalanceMinor: openFinanceAccountLinks.providerBalanceMinor,
+      derivedAt: openFinanceAccountLinks.openingBalanceDerivedAt,
     })
-    .from(accounts)
-    .where(eq(accounts.id, args.accountId));
-  if (!account) return;
+    .from(openFinanceAccountLinks)
+    .where(
+      and(
+        eq(openFinanceAccountLinks.userId, userId),
+        eq(openFinanceAccountLinks.linkMode, "auto_created"),
+        isNotNull(openFinanceAccountLinks.accountId),
+        isNotNull(openFinanceAccountLinks.providerBalanceMinor),
+      ),
+    );
 
-  const openingBalanceMinor =
-    account.openingBalanceMinor + (args.providerBalanceMinor - account.currentBalanceMinor);
+  const corrections: { accountId: string; correctionMinor: number }[] = [];
 
-  const [earliest] = await trx
-    .select({ date: sql<string | null>`min(${transactions.date})` })
-    .from(transactions)
-    .where(and(eq(transactions.accountId, args.accountId), isNull(transactions.deletedAt)));
+  for (const link of links) {
+    const accountId = link.accountId!;
+    const [account] = await db
+      .select({
+        currentBalanceMinor: accounts.currentBalanceMinor,
+        openingBalanceMinor: accounts.openingBalanceMinor,
+        openingBalanceDate: accounts.openingBalanceDate,
+      })
+      .from(accounts)
+      .where(eq(accounts.id, accountId));
+    if (!account) continue;
 
-  await trx
-    .update(accounts)
-    .set({
-      openingBalanceMinor,
-      openingBalanceDate: earliest?.date ? addDaysIso(earliest.date, -1) : isoDay(args.now),
-    })
-    .where(eq(accounts.id, args.accountId));
+    const correctionMinor = link.providerBalanceMinor! - account.currentBalanceMinor;
+    if (correctionMinor === 0) continue;
 
-  await recomputeAccountBalances([args.accountId], trx);
+    const [earliest] = await db
+      .select({ date: sql<string | null>`min(${transactions.date})` })
+      .from(transactions)
+      .where(and(eq(transactions.accountId, accountId), isNull(transactions.deletedAt)));
 
-  await trx
-    .update(openFinanceAccountLinks)
-    .set({ openingBalanceDerivedAt: args.now })
-    .where(eq(openFinanceAccountLinks.id, args.linkId));
+    await db
+      .update(accounts)
+      .set({
+        openingBalanceMinor: account.openingBalanceMinor + correctionMinor,
+        openingBalanceDate:
+          account.openingBalanceDate ??
+          (earliest?.date ? addDaysIso(earliest.date, -1) : null),
+      })
+      .where(eq(accounts.id, accountId));
+
+    await recomputeAccountBalances([accountId]);
+
+    if (!link.derivedAt) {
+      await db
+        .update(openFinanceAccountLinks)
+        .set({ openingBalanceDerivedAt: new Date() })
+        .where(eq(openFinanceAccountLinks.id, link.linkId));
+    }
+    corrections.push({ accountId, correctionMinor });
+  }
+
+  return corrections;
 }
 
 /**

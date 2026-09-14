@@ -734,3 +734,87 @@ describe("paying a card bill", () => {
     expect(afterSecond).toBe(afterFirst);
   });
 });
+
+describe("the opening balance of an auto-created account", () => {
+  /**
+   * The regression that reached production: the opening balance was solved once,
+   * while the card still had no payments in it. When the payments later became
+   * transfers the card counted them twice and its balance went positive, so the
+   * cards screen reported a fully available limit on a card that owed R$10k.
+   */
+  it("is re-solved when pairing changes what the ledger contains", async () => {
+    const connectionId = await freshConnection();
+    const payload = {
+      accounts: [bankAccount(), cardAccount()],
+      transactions: {
+        "prov-bank": [
+          tx({ id: "b1", amount: -500, description: "PAGAMENTO DE FATURA CARTAO",
+               date: "2026-03-07T00:00:00.000Z" }),
+        ],
+        "prov-card": [
+          tx({ id: "c1", accountId: "prov-card", amount: 120, date: "2026-03-02T00:00:00.000Z" }),
+          tx({ id: "c2", accountId: "prov-card", amount: -500, date: "2026-03-07T00:00:00.000Z" }),
+        ],
+      },
+    };
+
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(payload), now: NOW });
+
+    const card = await accountFor("prov-card");
+    const bank = await accountFor("prov-bank");
+    // Pluggy reports the card's open bill as 250, which is a debt of -250.
+    expect(card!.currentBalanceMinor).toBe(-25000);
+    expect(bank!.currentBalanceMinor).toBe(150050);
+  });
+
+  it("converges on the provider's number across repeated syncs", async () => {
+    const connectionId = await freshConnection();
+    const first = {
+      accounts: [cardAccount({ balance: 250 })],
+      transactions: {
+        "prov-card": [tx({ id: "c1", accountId: "prov-card", amount: 120, date: "2026-03-02T00:00:00.000Z" })],
+      },
+    };
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(first), now: NOW });
+    expect((await accountFor("prov-card"))!.currentBalanceMinor).toBe(-25000);
+
+    // A later run sees a new charge and a balance that moved with it. Nothing
+    // about the account is re-created, so only the correction keeps it honest.
+    const second = {
+      accounts: [cardAccount({ balance: 400 })],
+      transactions: {
+        "prov-card": [
+          tx({ id: "c1", accountId: "prov-card", amount: 120, date: "2026-03-02T00:00:00.000Z" }),
+          tx({ id: "c3", accountId: "prov-card", amount: 150, date: "2026-03-09T00:00:00.000Z" }),
+        ],
+      },
+    };
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(second), now: NOW });
+    expect((await accountFor("prov-card"))!.currentBalanceMinor).toBe(-40000);
+  });
+
+  it("never rewrites the opening balance of an account the user already owned", async () => {
+    const connectionId = await freshConnection();
+    const [own] = await db
+      .insert(accounts)
+      .values({
+        userId,
+        name: "Banco Teste Principal",
+        type: "asset",
+        currencyCode: "BRL",
+        institution: "Banco Teste",
+        accountNumberMask: "7788",
+        openingBalanceMinor: 100000,
+      })
+      .returning({ id: accounts.id });
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({ accounts: [bankAccount()], transactions: { "prov-bank": [tx()] } }),
+      now: NOW,
+    });
+
+    const account = await db.query.accounts.findFirst({ where: eq(accounts.id, own!.id) });
+    expect(account!.openingBalanceMinor).toBe(100000);
+  });
+});
