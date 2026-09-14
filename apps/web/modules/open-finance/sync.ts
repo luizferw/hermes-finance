@@ -6,6 +6,7 @@ import {
   db,
   openFinanceAccountLinks,
   openFinanceConnections,
+  creditCards,
   openFinanceSyncRuns,
   transactionMetadata,
   transactionSplits,
@@ -16,8 +17,11 @@ import {
   accountKindOf,
   brazilianCalendarDay,
   normalizeAccount,
+  normalizeBill,
   normalizeTransaction,
   PluggyError,
+  type NormalizedAccount,
+  type NormalizedBill,
   type NormalizedTransaction,
   type PluggyClient,
   type PluggyItem,
@@ -29,6 +33,12 @@ import { logAudit } from "@/modules/shared/audit";
 import { env } from "@/lib/env";
 import { getPluggyClient, normalizeContext } from "./provider";
 import { resolveAccountLink } from "./link";
+import {
+  ensureCreditCard,
+  flagUnreconciledCycles,
+  registerSyncedPurchase,
+  syncBills,
+} from "./cards";
 import type { Trx } from "./types";
 import type { SyncTrigger } from "./validators";
 
@@ -227,7 +237,7 @@ export async function syncConnection(
           linkId: resolved.linkId,
           providerAccountId: incoming.externalId,
           kind,
-          currencyCode: incoming.currencyCode,
+          account: incoming,
           providerBalanceMinor: incoming.balanceMinor,
           observedAt,
           derivedOpeningBalance: resolved.createdAccount,
@@ -346,7 +356,7 @@ interface SyncAccountArgs {
   linkId: string;
   providerAccountId: string;
   kind: "bank" | "credit";
-  currencyCode: string;
+  account: NormalizedAccount;
   providerBalanceMinor: number;
   observedAt: string;
   derivedOpeningBalance: boolean;
@@ -371,6 +381,19 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
 
   const raw = await args.client.listTransactions(args.providerAccountId, { from, to: today });
   counts.seen = raw.length;
+
+  // Bills are only fetched for cards, and only from connectors that carry the
+  // product. An institution that does not publish them simply returns nothing,
+  // which is not an error — the ledger-derived cycles still cover that card.
+  let bills: NormalizedBill[] = [];
+  if (args.kind === "credit") {
+    try {
+      const rawBills = await args.client.listBills(args.providerAccountId);
+      bills = rawBills.map((bill) => normalizeBill(bill, context));
+    } catch {
+      bills = [];
+    }
+  }
 
   const rows: NormalizedTransaction[] = [];
   for (const entry of raw) {
@@ -479,6 +502,10 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
       await writeProviderMetadata(trx, written.id, row);
     }
 
+    if (args.kind === "credit") {
+      mergeCounts(counts, await syncCardSide(trx, args, bills, rows));
+    }
+
     await recomputeAccountBalances([args.accountId], trx);
 
     if (args.derivedOpeningBalance && !link?.openingBalanceDerivedAt) {
@@ -511,6 +538,89 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
         set: { amountMinor: args.providerBalanceMinor, source: "pluggy" },
       });
   });
+
+  return counts;
+}
+
+/**
+ * The credit-card half of a sync: the card profile, its bills, its purchases and
+ * its installment plans.
+ *
+ * A bill written with `confirmedTotalMinor` is what lifts the statement's
+ * confidence from HIGH to CONFIRMED inside `projectStatements` — no change to
+ * the forecast package is needed for that, which is exactly what PRD §51 asks
+ * for.
+ */
+async function syncCardSide(
+  trx: Trx,
+  args: SyncAccountArgs,
+  bills: readonly NormalizedBill[],
+  rows: readonly NormalizedTransaction[],
+): Promise<SyncCounts> {
+  const counts = emptyCounts();
+
+  const { creditCardId } = await ensureCreditCard(
+    trx,
+    args.userId,
+    args.accountId,
+    args.account,
+    bills,
+  );
+  if (!creditCardId) {
+    // Without a closing and a due day every installment date would be a guess,
+    // so the card profile is not created and the gap is surfaced instead.
+    counts.needsReview += 1;
+    return counts;
+  }
+
+  const card = await trx.query.creditCards.findFirst({
+    where: eq(creditCards.id, creditCardId),
+  });
+  if (!card) return counts;
+
+  await trx
+    .update(openFinanceAccountLinks)
+    .set({ creditCardId })
+    .where(eq(openFinanceAccountLinks.id, args.linkId));
+
+  await syncBills(
+    trx,
+    creditCardId,
+    card.defaultClosingDay,
+    card.defaultDueDay,
+    bills,
+    isoDay(args.now),
+  );
+
+  for (const row of rows) {
+    const [stored] = await trx
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.accountId, args.accountId),
+          eq(transactions.externalId, row.externalId),
+          isNull(transactions.deletedAt),
+        ),
+      );
+    if (!stored) continue;
+    await registerSyncedPurchase(trx, {
+      creditCardId,
+      closingDay: card.defaultClosingDay,
+      dueDay: card.defaultDueDay,
+      transactionId: stored.id,
+      row,
+    });
+  }
+
+  counts.needsReview += await flagUnreconciledCycles(
+    trx,
+    creditCardId,
+    card.defaultClosingDay,
+    card.defaultDueDay,
+    bills,
+    rows,
+  );
 
   return counts;
 }

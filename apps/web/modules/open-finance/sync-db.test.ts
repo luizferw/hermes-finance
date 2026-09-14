@@ -4,7 +4,12 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   accounts,
   balanceSnapshots,
+  creditCardBillingCycles,
+  creditCardPurchases,
+  creditCards,
   db,
+  installmentPlans,
+  installments,
   openFinanceAccountLinks,
   openFinanceConnections,
   transactionMetadata,
@@ -408,5 +413,168 @@ describe("tenancy", () => {
     });
     expect(summary.status).toBe("error");
     expect(summary.message).toBe("Connection not found.");
+  });
+});
+
+describe("credit card bills", () => {
+  const bill = (overrides: Partial<PluggyBill> = {}): PluggyBill => ({
+    id: "prov-bill-1",
+    dueDate: "2026-03-17T00:00:00.000Z",
+    billClosingDate: "2026-03-08T00:00:00.000Z",
+    totalAmount: 250,
+    totalAmountCurrencyCode: "BRL",
+    minimumPaymentAmount: 50,
+    payments: [],
+    ...overrides,
+  });
+
+  it("writes a confirmed cycle, which is what raises the statement to CONFIRMED", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [cardAccount()],
+        transactions: {
+          "prov-card": [
+            tx({
+              id: "c1",
+              accountId: "prov-card",
+              amount: 250,
+              date: "2026-03-02T00:00:00.000Z",
+              creditCardMetadata: {
+                installmentNumber: null,
+                totalInstallments: null,
+                totalAmount: null,
+                cardNumber: null,
+                billId: "prov-bill-1",
+              },
+            }),
+          ],
+        },
+        bills: { "prov-card": [bill()] },
+      }),
+      now: NOW,
+    });
+
+    const account = await accountFor("prov-card");
+    const card = await db.query.creditCards.findFirst({
+      where: eq(creditCards.accountId, account!.id),
+    });
+    expect(card?.defaultClosingDay).toBe(8);
+    expect(card?.defaultDueDay).toBe(17);
+    expect(card?.creditLimitMinor).toBe(500000);
+
+    const cycles = await db
+      .select()
+      .from(creditCardBillingCycles)
+      .where(eq(creditCardBillingCycles.creditCardId, card!.id));
+    expect(cycles).toHaveLength(1);
+    expect(cycles[0]).toMatchObject({
+      source: "pluggy",
+      confirmedTotalMinor: 25000,
+      dueAt: "2026-03-17",
+      closedAt: "2026-03-08",
+      // The charges Pluggy attributed to this bill add up to its total, so the
+      // cycle reconciles and stays out of the review queue (PRD §29).
+      status: "closed",
+    });
+  });
+
+  it("flags a cycle whose charges do not add up to the published total", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [cardAccount()],
+        transactions: {
+          "prov-card": [
+            tx({
+              id: "c1",
+              accountId: "prov-card",
+              amount: 200,
+              date: "2026-03-02T00:00:00.000Z",
+              creditCardMetadata: {
+                installmentNumber: null,
+                totalInstallments: null,
+                totalAmount: null,
+                cardNumber: null,
+                billId: "prov-bill-1",
+              },
+            }),
+          ],
+        },
+        // 250 published against 200 charged: a fee, interest, or a missing
+        // purchase. The system must not decide which.
+        bills: { "prov-card": [bill({ totalAmount: 250 })] },
+      }),
+      now: NOW,
+    });
+
+    const account = await accountFor("prov-card");
+    const card = await db.query.creditCards.findFirst({
+      where: eq(creditCards.accountId, account!.id),
+    });
+    const cycles = await db
+      .select()
+      .from(creditCardBillingCycles)
+      .where(eq(creditCardBillingCycles.creditCardId, card!.id));
+    expect(cycles[0]?.status).toBe("needs_review");
+  });
+
+  it("builds one plan from an installment, not one purchase per parcel", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [cardAccount()],
+        transactions: {
+          "prov-card": [
+            tx({
+              id: "c1",
+              accountId: "prov-card",
+              amount: 100,
+              date: "2026-03-02T00:00:00.000Z",
+              description: "Geladeira",
+              creditCardMetadata: {
+                installmentNumber: 3,
+                totalInstallments: 6,
+                totalAmount: 600,
+                cardNumber: null,
+                billId: null,
+              },
+            }),
+          ],
+        },
+        bills: { "prov-card": [bill()] },
+      }),
+      now: NOW,
+    });
+
+    const account = await accountFor("prov-card");
+    const card = await db.query.creditCards.findFirst({
+      where: eq(creditCards.accountId, account!.id),
+    });
+    const purchases = await db
+      .select()
+      .from(creditCardPurchases)
+      .where(eq(creditCardPurchases.creditCardId, card!.id));
+    expect(purchases).toHaveLength(1);
+    expect(purchases[0]?.totalAmountMinor).toBe(60000);
+
+    const plans = await db
+      .select()
+      .from(installmentPlans)
+      .where(eq(installmentPlans.creditCardPurchaseId, purchases[0]!.id));
+    expect(plans[0]).toMatchObject({ totalInstallments: 6, firstInstallmentNumber: 3 });
+
+    const parcels = await db
+      .select()
+      .from(installments)
+      .where(eq(installments.installmentPlanId, plans[0]!.id));
+    // Parcel 3 is a fact; 4 through 6 are projections. Parcels 1 and 2 are not
+    // invented: they were billed before the provider's window and are gone.
+    expect(parcels.map((p) => p.number).sort()).toEqual([3, 4, 5, 6]);
+    expect(parcels.find((p) => p.number === 3)?.status).toBe("billed");
+    expect(parcels.filter((p) => p.number > 3).every((p) => p.status === "projected")).toBe(true);
   });
 });

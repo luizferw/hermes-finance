@@ -55,6 +55,19 @@ const LIQUID_ACCOUNT_TYPES = ["asset", "cash", "wallet"] as const;
  */
 export const STALE_AFTER_DAYS = 3;
 
+/**
+ * Staleness is a property of the source, not of the number (PRD §62).
+ *
+ * A hand-entered balance three days old is ordinary; a provider balance two
+ * days old is a symptom, because Open Finance refreshes daily on the provider's
+ * side and an older reading means the connection stopped working.
+ */
+const STALE_AFTER_DAYS_BY_SOURCE: Record<string, number> = { pluggy: 2 };
+
+function staleAfterDays(sourceName: string): number {
+  return STALE_AFTER_DAYS_BY_SOURCE[sourceName] ?? STALE_AFTER_DAYS;
+}
+
 export type BalanceSource = "snapshot" | "ledger";
 
 export interface AccountPosition {
@@ -65,6 +78,8 @@ export interface AccountPosition {
   /** Date the balance was observed, or the ledger's own as-of date. */
   observedAt: string;
   source: BalanceSource;
+  /** Who produced the observation: "manual", "pluggy", or "ledger" when derived. */
+  sourceName: string;
   ageDays: number;
   isStale: boolean;
 }
@@ -119,6 +134,7 @@ export async function getFinancePosition(userId: string): Promise<FinancePositio
     const snapshot = snapshots.get(account.id);
     const observedAt = snapshot?.observedAt ?? account.openingBalanceDate ?? asOf;
     const ageDays = Math.max(0, daysBetween(observedAt, asOf));
+    const sourceName = snapshot?.source ?? "ledger";
     return {
       id: account.id,
       name: account.name,
@@ -126,8 +142,9 @@ export async function getFinancePosition(userId: string): Promise<FinancePositio
       currencyCode: account.currencyCode,
       observedAt,
       source: snapshot ? "snapshot" : "ledger",
+      sourceName,
       ageDays,
-      isStale: snapshot ? ageDays > STALE_AFTER_DAYS : false,
+      isStale: snapshot ? ageDays > staleAfterDays(sourceName) : false,
     };
   });
 
@@ -654,7 +671,12 @@ export async function listCreditCards(userId: string) {
   });
 }
 
-export type CycleSource = "recorded" | "derived";
+/**
+ * Where a billing cycle's numbers came from, so the UI can say so (PRD R7).
+ * `open_finance` is a recorded cycle whose total the institution confirmed,
+ * which is why it outranks anything derived from the ledger.
+ */
+export type CycleSource = "recorded" | "derived" | "open_finance";
 
 export interface CardStatementCycle {
   id: string;
@@ -805,7 +827,9 @@ export async function getCardStatement(userId: string, cardId: string) {
       creditsMinor: 0,
       totalMinor: cycle.confirmedTotalMinor ?? chargedMinor,
       isReconciled: cycle.confirmedTotalMinor !== null,
-      source: "recorded",
+      // A cycle the institution itself confirmed says so, so the card screen can
+      // distinguish "you typed this total" from "the bank published it" (R7).
+      source: cycle.source === "pluggy" ? "open_finance" : "recorded",
       status: cycle.status,
     });
   }
