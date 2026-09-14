@@ -573,17 +573,18 @@ export interface SpendingRoomView {
 }
 
 /**
- * How much can be spent today, by the route that buys the most room.
+ * What is left to spend this month before next month stops landing on zero.
+ *
+ * The figure is the projected low from the settlement date onward, measured
+ * against the reserve — so spending exactly it lands next month's worst day on
+ * the floor, and a negative figure says the forecast is already that far below
+ * it before anything new is bought.
  *
  * Cash leaves the account now, so it is constrained by the whole horizon —
- * including a dip before payday that the money would have to survive. A card
- * charge leaves on its statement's due date, so it is constrained only from that
- * date onward. The difference is the point: it answers "what can I spend this
- * month, knowing what next month looks like" rather than "what can I spend
- * without touching the next dip".
- *
- * Every route is reported, not just the winner, because which card to reach for
- * is the decision this number exists to inform.
+ * including a dip before payday the money would have to survive. A card charge
+ * leaves on its statement's due date, so only what comes after that constrains
+ * it. Every route is reported, not just the winner, because which card to reach
+ * for is the decision this number exists to inform.
  */
 export async function getSafeToSpend(userId: string, horizonDays = 60): Promise<SpendingRoomView> {
   const [{ forecast, position }, hardReserveMinor, cards] = await Promise.all([

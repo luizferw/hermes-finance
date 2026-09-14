@@ -230,7 +230,6 @@ export default async function OverviewPage() {
                 minimumBalanceDate={safeToSpend.minimumBalanceDate}
                 floorMinor={safeToSpend.floorMinor}
                 hardReserveMinor={safeToSpend.hardReserveMinor}
-                hardReserveViolated={safeToSpend.hardReserveViolated}
                 bestRoute={safeToSpend.bestOption}
                 routes={safeToSpend.options}
                 currency={currency}

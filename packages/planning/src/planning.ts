@@ -54,7 +54,10 @@ export interface SpendingRoomInput {
 }
 
 export interface SpendingRoomResult {
-  /** How much may be spent today, settling on `settlementDate`. */
+  /**
+   * How much may be spent today, settling on `settlementDate`, and still land on
+   * the floor. Negative means the forecast is already that far below it.
+   */
   spendingRoomMinor: number;
   settlementDate: DateString;
   /** The level the trough must not fall below. See the note on the floor. */
@@ -79,14 +82,11 @@ export interface SpendingRoomResult {
  * untouched and only the trough from that date onward constrains the amount.
  * That is why a card can absorb a purchase that cash cannot.
  *
- * The floor is `min(hardReserve, trough)`, not the hard reserve. When the
- * forecast already dips below the reserve, measuring against the reserve
- * declares every amount a violation and the answer collapses to zero — true but
- * useless, because it cannot distinguish a purchase that makes things worse from
- * one that does not. Holding the existing trough as the floor answers the
- * question actually being asked: how much can I spend without being worse off
- * than I already am. Where the forecast is healthy the two coincide, and the
- * reserve governs.
+ * The result is deliberately allowed to go negative, and that is the whole
+ * reason it is not `calculateSafeToSpend`. A negative room is not "nothing to
+ * spend" — it is a number with its own meaning: the forecast lands that far
+ * below the floor next month before anything new is bought. Flooring it at zero
+ * would erase the only figure that says how much trouble is already booked.
  */
 export function calculateSpendingRoom(input: SpendingRoomInput): SpendingRoomResult {
   assertMinorUnits(input.hardReserveMinor, "hardReserveMinor");
@@ -113,10 +113,13 @@ export function calculateSpendingRoom(input: SpendingRoomInput): SpendingRoomRes
     troughAfterDate = forecast.minimumBalanceDate;
   }
 
-  const floorMinor = Math.min(input.hardReserveMinor, forecast.minimumBalanceMinor);
+  // The floor is the reserve, which is zero when none is configured. "How much
+  // can I spend and still reach zero" is the question; holding some other floor
+  // would answer a different one.
+  const floorMinor = input.hardReserveMinor;
 
   return {
-    spendingRoomMinor: Math.max(0, troughAfter - floorMinor),
+    spendingRoomMinor: troughAfter - floorMinor,
     settlementDate: input.settlementDate,
     floorMinor,
     troughMinor: forecast.minimumBalanceMinor,

@@ -24,6 +24,19 @@ describe("calculateSpendingRoom", () => {
     expect(room.troughDate).toBe("2026-01-05");
   });
 
+  it("goes negative rather than reporting nothing to spend", () => {
+    // The point of the figure: -2000 says next month lands two thousand below
+    // the floor before anything new is bought. Flooring it at zero would erase
+    // the only number that says how much trouble is already booked.
+    const underwater = {
+      ...base,
+      balances: [{ accountId: "a", amountMinor: -250000, observedAt: "2026-01-01" }],
+    };
+    const room = calculateSpendingRoom({ forecastInput: underwater, hardReserveMinor: 0, settlementDate: "2026-01-20" });
+    expect(room.spendingRoomMinor).toBeLessThan(0);
+    expect(room.spendingRoomMinor).toBe(room.troughAfterSettlementMinor);
+  });
+
   it("settling after the dip frees the money the dip was holding", () => {
     // The 5 January trough of 500 no longer constrains a charge due on the 20th;
     // what constrains it is the balance from the 20th onward.
@@ -40,45 +53,24 @@ describe("calculateSpendingRoom", () => {
     expect(room.hardReserveViolated).toBe(false);
   });
 
-  it("uses the existing trough as the floor once the reserve is already broken", () => {
-    // The question being asked is "how much without being worse off than I am",
-    // and measuring against a reserve the forecast already breaks answers zero
-    // to everything — true, and useless.
-    const underwater = {
-      ...base,
-      balances: [{ accountId: "a", amountMinor: -20000, observedAt: "2026-01-01" }],
-    };
-    const room = calculateSpendingRoom({ forecastInput: underwater, hardReserveMinor: 0, settlementDate: "2026-01-20" });
-    expect(room.hardReserveViolated).toBe(true);
-    expect(room.floorMinor).toBe(room.troughMinor);
-    expect(room.spendingRoomMinor).toBeGreaterThan(0);
-    // Spending exactly the room lands the later trough on the existing one.
-    expect(room.troughAfterSettlementMinor - room.spendingRoomMinor).toBe(room.troughMinor);
+  it("measures to the floor, so spending the room lands exactly on it", () => {
+    const room = calculateSpendingRoom({ forecastInput: base, hardReserveMinor: 20000, settlementDate: "2026-01-20" });
+    expect(room.floorMinor).toBe(20000);
+    expect(room.troughAfterSettlementMinor - room.spendingRoomMinor).toBe(room.floorMinor);
   });
 
-  it("keeps answering once the reserve is out of reach entirely", () => {
-    // A reserve of 5000 that the forecast never approaches does not make every
-    // answer zero; the floor becomes the trough and the question stays
-    // answerable, with `hardReserveViolated` carrying the bad news.
+  it("reports the shortfall when the reserve is out of reach entirely", () => {
     const room = calculateSpendingRoom({ forecastInput: base, hardReserveMinor: 500000, settlementDate: "2026-01-20" });
     expect(room.hardReserveViolated).toBe(true);
-    expect(room.floorMinor).toBe(room.troughMinor);
-    expect(room.spendingRoomMinor).toBe(100000);
-  });
-
-  it("never returns a negative room", () => {
-    // Settlement on the trough day itself: nothing above the floor to spend.
-    const room = calculateSpendingRoom({ forecastInput: base, hardReserveMinor: 50000, settlementDate: "2026-01-05" });
-    expect(room.spendingRoomMinor).toBe(0);
+    expect(room.spendingRoomMinor).toBe(150000 - 500000);
   });
 
   it("falls back to the horizon trough when settlement lands past it", () => {
     // Beyond the horizon nothing was modelled, so the honest bound is the same
     // one cash gets rather than a claim of unlimited room.
     const room = calculateSpendingRoom({ forecastInput: base, hardReserveMinor: 0, settlementDate: "2027-01-01" });
-    const cash = calculateSafeToSpend({ forecastInput: base, hardReserveMinor: 0 });
     expect(room.troughAfterSettlementMinor).toBe(room.troughMinor);
-    expect(room.spendingRoomMinor).toBe(cash.safeToSpendMinor);
+    expect(room.spendingRoomMinor).toBe(room.troughMinor);
   });
 
   it("rejects a malformed settlement date", () => {

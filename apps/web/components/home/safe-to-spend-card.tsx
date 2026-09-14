@@ -28,7 +28,6 @@ export function SafeToSpendCard({
   minimumBalanceDate,
   floorMinor,
   hardReserveMinor,
-  hardReserveViolated,
   bestRoute,
   routes,
   currency,
@@ -38,25 +37,21 @@ export function SafeToSpendCard({
   minimumBalanceDate: string;
   floorMinor: number;
   hardReserveMinor: number;
-  hardReserveViolated: boolean;
   bestRoute: SpendingRoute;
   routes: SpendingRoute[];
   currency: string;
 }) {
-  const over = hardReserveViolated;
-  // "Tight" once less than ~15% of the reserve is left as headroom — only
-  // meaningful when a reserve is actually configured.
-  const tight = !over && hardReserveMinor > 0 && safeMinor < hardReserveMinor * 0.15;
+  // A negative figure is the informative case, not an error state: next month
+  // lands that far under before anything new is bought.
+  const short = safeMinor < 0;
+  const tight = !short && hardReserveMinor > 0 && safeMinor < hardReserveMinor * 0.15;
 
-  const tone = over ? "over" : tight ? "tight" : "clear";
-  const read = {
-    // The reserve being broken no longer blanks the figure. The amount is still
-    // the answer to "what can I spend without being worse off than I am", which
-    // is the question worth answering when you are already under water.
-    over: `Already below your reserve — this is what you can spend on ${bestRoute.label} without going deeper.`,
-    tight: "Running tight against your reserve. Worth slowing down on the extras.",
-    clear: `Yours to spend. On ${bestRoute.label} it leaves on ${formatDate(bestRoute.settlementDate)}.`,
-  }[tone];
+  const tone = short ? "over" : tight ? "tight" : "clear";
+  const read = short
+    ? `Next month already lands ${formatMoney(-safeMinor, currency)} short. Spending anything now deepens it.`
+    : tight
+      ? "Running tight against your reserve. Worth slowing down on the extras."
+      : `Spend this on ${bestRoute.label} and next month still lands on zero. It leaves on ${formatDate(bestRoute.settlementDate)}.`;
   const accent = {
     over: "text-destructive",
     tight: "text-warning",
@@ -65,7 +60,7 @@ export function SafeToSpendCard({
 
   return (
     <div className="glass-panel rounded-2xl p-5 shadow-sm">
-      <span className="micro-label">Safe to spend</span>
+      <span className="micro-label">Room to spend</span>
       <p
         className={cn(
           "mt-1.5 font-amount text-[clamp(2rem,5vw,2.75rem)] leading-[0.95] font-medium tracking-[-0.03em] tabular-nums",
@@ -91,7 +86,7 @@ export function SafeToSpendCard({
           {hardReserveMinor > 0 && (
             <Row label="Protected reserve" value={formatMoney(hardReserveMinor, currency)} />
           )}
-          <Row label="Floor this is measured to" value={formatMoney(floorMinor, currency)} />
+          <Row label="Floor it lands on" value={formatMoney(floorMinor, currency)} />
           {routes.map((route) => (
             <Row
               key={route.label}
