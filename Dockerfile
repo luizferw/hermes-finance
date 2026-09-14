@@ -11,6 +11,12 @@ COPY apps/web/package.json apps/web/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/domain/package.json packages/domain/package.json
+COPY packages/forecast/package.json packages/forecast/package.json
+COPY packages/planning/package.json packages/planning/package.json
+COPY packages/open-finance/package.json packages/open-finance/package.json
+# Every workspace package apps/web depends on has to be listed above. pnpm
+# resolves `workspace:*` against the manifests present at install time, so a
+# missing one fails the install rather than degrading quietly.
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
