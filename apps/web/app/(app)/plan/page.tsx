@@ -13,7 +13,7 @@ import {
   buildUserForecastDetailed,
   getConfidenceBreakdown,
   getFinancePosition,
-  getSafeToSpend,
+  getMonthlyOutlook,
 } from "@/modules/finance/queries";
 import {
   getFutureView,
@@ -21,6 +21,7 @@ import {
   type GoalTrajectory,
 } from "@/modules/future/queries";
 import { FinancialPositionSummary } from "@/components/plan/financial-position";
+import { MonthlyOutlook } from "@/components/plan/monthly-outlook";
 import { ConfidenceBreakdownMeter } from "@/components/plan/confidence-breakdown";
 import { ForecastHorizonChart, type HorizonSeries } from "@/components/plan/forecast-horizon-chart";
 import { cn } from "@/lib/utils";
@@ -38,12 +39,14 @@ const CHART_HORIZONS: Array<{ days: number; label: string }> = [
 
 export default async function FuturePage() {
   const user = await requireUser();
-  const [settings, future, position, safeToSpend, confidence, horizonForecasts] =
+  const [settings, future, position, monthlyOutlook, confidence, horizonForecasts] =
     await Promise.all([
       getUserSettings(user.id),
       getFutureView(user.id),
       getFinancePosition(user.id),
-      getSafeToSpend(user.id, 30),
+      // This month plus the next three, which is the window a bill or a card
+      // statement actually lands in.
+      getMonthlyOutlook(user.id, 4),
       getConfidenceBreakdown(user.id, 90),
       Promise.all(CHART_HORIZONS.map((h) => buildUserForecastDetailed(user.id, h.days))),
     ]);
@@ -67,13 +70,15 @@ export default async function FuturePage() {
     <div className="mx-auto w-full max-w-screen-2xl space-y-10 py-2 md:space-y-14 md:py-4">
       {/* ── Movement 0 · Financial position ───────────────────────────── */}
       <section className="row-in" style={{ "--i": 0 } as React.CSSProperties} aria-label="Your financial position">
-        <FinancialPositionSummary
-          position={position}
-          safeToSpendMinor={safeToSpend.safeToSpendMinor}
-          committedMinor={safeToSpend.committedMinor}
-          hardReserveMinor={safeToSpend.hardReserveMinor}
-          currency={currency}
-        />
+        <FinancialPositionSummary position={position} currency={currency} />
+      </section>
+
+      <section
+        className="row-in"
+        style={{ "--i": 0 } as React.CSSProperties}
+        aria-label="Projected balance by month"
+      >
+        <MonthlyOutlook months={monthlyOutlook} currency={currency} locale={settings.locale} />
       </section>
 
       <section className="row-in" style={{ "--i": 1 } as React.CSSProperties} aria-label="Balance forecast">

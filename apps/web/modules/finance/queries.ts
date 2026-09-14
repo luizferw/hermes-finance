@@ -667,6 +667,68 @@ export async function getSafeToSpendUntilNextIncome(userId: string, maxHorizonDa
   };
 }
 
+export interface MonthOutlook {
+  /** `YYYY-MM`. */
+  month: string;
+  /** Projected balance on the last day of the month the horizon covers. */
+  closingBalanceMinor: number;
+  /** The month's worst day — the one that decides whether it is survivable. */
+  lowMinor: number;
+  lowDate: string;
+  isCurrentMonth: boolean;
+}
+
+/** Last calendar day of the month `offset` months after `isoMonth`'s month. */
+function endOfMonth(isoDay: string, offset: number): string {
+  const [year, month] = isoDay.slice(0, 7).split("-").map(Number);
+  // Day 0 of the following month is the last day of the one before it.
+  const end = new Date(Date.UTC(year!, month! + offset, 0));
+  return end.toISOString().slice(0, 10);
+}
+
+/**
+ * Where the balance lands at the end of this month and the next few.
+ *
+ * Both numbers are reported per month because they answer different questions.
+ * The closing balance says how the month ends; the low says whether it can be
+ * lived through — a month can close comfortably and still spend a week
+ * overdrawn, and on this data the worst day is routinely not the one the
+ * statement falls on.
+ */
+export async function getMonthlyOutlook(userId: string, months = 4): Promise<MonthOutlook[]> {
+  const today = todayIso();
+  const horizonEnd = endOfMonth(today, months);
+  const horizonDays = Math.max(
+    1,
+    Math.round((Date.parse(`${horizonEnd}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000),
+  );
+  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+
+  const byMonth = new Map<string, MonthOutlook>();
+  for (const day of forecast.days) {
+    const month = day.date.slice(0, 7);
+    const entry = byMonth.get(month);
+    if (!entry) {
+      byMonth.set(month, {
+        month,
+        closingBalanceMinor: day.closingBalanceMinor,
+        lowMinor: day.closingBalanceMinor,
+        lowDate: day.date,
+        isCurrentMonth: month === today.slice(0, 7),
+      });
+      continue;
+    }
+    // Days arrive in order, so the last one seen is the month's closing day.
+    entry.closingBalanceMinor = day.closingBalanceMinor;
+    if (day.closingBalanceMinor < entry.lowMinor) {
+      entry.lowMinor = day.closingBalanceMinor;
+      entry.lowDate = day.date;
+    }
+  }
+
+  return [...byMonth.values()].slice(0, months);
+}
+
 export interface UpcomingCommitment {
   logicalKey: string;
   label: string;

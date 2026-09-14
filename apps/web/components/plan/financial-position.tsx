@@ -2,32 +2,25 @@ import type { FinancePosition } from "@/modules/finance/queries";
 import { formatMoney } from "@/lib/format";
 
 /**
- * The four numbers a financial standing is made of, held as one relationship:
- * what you have, what's already spoken for, what's yours to spend, and what
- * stays untouched. Same figure grid as the Future page's Horizon block, so
- * the vocabulary carries over.
+ * What you have right now, and how fresh that number is.
+ *
+ * It used to also carry safe-to-spend and the protected reserve. Those said what
+ * is left after the future is accounted for, which the month-by-month projection
+ * beneath it now answers directly and per month — two summaries of the same
+ * future, side by side, invite the reader to reconcile them.
  */
 export function FinancialPositionSummary({
   position,
-  safeToSpendMinor,
-  committedMinor,
-  hardReserveMinor,
   currency,
 }: {
   position: FinancePosition;
-  safeToSpendMinor: number;
-  committedMinor: number;
-  hardReserveMinor: number;
   currency: string;
 }) {
   return (
     <div>
       <span className="micro-label">Your financial position</span>
-      <dl className="mt-4 grid max-w-3xl grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-4">
+      <dl className="mt-4 grid max-w-3xl grid-cols-2 gap-x-8 gap-y-6">
         <Figure label="Net balance" value={formatMoney(position.balanceMinor, currency)} />
-        <Figure label="Committed" value={formatMoney(committedMinor, currency)} />
-        <Figure label="Safe to spend" value={formatMoney(safeToSpendMinor, currency)} />
-        <Figure label="Protected reserve" value={formatMoney(hardReserveMinor, currency)} />
       </dl>
       <Freshness position={position} />
     </div>
