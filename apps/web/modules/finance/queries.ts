@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, inArray, isNull, lte, ne } from "drizzle-orm";
+import { and, asc, between, desc, eq, gte, inArray, isNull, lte, ne } from "drizzle-orm";
 import {
   accounts,
   bills,
@@ -10,6 +10,7 @@ import {
   creditCards,
   db,
   financialReserves,
+  installmentPlans,
   installments,
   projectedEvents,
   purchasePlans,
@@ -22,6 +23,7 @@ import {
   projectRecurrences,
   projectStatements,
   nominalCycleFor,
+  statementMonthForDueDate,
   type BillingCycle,
   type Confidence,
   type CycleCharge,
@@ -420,6 +422,62 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
         // Charges are positive magnitudes; the rule's amount is an outflow.
         charges.push({ billingCycleId: cycleId, amountMinor: Math.abs(occurrence.amountMinor) });
       }
+    }
+
+    // Installments the card has committed to but not yet charged.
+    //
+    // A future statement is made of the parcels falling due in it, and those
+    // live in `installments`, not in the ledger — a parcel becomes a
+    // transaction only when the issuer posts it. Reading only transactions
+    // therefore showed future statements as almost empty: on this data,
+    // November projected the two subscriptions charged to the card and nothing
+    // else, while the issuer's own app showed ten times that.
+    //
+    // Only `projected` rows are added. A `billed` parcel already exists as a
+    // transaction on the card and was counted above; adding it again would
+    // charge the same money twice (PRD R3).
+    const projectedInstallments = await db
+      .select({
+        cardId: creditCardPurchases.creditCardId,
+        expectedAt: installments.expectedAt,
+        amountMinor: installments.amountMinor,
+      })
+      .from(installments)
+      .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
+      .innerJoin(creditCardPurchases, eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId))
+      .innerJoin(creditCards, eq(creditCards.id, creditCardPurchases.creditCardId))
+      .where(
+        and(
+          eq(creditCards.userId, userId),
+          eq(installments.status, "projected"),
+          between(installments.expectedAt, asOf, horizonEnd),
+        ),
+      );
+
+    for (const installment of projectedInstallments) {
+      const card = cardById.get(installment.cardId);
+      if (!card) continue;
+      // `expectedAt` is the parcel's due date, so the statement it belongs to is
+      // the one that falls due then — the same inverse the provider's bills use,
+      // which is what keeps a parcel and a bill landing on one cycle.
+      const statementMonth = statementMonthForDueDate(
+        installment.expectedAt,
+        card.defaultClosingDay,
+        card.defaultDueDay,
+      );
+      const key = `${card.id}:${statementMonth}`;
+      let cycleId = cycleIdByCardMonth.get(key);
+      if (cycleId === undefined) {
+        cycleId = `installment-cycle:${card.id}:${statementMonth}`;
+        cycleIdByCardMonth.set(key, cycleId);
+        billingCycles.push({
+          id: cycleId,
+          creditCardId: card.id,
+          statementMonth,
+          dueAt: installment.expectedAt,
+        });
+      }
+      charges.push({ billingCycleId: cycleId, amountMinor: installment.amountMinor });
     }
 
     const statementEvents = projectStatements(billingCycles, charges, range);
