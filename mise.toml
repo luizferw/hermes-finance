@@ -1,0 +1,7 @@
+# Pins the local toolchain to what CI and the production image actually run:
+# .github/workflows/ci.yml uses node-version 22.13, the Dockerfile builds on
+# node:22-alpine, and `packageManager` in package.json fixes pnpm. Developing on
+# a newer Node than CI validates is how a build passes here and fails there.
+[tools]
+node = "22.13"
+pnpm = "11.5.3"
