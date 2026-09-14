@@ -1,5 +1,5 @@
 import "server-only";
-import { and, between, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
+import { and, between, eq, exists, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import {
   accounts,
   balanceSnapshots,
@@ -18,6 +18,7 @@ import {
 import {
   accountKindOf,
   brazilianCalendarDay,
+  CARD_PAYMENT_PROVIDER_CATEGORY,
   matchCardPayments,
   matchSelfTransfers,
   isSameOwnerCategory,
@@ -1042,8 +1043,13 @@ export async function pairCardPayments(
     );
   if (legs.length === 0) return { matched: 0, ambiguous: 0, touchedAccountIds: [] };
 
-  // Candidates are the rows the sync tagged as looking like a bill payment and
-  // that are still ordinary expenses.
+  // Candidates are rows that are still ordinary expenses and that something says
+  // are a bill payment: the tag this sync writes, or — for rows already stored
+  // before the tag learned to read it — the provider's own category.
+  //
+  // `exists` rather than a join, because two matching metadata rows on one
+  // transaction would otherwise offer it twice and let one payment consume two
+  // legs.
   const candidates = await db
     .select({
       transactionId: transactions.id,
@@ -1051,26 +1057,36 @@ export async function pairCardPayments(
       amountMinor: transactions.amountMinor,
     })
     .from(transactions)
-    .innerJoin(
-      transactionMetadata,
-      eq(transactionMetadata.transactionId, transactions.id),
-    )
     .where(
       and(
         eq(transactions.userId, userId),
         eq(transactions.type, "expense"),
         isNull(transactions.deletedAt),
-        eq(transactionMetadata.key, "open_finance.card_payment_candidate"),
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(transactionMetadata)
+            .where(
+              and(
+                eq(transactionMetadata.transactionId, transactions.id),
+                or(
+                  eq(transactionMetadata.key, "open_finance.card_payment_candidate"),
+                  and(
+                    eq(transactionMetadata.key, "open_finance.category"),
+                    eq(transactionMetadata.value, CARD_PAYMENT_PROVIDER_CATEGORY),
+                  ),
+                ),
+              ),
+            ),
+        ),
       ),
     );
   if (candidates.length === 0) return { matched: 0, ambiguous: 0, touchedAccountIds: [] };
 
-  const legsByKey = new Map<string, string>();
-  for (const leg of legs) legsByKey.set(`${leg.cardAccountId}|${leg.date}|${leg.amountMinor}`, leg.id);
-
   const decisions = matchCardPayments(
     candidates,
     legs.map((leg) => ({
+      id: leg.id,
       cardAccountId: leg.cardAccountId!,
       date: leg.date,
       amountMinor: leg.amountMinor,
@@ -1093,11 +1109,6 @@ export async function pairCardPayments(
     }
     if (decision.kind !== "matched") continue;
 
-    const candidate = candidates.find((row) => row.transactionId === decision.transactionId)!;
-    const legId = legsByKey.get(
-      `${decision.cardAccountId}|${candidate.date}|${Math.abs(candidate.amountMinor)}`,
-    );
-
     await db.transaction(async (trx) => {
       await trx
         .update(transactions)
@@ -1111,18 +1122,14 @@ export async function pairCardPayments(
         })
         .where(eq(transactions.id, decision.transactionId));
 
+      // The exact leg the matcher consumed. It used to be looked up again by
+      // card, date and amount, which cannot work: the window exists so the two
+      // legs may fall on different days, and when the key missed, the fallback
+      // marked every open leg on that card as settled by this one payment.
       await trx
         .update(openFinanceCardPayments)
         .set({ matchedTransactionId: decision.transactionId, matchedAt: new Date() })
-        .where(
-          legId
-            ? eq(openFinanceCardPayments.id, legId)
-            : and(
-                eq(openFinanceCardPayments.userId, userId),
-                eq(openFinanceCardPayments.accountId, decision.cardAccountId),
-                isNull(openFinanceCardPayments.matchedTransactionId),
-              ),
-        );
+        .where(eq(openFinanceCardPayments.id, decision.legId));
 
       await trx
         .insert(transactionMetadata)

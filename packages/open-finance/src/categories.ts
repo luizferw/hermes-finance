@@ -206,3 +206,17 @@ const SAME_OWNER_CATEGORIES = new Set([
 export function isSameOwnerCategory(providerCategory: string | null | undefined): boolean {
   return providerCategory ? SAME_OWNER_CATEGORIES.has(providerCategory) : false;
 }
+
+/**
+ * Whether the provider said this row settles a credit-card bill.
+ *
+ * The description is not always enough. A bill paid by Pix or boleto reads as
+ * `PIX ENVIADO NU PAGAMENTOS S A` or `PAGAMENTO DE BOLETO OUTROS BANCOS`, which
+ * names the issuer and never the word fatura, so a phrase list cannot see it.
+ * The provider's own category can, and it is sitting in the same payload.
+ */
+export const CARD_PAYMENT_PROVIDER_CATEGORY = "Credit card payment";
+
+export function isCardPaymentCategory(providerCategory: string | null | undefined): boolean {
+  return providerCategory === CARD_PAYMENT_PROVIDER_CATEGORY;
+}

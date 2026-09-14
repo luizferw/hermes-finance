@@ -18,6 +18,14 @@
 
 /** A bill payment seen on the card side and deliberately not booked there. */
 export interface CardPaymentLeg {
+  /**
+   * Identifies this leg to the caller, so a match can say which one it consumed.
+   *
+   * Without it the caller has to find the leg again from the decision, and the
+   * only key it has is amount plus date — which is wrong by construction here,
+   * because the window exists precisely so the two legs may differ by a day.
+   */
+  id: string;
   /** The Hermes account id of the card. */
   cardAccountId: string;
   date: string;
@@ -34,7 +42,7 @@ export interface BankOutflow {
 }
 
 export type CardPaymentMatch =
-  | { kind: "matched"; transactionId: string; cardAccountId: string }
+  | { kind: "matched"; transactionId: string; cardAccountId: string; legId: string }
   | { kind: "ambiguous"; transactionId: string; cardAccountIds: string[] }
   | { kind: "unmatched"; transactionId: string };
 
@@ -73,7 +81,15 @@ export function matchCardPayment(
 
   const cardAccountIds = [...new Set(candidates.map((leg) => leg.cardAccountId))];
   if (cardAccountIds.length === 1) {
-    return { kind: "matched", transactionId: outflow.transactionId, cardAccountId: cardAccountIds[0]! };
+    const chosen = [...candidates].sort(
+      (left, right) => daysApart(left.date, outflow.date) - daysApart(right.date, outflow.date),
+    )[0]!;
+    return {
+      kind: "matched",
+      transactionId: outflow.transactionId,
+      cardAccountId: cardAccountIds[0]!,
+      legId: chosen.id,
+    };
   }
   if (cardAccountIds.length > 1) {
     return { kind: "ambiguous", transactionId: outflow.transactionId, cardAccountIds };
@@ -121,6 +137,7 @@ export function matchCardPayments(
       kind: "matched" as const,
       transactionId: outflow.transactionId,
       cardAccountId: chosen.leg.cardAccountId,
+      legId: chosen.leg.id,
     };
   });
 }

@@ -6,6 +6,7 @@
  * accepts. The adapter in `apps/web` decides what to persist; this file decides
  * what the numbers *mean*.
  */
+import { isCardPaymentCategory } from "./categories";
 import type {
   PluggyAccount,
   PluggyBill,
@@ -390,8 +391,14 @@ export function normalizeTransaction(
     providerCategory: transaction.category ?? null,
     billExternalId: transaction.creditCardMetadata?.billId ?? null,
     installment: installmentOf(transaction, exponent),
+    // The description is only half the evidence. A bill paid by Pix or boleto
+    // names the issuer and never the word fatura, so the phrase list cannot see
+    // it; the provider's category can, and it is right here in the same payload.
     cardPaymentCandidate:
-      accountKind === "bank" && ledgerMinor < 0 && looksLikeCardBillPayment(description),
+      accountKind === "bank" &&
+      ledgerMinor < 0 &&
+      (looksLikeCardBillPayment(description) ||
+        isCardPaymentCategory(transaction.category ?? null)),
   };
 }
 

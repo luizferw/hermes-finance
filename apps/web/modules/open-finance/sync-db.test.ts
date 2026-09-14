@@ -12,6 +12,7 @@ import {
   installmentPlans,
   installments,
   openFinanceAccountLinks,
+  openFinanceCardPayments,
   openFinanceConnections,
   openFinanceSyncRuns,
   transactionMetadata,
@@ -1135,5 +1136,88 @@ describe("a movement between two of the user's own accounts", () => {
     });
     expect(inflow?.type).toBe("income");
     expect(inflow?.deletedAt).toBeNull();
+  });
+});
+
+describe("a bill paid by Pix or boleto", () => {
+  /** What the bank really shows: the issuer's name, never the word fatura. */
+  const paidByPix = () => ({
+    "prov-bank": [
+      tx({
+        id: "b-pix",
+        amount: -366.83,
+        description: "PIX ENVIADO   Nu Pagamentos S A",
+        category: "Credit card payment",
+        date: "2026-03-07T00:00:00.000Z",
+      }),
+    ],
+    "prov-card": [
+      tx({
+        id: "c-pix",
+        accountId: "prov-card",
+        amount: -366.83,
+        description: "Pagamento recebido",
+        category: "Credit card payment",
+        date: "2026-03-07T00:00:00.000Z",
+      }),
+    ],
+  });
+
+  it("is a transfer, not a second expense (PRD R4)", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: paidByPix(),
+      }),
+      now: NOW,
+    });
+
+    const card = await accountFor("prov-card");
+    const [payment] = await db
+      .select({ type: transactions.type, transferAccountId: transactions.transferAccountId })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "b-pix")));
+
+    // The phrase list cannot see this one; the provider's category can.
+    expect(payment).toMatchObject({ type: "transfer", transferAccountId: card!.id });
+  });
+
+  it("marks the leg the payment actually settled, not a different open one", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: {
+          "prov-bank": [
+            // Settles the leg posted two days earlier — the window exists for
+            // exactly this, which is why the leg cannot be found again by date.
+            tx({ id: "b-late", amount: -366.83, description: "PIX ENVIADO   Nu Pagamentos S A",
+                 category: "Credit card payment", date: "2026-03-09T00:00:00.000Z" }),
+          ],
+          "prov-card": [
+            tx({ id: "c-early", accountId: "prov-card", amount: -366.83, description: "Pagamento",
+                 category: "Credit card payment", date: "2026-03-07T00:00:00.000Z" }),
+            // A second open leg of the same value on the same card. The old
+            // fallback marked every one of these settled by the single payment.
+            tx({ id: "c-other", accountId: "prov-card", amount: -366.83, description: "Pagamento",
+                 category: "Credit card payment", date: "2026-03-02T00:00:00.000Z" }),
+          ],
+        },
+      }),
+      now: NOW,
+    });
+
+    const legs = await db
+      .select({ paidAt: openFinanceCardPayments.paidAt,
+                matched: openFinanceCardPayments.matchedTransactionId })
+      .from(openFinanceCardPayments)
+      .where(eq(openFinanceCardPayments.userId, userId));
+
+    expect(legs).toHaveLength(2);
+    expect(legs.filter((leg) => leg.matched !== null)).toHaveLength(1);
+    expect(legs.find((leg) => leg.matched !== null)?.paidAt).toBe("2026-03-07");
   });
 });

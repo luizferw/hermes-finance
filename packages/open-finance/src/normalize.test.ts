@@ -255,6 +255,43 @@ describe("normalizeTransaction", () => {
     expect(result).toMatchObject({ type: "expense", cardPaymentCandidate: true });
   });
 
+  it("flags a bill paid by Pix or boleto, which never says fatura", () => {
+    // The real shape of the miss: the description names the issuer, so the
+    // phrase list cannot see it, but the provider's category says outright what
+    // the money settled.
+    for (const description of [
+      "PIX ENVIADO   Nu Pagamentos S A",
+      "PAGAMENTO DE BOLETO OUTROS BANCOS   NU PAGAMENTOS SA",
+    ]) {
+      expect(
+        normalizeTransaction(
+          transaction({ amount: -366.83, description, category: "Credit card payment" }),
+          "bank",
+          context,
+        ),
+      ).toMatchObject({ type: "expense", cardPaymentCandidate: true });
+    }
+  });
+
+  it("does not let the provider category flag an inflow or a card-side row", () => {
+    expect(
+      normalizeTransaction(
+        transaction({ amount: 366.83, description: "Estorno", category: "Credit card payment" }),
+        "bank",
+        context,
+      ),
+    ).toMatchObject({ cardPaymentCandidate: false });
+    // On the card itself the bill settlement is not booked at all (PRD R4) — it
+    // is remembered as the leg the bank outflow will be matched against.
+    expect(
+      normalizeTransaction(
+        transaction({ amount: -366.83, description: "Pagamento", category: "Credit card payment" }),
+        "credit",
+        context,
+      ),
+    ).toMatchObject({ kind: "skipped", reason: "card_payment_leg" });
+  });
+
   it("does not flag an inflow or an unrelated expense", () => {
     expect(
       normalizeTransaction(transaction({ amount: 10, description: "Pagamento fatura" }), "bank", context),
