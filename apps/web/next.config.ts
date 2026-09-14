@@ -21,6 +21,29 @@ const csp = [
   "frame-ancestors 'none'",
 ].join("; ");
 
+/**
+ * Pluggy Connect runs on our origin: its script comes from cdn.pluggy.ai and it
+ * opens an iframe on connect.pluggy.ai, where the user talks to their bank.
+ *
+ * Widening the policy is unavoidable to embed it, so it is widened on that one
+ * route only. The transactions page has no reason to accept third-party script,
+ * and a CSP relaxed everywhere to suit one settings screen is how a tight policy
+ * quietly stops being one.
+ */
+const openFinanceCsp = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline' https://cdn.pluggy.ai${isDev ? " 'unsafe-eval'" : ""}`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self'",
+  "connect-src 'self' https://api.pluggy.ai",
+  "frame-src https://connect.pluggy.ai",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 const securityHeaders = [
   { key: "Content-Security-Policy", value: csp },
   { key: "X-Frame-Options", value: "DENY" },
@@ -40,7 +63,22 @@ const nextConfig: NextConfig = {
   // changes the standalone output layout and breaks `node apps/web/server.js`.
   outputFileTracingRoot: fileURLToPath(new URL("../..", import.meta.url)),
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    // The two rules must not overlap. A browser given two CSP headers enforces
+    // the intersection, so a catch-all matching this route too would re-impose
+    // the strict policy and silently block the widget.
+    return [
+      {
+        source: "/((?!settings/open-finance).*)",
+        headers: securityHeaders,
+      },
+      {
+        source: "/settings/open-finance",
+        headers: [
+          { key: "Content-Security-Policy", value: openFinanceCsp },
+          ...securityHeaders.filter((header) => header.key !== "Content-Security-Policy"),
+        ],
+      },
+    ];
   },
 };
 

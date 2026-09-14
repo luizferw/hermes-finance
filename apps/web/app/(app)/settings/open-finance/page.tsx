@@ -58,17 +58,10 @@ export default async function OpenFinancePage() {
               Connections
             </CardTitle>
             <CardDescription>
-              Hermes never creates a bank connection. Connect your banks at{" "}
-              <a
-                className="underline underline-offset-4"
-                href="https://meu.pluggy.ai"
-                target="_blank"
-                rel="noreferrer"
-              >
-                meu.pluggy.ai
-              </a>
-              , copy each Item ID from the Pluggy dashboard, and paste it here. Everything
-              below is read-only: no payment is ever initiated.
+              Connect a bank and Hermes reads its accounts, cards, transactions and card
+              bills. Authentication happens inside Pluggy&apos;s widget, so your bank
+              credentials go to the institution and never reach this app. Read-only
+              throughout: no payment is ever initiated.
             </CardDescription>
           </CardHeader>
           <CardContent>

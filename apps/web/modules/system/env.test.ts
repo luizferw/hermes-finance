@@ -15,6 +15,9 @@ beforeEach(() => {
   vi.stubEnv("KOSH_ENCRYPTION_KEY", strongKey);
   vi.stubEnv("KOSH_AI_ENABLED", "false");
   vi.stubEnv("KOSH_MCP_ENABLED", "false");
+  vi.stubEnv("PLUGGY_ENABLED", "false");
+  vi.stubEnv("PLUGGY_CLIENT_ID", "");
+  vi.stubEnv("PLUGGY_CLIENT_SECRET", "");
   vi.stubEnv("NODE_ENV", "production");
 });
 

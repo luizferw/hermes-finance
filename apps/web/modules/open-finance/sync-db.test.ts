@@ -44,6 +44,9 @@ function stubClient(overrides: {
   bills?: Record<string, PluggyBill[]>;
 } = {}): PluggyClient {
   return {
+    async createConnectToken() {
+      return "stub-connect-token";
+    },
     async getItem() {
       return {
         id: ITEM_ID,
@@ -373,7 +376,7 @@ describe("an item the user has to fix", () => {
     });
 
     expect(summary.status).toBe("error");
-    expect(summary.message).toContain("meu.pluggy.ai");
+    expect(summary.message).toContain("Reconnect");
 
     const rows = await db.select({ id: transactions.id }).from(transactions).where(eq(transactions.userId, userId));
     expect(rows).toHaveLength(0);
