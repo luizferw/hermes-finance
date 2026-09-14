@@ -59,3 +59,30 @@ describe("production env validation", () => {
     expect(env().BETTER_AUTH_SECRET).toMatch(/^build-only/);
   });
 });
+
+describe("Open Finance configuration", () => {
+  it("refuses to enable Pluggy without credentials, even outside production", async () => {
+    // Deliberately not gated on NODE_ENV: a half-configured integration fails in
+    // development too, as an opaque 401 from a third party.
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("PLUGGY_ENABLED", "true");
+    const { env } = await loadEnv();
+    expect(() => env()).toThrow(/PLUGGY_CLIENT_ID and PLUGGY_CLIENT_SECRET are required/);
+  });
+
+  it("accepts Pluggy once both credentials are present", async () => {
+    vi.stubEnv("PLUGGY_ENABLED", "true");
+    vi.stubEnv("PLUGGY_CLIENT_ID", "client-id");
+    vi.stubEnv("PLUGGY_CLIENT_SECRET", "client-secret");
+    const { env } = await loadEnv();
+    expect(env().PLUGGY_ENABLED).toBe(true);
+    expect(env().PLUGGY_BASE_URL).toBe("https://api.pluggy.ai");
+  });
+
+  it("leaves Pluggy off and unvalidated by default", async () => {
+    const { env } = await loadEnv();
+    expect(env().PLUGGY_ENABLED).toBe(false);
+    expect(env().PLUGGY_TIMEZONE_OFFSET_MINUTES).toBe(-180);
+    expect(env().PLUGGY_BACKFILL_DAYS).toBe(365);
+  });
+});

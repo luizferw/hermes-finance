@@ -43,10 +43,42 @@ const envSchema = z.object({
   /** Secret for signing confirmation payloads + (optionally) MCP. Falls back to
    * BETTER_AUTH_SECRET when unset. */
   KOSH_MCP_AUTH_SECRET: z.string().optional(),
+
+  // ── Open Finance (Pluggy) ───────────────────────────────────────────────
+  // Read-only ingestion of accounts, cards, transactions and bills. Hermes
+  // never creates or updates a connection: the user does that at meu.pluggy.ai
+  // and pastes the item id into settings. Credentials belong to the deployment,
+  // not to a user, so they live here rather than in the database.
+  PLUGGY_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  PLUGGY_CLIENT_ID: z.string().optional(),
+  PLUGGY_CLIENT_SECRET: z.string().optional(),
+  PLUGGY_BASE_URL: z.string().url().default("https://api.pluggy.ai"),
+  /** Brazil has had no daylight saving since 2019, so a fixed offset is correct. */
+  PLUGGY_TIMEZONE_OFFSET_MINUTES: z.coerce.number().int().min(-720).max(840).default(-180),
+  /** How far back the first sync of an account reaches. Pluggy holds 12 months. */
+  PLUGGY_BACKFILL_DAYS: z.coerce.number().int().min(1).max(365).default(365),
+  /** 08:00 in Brazil, after Pluggy's own overnight refresh has landed. */
+  PLUGGY_SYNC_SCHEDULE: z.string().default("0 11 * * *"),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),
 }).superRefine((cfg, ctx) => {
+  // Checked before the production-only block below, unlike the AI gate: a
+  // half-configured Pluggy integration fails in development too, and it fails as
+  // a confusing 401 from a third party rather than as a configuration error.
+  if (cfg.PLUGGY_ENABLED && (!cfg.PLUGGY_CLIENT_ID || !cfg.PLUGGY_CLIENT_SECRET)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["PLUGGY_CLIENT_ID"],
+      message:
+        "PLUGGY_CLIENT_ID and PLUGGY_CLIENT_SECRET are required when PLUGGY_ENABLED=true. " +
+        "Both come from an application in the Pluggy dashboard.",
+    });
+  }
+
   // Never let a real deployment run on the example/placeholder secret.
   const placeholders = ["change-me-to-a-long-random-string", "change-me"];
   if (cfg.NODE_ENV !== "production" || isProductionBuild) return;

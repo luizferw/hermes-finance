@@ -21,10 +21,12 @@ export interface NormalizeContext {
   minorUnitExponent(currencyCode: string): number;
   /** Used when Pluggy omits the currency on a record. */
   defaultCurrencyCode: string;
+  /** Defaults to Brazil's fixed UTC-3. */
+  utcOffsetMinutes?: number;
 }
 
 /** Brazil runs at UTC-3 year round; the daylight-saving rule was repealed in 2019. */
-const BRAZIL_UTC_OFFSET_MINUTES = -180;
+export const BRAZIL_UTC_OFFSET_MINUTES = -180;
 
 /* -------------------------------------------------------------------------- */
 /* Money                                                                      */
@@ -114,7 +116,10 @@ function optionalAmountToMinor(
  * than an instant. A timestamp with a real time of day is a genuine instant and
  * does get shifted.
  */
-export function brazilianCalendarDay(isoTimestamp: string): string {
+export function brazilianCalendarDay(
+  isoTimestamp: string,
+  utcOffsetMinutes: number = BRAZIL_UTC_OFFSET_MINUTES,
+): string {
   const instant = new Date(isoTimestamp);
   if (Number.isNaN(instant.getTime())) {
     throw new Error(`invalid ISO timestamp: ${isoTimestamp}`);
@@ -127,13 +132,16 @@ export function brazilianCalendarDay(isoTimestamp: string): string {
 
   const shifted = isMidnightUtc
     ? instant
-    : new Date(instant.getTime() + BRAZIL_UTC_OFFSET_MINUTES * 60_000);
+    : new Date(instant.getTime() + utcOffsetMinutes * 60_000);
   return shifted.toISOString().slice(0, 10);
 }
 
-function dayOfMonth(isoTimestamp: string | null | undefined): number | null {
+function dayOfMonth(
+  isoTimestamp: string | null | undefined,
+  utcOffsetMinutes?: number,
+): number | null {
   if (!isoTimestamp) return null;
-  const day = Number(brazilianCalendarDay(isoTimestamp).slice(8, 10));
+  const day = Number(brazilianCalendarDay(isoTimestamp, utcOffsetMinutes).slice(8, 10));
   return Number.isInteger(day) && day >= 1 && day <= 31 ? day : null;
 }
 
@@ -190,8 +198,8 @@ export function normalizeAccount(
     creditLimitMinor: optionalAmountToMinor(credit?.creditLimit, exponent),
     availableCreditMinor: optionalAmountToMinor(credit?.availableCreditLimit, exponent),
     minimumPaymentMinor: optionalAmountToMinor(credit?.minimumPayment, exponent),
-    closingDay: dayOfMonth(credit?.balanceCloseDate),
-    dueDay: dayOfMonth(credit?.balanceDueDate),
+    closingDay: dayOfMonth(credit?.balanceCloseDate, context.utcOffsetMinutes),
+    dueDay: dayOfMonth(credit?.balanceDueDate, context.utcOffsetMinutes),
     brand: credit?.brand ?? null,
   };
 }
@@ -340,7 +348,7 @@ export function normalizeTransaction(
     externalId: transaction.id,
     type: ledgerMinor > 0 ? "income" : "expense",
     status: statusFor(transaction.status, accountKind),
-    date: brazilianCalendarDay(transaction.date),
+    date: brazilianCalendarDay(transaction.date, context.utcOffsetMinutes),
     amountMinor: ledgerMinor,
     currencyCode,
     description,
@@ -380,18 +388,20 @@ export interface NormalizedBill {
 export function normalizeBill(bill: PluggyBill, context: NormalizeContext): NormalizedBill {
   const currencyCode = (bill.totalAmountCurrencyCode ?? context.defaultCurrencyCode).toUpperCase();
   const exponent = context.minorUnitExponent(currencyCode);
-  const dueAt = brazilianCalendarDay(bill.dueDate);
+  const dueAt = brazilianCalendarDay(bill.dueDate, context.utcOffsetMinutes);
   const payments = bill.payments;
   const lastPaymentDate = payments
     .map((payment) => payment.paymentDate)
     .filter((date): date is string => Boolean(date))
-    .map(brazilianCalendarDay)
+    .map((date) => brazilianCalendarDay(date, context.utcOffsetMinutes))
     .sort()
     .at(-1);
 
   return {
     externalId: bill.id,
-    closedAt: bill.billClosingDate ? brazilianCalendarDay(bill.billClosingDate) : null,
+    closedAt: bill.billClosingDate
+      ? brazilianCalendarDay(bill.billClosingDate, context.utcOffsetMinutes)
+      : null,
     dueAt,
     totalMinor: amountToMinor(bill.totalAmount, exponent),
     minimumPaymentMinor: optionalAmountToMinor(bill.minimumPaymentAmount, exponent),

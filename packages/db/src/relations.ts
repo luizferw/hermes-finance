@@ -32,6 +32,9 @@ import {
   purchaseItems,
   paymentOptions,
   purchaseSimulations,
+  openFinanceConnections,
+  openFinanceAccountLinks,
+  openFinanceSyncRuns,
   users,
 } from "./schema";
 
@@ -317,5 +320,33 @@ export const projectedEventsRelations = relations(projectedEvents, ({ one }) => 
   resolvedByTransaction: one(transactions, {
     fields: [projectedEvents.resolvedByTransactionId],
     references: [transactions.id],
+  }),
+}));
+
+export const openFinanceConnectionsRelations = relations(openFinanceConnections, ({ one, many }) => ({
+  user: one(users, { fields: [openFinanceConnections.userId], references: [users.id] }),
+  accountLinks: many(openFinanceAccountLinks),
+  syncRuns: many(openFinanceSyncRuns),
+}));
+
+export const openFinanceAccountLinksRelations = relations(openFinanceAccountLinks, ({ one }) => ({
+  connection: one(openFinanceConnections, {
+    fields: [openFinanceAccountLinks.connectionId],
+    references: [openFinanceConnections.id],
+  }),
+  account: one(accounts, {
+    fields: [openFinanceAccountLinks.accountId],
+    references: [accounts.id],
+  }),
+  creditCard: one(creditCards, {
+    fields: [openFinanceAccountLinks.creditCardId],
+    references: [creditCards.id],
+  }),
+}));
+
+export const openFinanceSyncRunsRelations = relations(openFinanceSyncRuns, ({ one }) => ({
+  connection: one(openFinanceConnections, {
+    fields: [openFinanceSyncRuns.connectionId],
+    references: [openFinanceConnections.id],
   }),
 }));
