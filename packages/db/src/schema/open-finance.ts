@@ -55,6 +55,8 @@ export interface OpenFinanceSyncStats {
   perAccount?: Record<string, { seen: number; created: number; updated: number }>;
   /** Bank outflows recognised as the settlement of a card bill (PRD R4, R5). */
   cardPaymentsPaired?: number;
+  /** Pairs of provider rows recognised as one movement between own accounts (PRD R5). */
+  selfTransfersPaired?: number;
   /** Opening balances re-solved so an auto-created account lands on the bank's number. */
   openingBalanceCorrections?: { accountId: string; correctionMinor: number }[];
   /** Provider categories this build has no Portuguese name for — a gap worth filling. */

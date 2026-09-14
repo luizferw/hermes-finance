@@ -19,6 +19,8 @@ import {
   accountKindOf,
   brazilianCalendarDay,
   matchCardPayments,
+  matchSelfTransfers,
+  isSameOwnerCategory,
   providerCategoryName,
   TRANSFER_CATEGORY_NAME,
   normalizeAccount,
@@ -28,6 +30,7 @@ import {
   type NormalizedAccount,
   type NormalizedBill,
   type CardPaymentLeg,
+  type SelfTransferLeg,
   type NormalizedTransaction,
   type PluggyClient,
   type PluggyItem,
@@ -269,10 +272,21 @@ export async function syncConnection(
     counts.needsReview += paired.ambiguous;
     if (paired.matched > 0) stats.cardPaymentsPaired = paired.matched;
 
+    // Bank-to-bank pairing runs after the card pass, for the same reason and on
+    // the same footing: a movement between two of the user's own accounts is one
+    // event stored twice, and until the pair is recognised it inflates both
+    // income and spending (PRD R5). Card payments go first so a bill settlement
+    // is already a transfer and cannot be mistaken here for an ordinary debit.
+    const selfPaired = await pairSelfTransfers(userId);
+    counts.needsReview += selfPaired.ambiguous;
+    if (selfPaired.matched > 0) stats.selfTransfersPaired = selfPaired.matched;
+
     // Balances are recomputed last, and after pairing on purpose: a payment that
     // has just become a transfer credits the card, and computing before it would
     // leave the card short by exactly the amount that was paid.
-    const toRecompute = [...new Set([...touched, ...paired.touchedAccountIds])];
+    const toRecompute = [
+      ...new Set([...touched, ...paired.touchedAccountIds, ...selfPaired.touchedAccountIds]),
+    ];
     if (toRecompute.length > 0) await recomputeAccountBalances(toRecompute);
 
     // Last of all, because everything above changes what the ledger contains.
@@ -460,11 +474,20 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
 
   await db.transaction(async (trx) => {
     const existing = await loadExistingWindow(trx, args.accountId, rows);
+    const suppressedExternalIds = await loadSuppressedExternalIds(trx, args.accountId, rows);
     const knownExternalIds = new Set(
       existing.map((row) => row.externalId).filter((id): id is string => id !== null),
     );
 
     for (const row of rows) {
+      // A row that was deleted stays deleted. Re-inserting it would resurrect
+      // what someone threw out and would undo every self-transfer pairing on the
+      // next run.
+      if (suppressedExternalIds.has(row.externalId)) {
+        counts.skipped += 1;
+        continue;
+      }
+
       const isNew = !knownExternalIds.has(row.externalId);
       const importHash = computeImportHash({
         accountId: args.accountId,
@@ -783,6 +806,42 @@ async function reconcileDerivedOpeningBalances(
 }
 
 /**
+ * Provider ids on this account that a person or a pairing has already retired.
+ *
+ * The unique index behind the upsert is partial — `external_id IS NOT NULL AND
+ * deleted_at IS NULL` — so a soft-deleted row does not collide and the next run
+ * inserts it again. Without this, deleting a provider transaction only makes it
+ * disappear until the following sync, and the self-transfer pairing would undo
+ * itself every time.
+ *
+ * Kept apart from `loadExistingWindow` because these rows must not be duplicate
+ * detection candidates: a deleted row is not evidence that anything exists.
+ */
+async function loadSuppressedExternalIds(
+  trx: Trx,
+  accountId: string,
+  rows: readonly NormalizedTransaction[],
+): Promise<Set<string>> {
+  if (rows.length === 0) return new Set();
+  const dates = rows.map((row) => row.date).sort();
+  const from = addDaysIso(dates[0]!, -3);
+  const to = addDaysIso(dates[dates.length - 1]!, 3);
+
+  const suppressed = await trx
+    .select({ externalId: transactions.externalId })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.accountId, accountId),
+        isNotNull(transactions.deletedAt),
+        isNotNull(transactions.externalId),
+        between(transactions.date, from, to),
+      ),
+    );
+  return new Set(suppressed.map((row) => row.externalId!));
+}
+
+/**
  * Existing rows near the incoming dates, for duplicate detection.
  *
  * Bounded to the window the batch actually covers, widened by the tolerance
@@ -1076,6 +1135,139 @@ export async function pairCardPayments(
     });
     matched += 1;
     touchedAccountIds.add(decision.cardAccountId);
+  }
+
+  return { matched, ambiguous, touchedAccountIds: [...touchedAccountIds] };
+}
+
+/**
+ * Turn two provider rows that are one movement between own accounts into a transfer.
+ *
+ * When both accounts are connected, the same money is stored twice: a credit on
+ * the destination that reads as income, a debit on the source that reads as
+ * spending. PRD R5 says that nets to zero, so the outflow becomes the transfer
+ * and points at the destination, and the inflow is soft-deleted — the ledger
+ * derives the destination leg from the surviving row (`recomputeAccountBalances`
+ * adds `-amount` wherever `transfer_account_id` names the account), so keeping
+ * both would credit the destination twice.
+ *
+ * Balances are therefore unchanged by pairing, which is the point: the money was
+ * always right, only its shape was wrong. What changes is that the amount stops
+ * being counted as income and as an expense.
+ *
+ * Only provider rows are candidates. A row someone typed by hand is theirs, and
+ * a sync has no business retiring it.
+ *
+ * Idempotent, and unbounded in time for the same reason `pairCardPayments` is.
+ * The two legs routinely arrive from different connections on different days,
+ * and a newly connected account backfills a year at once, so a window would
+ * decide by age what is really a question of what has arrived. The candidate set
+ * shrinks as it works — a paired outflow is a `transfer` and no longer a
+ * candidate, the retired inflow is soft-deleted and not offered again, nor
+ * re-created, which is what `loadSuppressedExternalIds` exists for.
+ */
+export async function pairSelfTransfers(
+  userId: string,
+): Promise<{ matched: number; ambiguous: number; touchedAccountIds: string[] }> {
+  const rows = await db
+    .select({
+      transactionId: transactions.id,
+      accountId: transactions.accountId,
+      date: transactions.date,
+      amountMinor: transactions.amountMinor,
+      providerCategory: transactionMetadata.value,
+    })
+    .from(transactions)
+    .innerJoin(accounts, eq(accounts.id, transactions.accountId))
+    .leftJoin(
+      transactionMetadata,
+      and(
+        eq(transactionMetadata.transactionId, transactions.id),
+        eq(transactionMetadata.key, "open_finance.category"),
+      ),
+    )
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        inArray(transactions.type, ["income", "expense"]),
+        // A movement out of a card is a refund or a bill settlement, and the
+        // card path owns both.
+        eq(accounts.type, "asset"),
+        isNotNull(transactions.externalId),
+        isNull(transactions.deletedAt),
+        inArray(transactions.status, ["imported", "reviewed", "posted"]),
+      ),
+    );
+  if (rows.length === 0) return { matched: 0, ambiguous: 0, touchedAccountIds: [] };
+
+  const decisions = matchSelfTransfers(
+    rows.map((row) => ({
+      transactionId: row.transactionId,
+      accountId: row.accountId,
+      date: row.date,
+      amountMinor: row.amountMinor,
+      sameOwnerHint: isSameOwnerCategory(row.providerCategory),
+    })) satisfies SelfTransferLeg[],
+  );
+
+  const [transferCategory] = await db
+    .select({ id: categories.id })
+    .from(categories)
+    .where(and(eq(categories.userId, userId), eq(categories.name, TRANSFER_CATEGORY_NAME)));
+  const transferCategoryId = transferCategory?.id ?? null;
+
+  const accountOf = new Map(rows.map((row) => [row.transactionId, row.accountId]));
+
+  let matched = 0;
+  let ambiguous = 0;
+  const touchedAccountIds = new Set<string>();
+  for (const decision of decisions) {
+    if (decision.kind === "ambiguous") {
+      ambiguous += 1;
+      continue;
+    }
+    if (decision.kind !== "matched") continue;
+
+    await db.transaction(async (trx) => {
+      await trx
+        .update(transactions)
+        .set({
+          type: "transfer",
+          transferAccountId: decision.inflowAccountId,
+          // Whatever spending category a rule guessed is wrong by definition
+          // (R5), but blank would tell the reader nothing about what the row is.
+          categoryId: transferCategoryId,
+        })
+        .where(eq(transactions.id, decision.outflowTransactionId));
+
+      // Soft-deleted rather than rewritten: the surviving transfer carries the
+      // money, and `deleted_at` is what keeps this reversible and auditable.
+      await trx
+        .update(transactions)
+        .set({ deletedAt: new Date(), categoryId: transferCategoryId })
+        .where(eq(transactions.id, decision.inflowTransactionId));
+
+      await trx
+        .insert(transactionMetadata)
+        .values([
+          {
+            transactionId: decision.outflowTransactionId,
+            key: "open_finance.self_transfer_matched",
+            value: decision.inflowTransactionId,
+          },
+          {
+            transactionId: decision.inflowTransactionId,
+            key: "open_finance.self_transfer_suppressed",
+            value: decision.outflowTransactionId,
+          },
+        ])
+        .onConflictDoNothing();
+    });
+
+    matched += 1;
+    touchedAccountIds.add(decision.inflowAccountId);
+    const source = accountOf.get(decision.outflowTransactionId);
+    if (source) touchedAccountIds.add(source);
   }
 
   return { matched, ambiguous, touchedAccountIds: [...touchedAccountIds] };

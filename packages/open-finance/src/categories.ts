@@ -187,3 +187,22 @@ export function providerCategoryName(
   const name = PROVIDER_CATEGORY_NAMES[providerCategory];
   return name ? { kind: "category", name } : { kind: "unmapped" };
 }
+
+/**
+ * Provider categories that say the two accounts have the same holder.
+ *
+ * A subset of `TRANSFER_CATEGORIES`, because the rest are movements without
+ * saying whose the other side is: `Transfer - PIX` is the label Pluggy puts on
+ * money from your own savings and on money from a friend alike. Used only to
+ * break a tie in `matchSelfTransfers`, never as a requirement — see the note on
+ * `SelfTransferLeg.sameOwnerHint`.
+ */
+const SAME_OWNER_CATEGORIES = new Set([
+  "Same person transfer",
+  "Same person transfer - CASH",
+]);
+
+/** Whether the provider said this row moves money between the holder's own accounts. */
+export function isSameOwnerCategory(providerCategory: string | null | undefined): boolean {
+  return providerCategory ? SAME_OWNER_CATEGORIES.has(providerCategory) : false;
+}

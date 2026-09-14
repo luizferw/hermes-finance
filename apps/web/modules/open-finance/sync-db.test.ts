@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import {
   accounts,
   balanceSnapshots,
@@ -998,5 +998,142 @@ describe("parcels of one purchase", () => {
     expect(parcels).toHaveLength(12);
     const billed = parcels.filter((p) => p.status === "billed").map((p) => p.number).sort();
     expect(billed).toEqual([1, 2, 3]);
+  });
+});
+
+describe("a movement between two of the user's own accounts", () => {
+  async function statsOf(runId: string) {
+    const [run] = await db
+      .select({ stats: openFinanceSyncRuns.stats })
+      .from(openFinanceSyncRuns)
+      .where(eq(openFinanceSyncRuns.id, runId));
+    return run!.stats;
+  }
+
+  const twoBanks = () => [
+    bankAccount({ id: "prov-bank", number: "0001/12345-7788", balance: 1500.5 }),
+    bankAccount({
+      id: "prov-bank-2",
+      number: "0002/98765-4321",
+      name: "Conta Poupança",
+      balance: 800,
+    }),
+  ];
+
+  /** The same R$ 2.194,06 seen from both sides, plus real income for contrast. */
+  const bothLegs = () => ({
+    "prov-bank": [
+      tx({ id: "out", amount: -2194.06, description: "Pix enviado - Fulano", category: "Transfer - PIX" }),
+    ],
+    "prov-bank-2": [
+      tx({
+        id: "in",
+        accountId: "prov-bank-2",
+        amount: 2194.06,
+        type: "CREDIT",
+        description: "PIX RECEBIDO   FULANO",
+        category: "Same person transfer",
+      }),
+      tx({
+        id: "salary",
+        accountId: "prov-bank-2",
+        amount: 6080,
+        type: "CREDIT",
+        description: "Pix recebido - Fulano Tecnologia Ltda",
+        category: "Transfer - PIX",
+      }),
+    ],
+  });
+
+  it("keeps one negative transfer pointing at the destination and retires the credit", async () => {
+    const connectionId = await freshConnection();
+    const summary = await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({ accounts: twoBanks(), transactions: bothLegs() }),
+      now: NOW,
+    });
+
+    expect(summary.status).toBe("ok");
+    expect((await statsOf(summary.runId!)).selfTransfersPaired).toBe(1);
+
+    const source = await accountFor("prov-bank");
+    const destination = await accountFor("prov-bank-2");
+
+    const outflow = await db.query.transactions.findFirst({
+      where: and(eq(transactions.userId, userId), eq(transactions.externalId, "out")),
+    });
+    // The schema allows no other shape: a transfer row must be negative and must
+    // name where the money went.
+    expect(outflow?.type).toBe("transfer");
+    expect(outflow?.amountMinor).toBe(-219406);
+    expect(outflow?.transferAccountId).toBe(destination!.id);
+    expect(outflow?.deletedAt).toBeNull();
+
+    const inflow = await db.query.transactions.findFirst({
+      where: and(eq(transactions.userId, userId), eq(transactions.externalId, "in")),
+    });
+    // Kept out of the ledger rather than rewritten: the destination leg is
+    // derived from the row above, so leaving this one live would credit the
+    // destination twice.
+    expect(inflow?.deletedAt).not.toBeNull();
+    expect(source).toBeTruthy();
+  });
+
+  it("stops the money being counted as income, and leaves real income alone", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({ accounts: twoBanks(), transactions: bothLegs() }),
+      now: NOW,
+    });
+
+    const income = await db.query.transactions.findMany({
+      where: and(
+        eq(transactions.userId, userId),
+        eq(transactions.type, "income"),
+        isNull(transactions.deletedAt),
+      ),
+    });
+    // R$ 6.080 is money from someone else with no matching debit anywhere; the
+    // R$ 2.194,06 was never income at all (PRD R5).
+    expect(income.map((row) => row.amountMinor)).toEqual([608000]);
+  });
+
+  it("does not resurrect the retired credit on the next sync", async () => {
+    const connectionId = await freshConnection();
+    const client = stubClient({ accounts: twoBanks(), transactions: bothLegs() });
+    await syncConnection(userId, connectionId, { trigger: "manual", client, now: NOW });
+    await syncConnection(userId, connectionId, { trigger: "manual", client, now: NOW });
+
+    // The unique index behind the upsert ignores soft-deleted rows, so without
+    // the suppression check the provider would re-insert this every run and the
+    // double count would come back on its own.
+    const live = await db.query.transactions.findMany({
+      where: and(
+        eq(transactions.userId, userId),
+        eq(transactions.externalId, "in"),
+        isNull(transactions.deletedAt),
+      ),
+    });
+    expect(live).toHaveLength(0);
+  });
+
+  it("leaves a credit alone while the matching debit has not arrived", async () => {
+    const connectionId = await freshConnection();
+    const summary = await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: twoBanks(),
+        transactions: { "prov-bank-2": bothLegs()["prov-bank-2"] },
+      }),
+      now: NOW,
+    });
+
+    expect((await statsOf(summary.runId!)).selfTransfersPaired).toBeUndefined();
+    const inflow = await db.query.transactions.findFirst({
+      where: and(eq(transactions.userId, userId), eq(transactions.externalId, "in")),
+    });
+    expect(inflow?.type).toBe("income");
+    expect(inflow?.deletedAt).toBeNull();
   });
 });
