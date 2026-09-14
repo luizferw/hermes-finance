@@ -536,7 +536,7 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
           externalId: row.externalId,
           importHash,
           suspectedDuplicateOfId,
-          categoryId: resolveCategoryId(row, categoryIds, args.stats),
+          categoryId: resolveCategoryId(row, args.kind, categoryIds, args.stats),
         })
         .onConflictDoUpdate({
           target: [transactions.accountId, transactions.externalId],
@@ -884,13 +884,18 @@ async function loadExistingWindow(
  * A movement between the user's own accounts gets the transfer label rather than
  * a spending category, and a provider category this installation has no name for
  * is recorded as a gap rather than forced into something approximate.
+ *
+ * The account kind is part of the question, not context: some of the provider's
+ * movement labels cannot mean a movement on a credit card. See
+ * `BANK_ONLY_TRANSFER_CATEGORIES`.
  */
 function resolveCategoryId(
   row: NormalizedTransaction,
+  accountKind: "bank" | "credit",
   categoryIds: ReadonlyMap<string, string>,
   stats: OpenFinanceSyncStats,
 ): string | null {
-  const match = providerCategoryName(row.providerCategory);
+  const match = providerCategoryName(row.providerCategory, accountKind);
   if (match.kind === "unmapped") {
     if (row.providerCategory) {
       stats.unmappedCategories = [

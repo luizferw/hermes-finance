@@ -159,6 +159,18 @@ const TRANSFER_CATEGORIES = new Set([
   "Loans and financing - Payment",
 ]);
 
+/**
+ * Movements that cannot happen on a credit card.
+ *
+ * `Investments` is the odd one in the set above. The others name a movement;
+ * this one names a sector, so Pluggy also puts it on merchants that merely sound
+ * like one — five Mercado Livre purchases in one real ledger. You cannot fund an
+ * investment position with a credit card, so on a card the label is the
+ * provider's sector taxonomy leaking, never a movement, and calling it one files
+ * real shopping as a transfer where no report will look for it.
+ */
+const BANK_ONLY_TRANSFER_CATEGORIES = new Set(["Investments"]);
+
 /** Every Portuguese category name this mapping can produce. */
 export function providerCategoryNames(): string[] {
   return [...new Set([...Object.values(PROVIDER_CATEGORY_NAMES), TRANSFER_CATEGORY_NAME])]
@@ -179,9 +191,16 @@ export type ProviderCategoryMatch =
  */
 export function providerCategoryName(
   providerCategory: string | null | undefined,
+  accountKind: "bank" | "credit" = "bank",
 ): ProviderCategoryMatch {
   if (!providerCategory) return { kind: "unmapped" };
   if (TRANSFER_CATEGORIES.has(providerCategory)) {
+    if (accountKind === "credit" && BANK_ONLY_TRANSFER_CATEGORIES.has(providerCategory)) {
+      // Deliberately a gap, not a guess. `Investments` on a card says nothing
+      // about what was bought, and inventing a spending category would be the
+      // approximation this function exists to refuse.
+      return { kind: "unmapped" };
+    }
     return { kind: "transfer", name: TRANSFER_CATEGORY_NAME };
   }
   const name = PROVIDER_CATEGORY_NAMES[providerCategory];
@@ -196,11 +215,12 @@ export function providerCategoryName(
  * money from your own savings and on money from a friend alike. Used only to
  * break a tie in `matchSelfTransfers`, never as a requirement — see the note on
  * `SelfTransferLeg.sameOwnerHint`.
+ *
+ * The CASH variant is deliberately out. A withdrawal moves money to your pocket,
+ * which is not an account here and never will be, so it can have no second leg —
+ * calling it evidence of one is evidence of nothing.
  */
-const SAME_OWNER_CATEGORIES = new Set([
-  "Same person transfer",
-  "Same person transfer - CASH",
-]);
+const SAME_OWNER_CATEGORIES = new Set(["Same person transfer"]);
 
 /** Whether the provider said this row moves money between the holder's own accounts. */
 export function isSameOwnerCategory(providerCategory: string | null | undefined): boolean {

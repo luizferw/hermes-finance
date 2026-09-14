@@ -87,7 +87,9 @@ function daysApart(left: string, right: string): number {
  *
  * The provider's same-holder hint narrows the field when it is present on some
  * candidates and not others, which is what stops a genuine payment from a third
- * party of coincidentally equal value from being preferred over the real leg.
+ * party of coincidentally equal value from being preferred over the real leg. It
+ * is read off the candidates only: a hint on the outflow applies equally to all
+ * of them and so tells them apart not at all.
  *
  * Each inflow is consumed once: moving the same amount twice in a week is
  * ordinary, and a second outflow must not claim a leg the first already used.
@@ -119,9 +121,12 @@ export function matchSelfTransfers(
         daysApart(entry.leg.date, outflow.date) <= SELF_TRANSFER_WINDOW_DAYS,
     );
 
-    const hinted = candidates.filter(
-      (entry) => entry.leg.sameOwnerHint || outflow.sameOwnerHint,
-    );
+    // Only the candidate's own hint can narrow the field. An earlier version
+    // also accepted the outflow's, which quietly disabled the whole mechanism:
+    // when the debit was the labelled side, every candidate passed the filter
+    // and a genuine pair sat beside a coincidence as equals — reported ambiguous
+    // rather than matched.
+    const hinted = candidates.filter((entry) => entry.leg.sameOwnerHint);
     if (hinted.length > 0) candidates = hinted;
 
     const inflowAccountIds = [...new Set(candidates.map((entry) => entry.leg.accountId))];

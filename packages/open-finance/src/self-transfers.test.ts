@@ -103,6 +103,19 @@ describe("matchSelfTransfers", () => {
     expect(decisions[0]).toMatchObject({ kind: "matched", inflowTransactionId: "own" });
   });
 
+  it("still tells candidates apart when the debit is the labelled side", () => {
+    // The debit's own label applies to every candidate equally. Reading it as a
+    // reason to keep them all made two plausible destinations look like a tie,
+    // and a tie between accounts is reported, not resolved — so the real pair
+    // came back ambiguous.
+    const decisions = matchSelfTransfers([
+      out({ sameOwnerHint: true }),
+      inn({ transactionId: "third-party", accountId: "nubank" }),
+      inn({ transactionId: "own", accountId: "santander", sameOwnerHint: true }),
+    ]);
+    expect(decisions[0]).toMatchObject({ kind: "matched", inflowTransactionId: "own" });
+  });
+
   it("pairs without the hint, because the provider does not always give one", () => {
     // The R$ 6.080 case: labelled only `Transfer - PIX`, indistinguishable from
     // money sent by someone else, yet the debit leg is right there.

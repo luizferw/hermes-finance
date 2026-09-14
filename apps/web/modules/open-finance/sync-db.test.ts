@@ -1221,3 +1221,52 @@ describe("a bill paid by Pix or boleto", () => {
     expect(legs.find((leg) => leg.matched !== null)?.paidAt).toBe("2026-03-07");
   });
 });
+
+describe("an investment label on a credit card", () => {
+  it("is a gap, not a transfer, so the purchase stays visible as spending", async () => {
+    const connectionId = await freshConnection();
+    const summary = await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: {
+          // What Pluggy really sends: a marketplace purchase under `Investments`.
+          "prov-card": [
+            tx({ id: "ml", accountId: "prov-card", amount: 190.12,
+                 description: "MERCADOLIVRE MERCADOL  GUARULHOS     BRA",
+                 category: "Investments" }),
+          ],
+          // On a bank account the same label is a real movement.
+          "prov-bank": [
+            tx({ id: "cdb", amount: 294.33, type: "CREDIT",
+                 description: "Resgate - Cdb Credito", category: "Investments" }),
+          ],
+        },
+      }),
+      now: NOW,
+    });
+
+    const [purchase] = await db
+      .select({ categoryId: transactions.categoryId })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "ml")));
+    expect(purchase!.categoryId).toBeNull();
+
+    const [run] = await db
+      .select({ stats: openFinanceSyncRuns.stats })
+      .from(openFinanceSyncRuns)
+      .where(eq(openFinanceSyncRuns.id, summary.runId!));
+    // Surfaced as a gap worth filling rather than silently swallowed.
+    expect(run!.stats.unmappedCategories).toContain("Investments");
+
+    const [transferCategory] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(and(eq(categories.userId, userId), eq(categories.name, "Transferências")));
+    const [redemption] = await db
+      .select({ categoryId: transactions.categoryId })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "cdb")));
+    expect(redemption!.categoryId).toBe(transferCategory?.id ?? null);
+  });
+});
