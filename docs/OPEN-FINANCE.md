@@ -32,7 +32,12 @@ PLUGGY_CLIENT_ID=...
 PLUGGY_CLIENT_SECRET=...
 ```
 
-4. `pnpm build && systemctl --user restart hermes-finance.service`
+4. Recrie o container web, que é quem lê essas variáveis:
+
+```bash
+docker compose up -d --build web
+```
+
 5. Em **Settings → Open Finance**, cole o **Item ID** de cada conexão. No dashboard da
    Pluggy ele sai no menu de três pontos, em *Copiar Item ID*.
 

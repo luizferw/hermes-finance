@@ -55,6 +55,15 @@ services:
       KOSH_MCP_AUTH_SECRET: ${KOSH_MCP_AUTH_SECRET:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      # Open Finance. Without these the container starts fine and the feature
+      # simply reports itself as off, which is the intended default.
+      PLUGGY_ENABLED: ${PLUGGY_ENABLED:-false}
+      PLUGGY_CLIENT_ID: ${PLUGGY_CLIENT_ID:-}
+      PLUGGY_CLIENT_SECRET: ${PLUGGY_CLIENT_SECRET:-}
+      PLUGGY_BASE_URL: ${PLUGGY_BASE_URL:-https://api.pluggy.ai}
+      PLUGGY_TIMEZONE_OFFSET_MINUTES: ${PLUGGY_TIMEZONE_OFFSET_MINUTES:--180}
+      PLUGGY_BACKFILL_DAYS: ${PLUGGY_BACKFILL_DAYS:-365}
+      PLUGGY_SYNC_SCHEDULE: ${PLUGGY_SYNC_SCHEDULE:-0 11 * * *}
     ports:
       - "${KOSH_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     volumes:
