@@ -319,16 +319,16 @@ class SyncBlocked extends Error {
 /**
  * Why this item cannot be synced right now, in words the user can act on.
  *
- * Every remedy is a re-authentication through Pluggy's widget, which is what the
- * Reconnect button opens. Nothing here ever sends a bank credential.
+ * Every remedy happens at meu.pluggy.ai, never here: Hermes has no consent flow
+ * and never sends credentials.
  */
 function blockingReason(item: PluggyItem, now: Date): string | null {
   const status = item.status?.toUpperCase() ?? "";
   if (BLOCKING_ITEM_STATUSES.has(status)) {
-    return "This connection needs to be re-authenticated. Use Reconnect in Settings → Open Finance.";
+    return "This connection has to be re-established at meu.pluggy.ai before it can sync again.";
   }
   if (item.consentExpiresAt && new Date(item.consentExpiresAt) <= now) {
-    return "The consent has expired. Use Reconnect in Settings → Open Finance to renew it.";
+    return "The consent has expired. Renew the connection at meu.pluggy.ai.";
   }
   if (status === "UPDATING" || status === "CREATING") {
     return "Pluggy is still updating this connection. Try again in a few minutes.";

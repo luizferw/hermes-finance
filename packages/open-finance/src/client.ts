@@ -6,16 +6,12 @@
  * for four GET endpoints, and because an injectable `fetch` is what makes the
  * pagination and retry behaviour testable without a network.
  *
- * The client reads data and mints connect tokens. It never creates, updates or
- * deletes an Item itself, and it never moves money: a connect token is a
- * short-lived credential that authorizes the user's own browser to drive
- * Pluggy's widget, so the bank consent is given by the user to Pluggy directly
- * and no bank credential ever reaches this process.
+ * Read-only by construction: there is no method here that creates, updates or
+ * deletes an Item. Connections are managed by the user at meu.pluggy.ai.
  */
 import {
   parseAccount,
   parseAuthResponse,
-  parseConnectToken,
   parseBill,
   parseCursorPage,
   parseItem,
@@ -71,22 +67,8 @@ export interface ListTransactionsOptions {
   to?: string;
 }
 
-export interface ConnectTokenOptions {
-  /**
-   * The Item to authorize for update mode. Without it the token cannot touch an
-   * existing connection, which is what stops one user's token from reaching
-   * another user's Item.
-   */
-  itemId?: string;
-  /** Our own user id, for end-to-end traceability on Pluggy's side. */
-  clientUserId?: string;
-  /** Skip creating a second Item when the same credentials are already connected. */
-  avoidDuplicates?: boolean;
-}
-
 export interface PluggyClient {
   getItem(itemId: string): Promise<PluggyItem>;
-  createConnectToken(options?: ConnectTokenOptions): Promise<string>;
   listAccounts(itemId: string): Promise<PluggyAccount[]>;
   listTransactions(
     accountId: string,
@@ -171,36 +153,7 @@ export function createPluggyClient(options: PluggyClientOptions): PluggyClient {
     throw lastError ?? new PluggyError(500, "unknown", "request failed");
   }
 
-  async function post<T>(path: string, body: unknown, parse: (payload: unknown) => T): Promise<T> {
-    const response = await doFetch(`${baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        "X-API-KEY": await currentApiKey(),
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) throw await errorFromResponse(response);
-    return parse(await response.json());
-  }
-
   return {
-    async createConnectToken(tokenOptions = {}) {
-      const { accessToken } = await post(
-        "/connect_token",
-        {
-          ...(tokenOptions.itemId ? { itemId: tokenOptions.itemId } : {}),
-          options: {
-            ...(tokenOptions.clientUserId ? { clientUserId: tokenOptions.clientUserId } : {}),
-            avoidDuplicates: tokenOptions.avoidDuplicates ?? true,
-          },
-        },
-        parseConnectToken,
-      );
-      return accessToken;
-    },
-
     async getItem(itemId) {
       return request(`/items/${encodeURIComponent(itemId)}`, parseItem);
     },

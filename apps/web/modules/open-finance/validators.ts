@@ -6,19 +6,6 @@ export const registerConnectionSchema = z.object({
   label: z.string().trim().max(120).optional(),
 });
 
-/**
- * A connect token request. `connectionId` switches the widget into update mode
- * for an existing connection; without it the token can only create a new one.
- */
-export const connectTokenSchema = z.object({
-  connectionId: z.string().uuid().optional(),
-});
-
-export const adoptConnectionSchema = z.object({
-  itemId: z.string().trim().uuid(),
-  label: z.string().trim().max(120).optional(),
-});
-
 export const connectionIdSchema = z.object({
   connectionId: z.string().uuid(),
 });
@@ -41,8 +28,6 @@ export const updateAccountLinkSchema = z.object({
 
 export const syncTriggerSchema = z.enum(["scheduled", "manual"]);
 
-export type ConnectTokenInput = z.input<typeof connectTokenSchema>;
-export type AdoptConnectionInput = z.input<typeof adoptConnectionSchema>;
 export type RegisterConnectionInput = z.input<typeof registerConnectionSchema>;
 export type UpdateConnectionInput = z.input<typeof updateConnectionSchema>;
 export type UpdateAccountLinkInput = z.input<typeof updateAccountLinkSchema>;

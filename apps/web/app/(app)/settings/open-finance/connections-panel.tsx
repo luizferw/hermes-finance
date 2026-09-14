@@ -22,7 +22,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
-import { ConnectButton } from "./connect-button";
 
 interface LinkTarget {
   id: string;
@@ -128,53 +127,37 @@ export function ConnectionsPanel({
 
   return (
     <div className="space-y-6">
-      <div className="space-y-3">
-        <ConnectButton enabled={enabled} />
-        <p className="text-muted-foreground text-sm">
-          Opens Pluggy&apos;s secure widget. Your bank credentials go to the institution,
-          never to Hermes.
-        </p>
-
-        {/* Kept as a secondary path: banks connected at meu.pluggy.ai before this
-            screen existed cannot be discovered automatically, because Pluggy's
-            item listing endpoint is disabled by default. */}
-        <details className="text-sm">
-          <summary className="text-muted-foreground cursor-pointer">
-            Already connected a bank at meu.pluggy.ai? Add it by Item ID
-          </summary>
-          <form onSubmit={onRegister} className="mt-3 flex flex-wrap items-end gap-3">
-            <Field className="min-w-64 flex-1">
-              <FieldLabel htmlFor="itemId">Item ID</FieldLabel>
-              <Input
-                id="itemId"
-                value={itemId}
-                onChange={(event) => setItemId(event.target.value)}
-                placeholder="00000000-0000-0000-0000-000000000000"
-                autoComplete="off"
-                disabled={!enabled}
-              />
-              {error ? <FieldError>{error}</FieldError> : null}
-            </Field>
-            <Field className="min-w-48">
-              <FieldLabel htmlFor="label">Name (optional)</FieldLabel>
-              <Input
-                id="label"
-                value={label}
-                onChange={(event) => setLabel(event.target.value)}
-                placeholder="Nubank"
-                disabled={!enabled}
-              />
-            </Field>
-            <Button type="submit" variant="outline" disabled={!enabled || !itemId.trim() || pending}>
-              Add
-            </Button>
-          </form>
-        </details>
-      </div>
+      <form onSubmit={onRegister} className="flex flex-wrap items-end gap-3">
+        <Field className="min-w-64 flex-1">
+          <FieldLabel htmlFor="itemId">Item ID</FieldLabel>
+          <Input
+            id="itemId"
+            value={itemId}
+            onChange={(event) => setItemId(event.target.value)}
+            placeholder="00000000-0000-0000-0000-000000000000"
+            autoComplete="off"
+            disabled={!enabled}
+          />
+          {error ? <FieldError>{error}</FieldError> : null}
+        </Field>
+        <Field className="min-w-48">
+          <FieldLabel htmlFor="label">Name (optional)</FieldLabel>
+          <Input
+            id="label"
+            value={label}
+            onChange={(event) => setLabel(event.target.value)}
+            placeholder="Nubank"
+            disabled={!enabled}
+          />
+        </Field>
+        <Button type="submit" disabled={!enabled || !itemId.trim() || pending}>
+          Add connection
+        </Button>
+      </form>
 
       {connections.length === 0 ? (
         <p className="text-muted-foreground text-sm">
-          No connections yet. Connect a bank above to start.
+          No connections yet. Paste an Item ID above to start reading a bank.
         </p>
       ) : null}
 
@@ -203,22 +186,6 @@ export function ConnectionsPanel({
               ) : null}
             </div>
             <div className="flex gap-2">
-              {/* Reconnecting is the only way out of LOGIN_ERROR, a changed
-                  password or an expired consent: the widget re-authenticates the
-                  same Item instead of creating a second one, so the account
-                  links and the imported history stay attached. */}
-              {connection.consentExpired ||
-              connection.lastSyncStatus === "error" ||
-              connection.status === "LOGIN_ERROR" ||
-              connection.status === "WAITING_USER_INPUT" ? (
-                <ConnectButton
-                  enabled={enabled}
-                  connectionId={connection.id}
-                  label="Reconnect"
-                  variant="default"
-                  size="sm"
-                />
-              ) : null}
               <Button
                 variant="outline"
                 size="sm"

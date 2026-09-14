@@ -173,15 +173,6 @@ export function parseAuthResponse(payload: unknown): { apiKey: string } {
   return { apiKey: requiredString(root, "apiKey", "auth") };
 }
 
-/**
- * The widget credential. It is short-lived (30 minutes) and scoped: without an
- * `itemId` it can only create a new connection, never reach an existing one.
- */
-export function parseConnectToken(payload: unknown): { accessToken: string } {
-  const root = asObject(payload, "connect_token");
-  return { accessToken: requiredString(root, "accessToken", "connect_token") };
-}
-
 export function parseItem(payload: unknown): PluggyItem {
   const root = asObject(payload, "item");
   const connector = optionalObject(root, "connector");

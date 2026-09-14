@@ -83,8 +83,8 @@ export default async function SettingsPage() {
                 Open Finance
               </CardTitle>
               <CardDescription>
-                Connect a bank and read its balances, transactions and card bills
-                automatically. Read-only.
+                Read balances, transactions and card bills from banks you connected at
+                meu.pluggy.ai. Read-only.
               </CardDescription>
             </CardHeader>
             <CardContent>

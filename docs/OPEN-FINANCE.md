@@ -1,25 +1,23 @@
 # Open Finance (Pluggy)
 
-Ingestão **somente leitura** de contas, cartões, transações e faturas. A conexão com o
-banco é feita dentro do próprio Hermes, pelo widget da Pluggy.
+Ingestão **somente leitura** de contas, cartões, transações e faturas, a partir das
+conexões que você já criou no [meu.pluggy.ai](https://meu.pluggy.ai).
 
 Isto implementa o que a PRD reservou em §50 (`OpenFinanceProvider`), §51 (*adicionar Open
 Finance não pode exigir alterações no Forecast Engine*) e §9.19 (`ImportSource = OPEN_FINANCE`).
 
 ## O que o Hermes faz e o que não faz
 
-**Não faz:** ver, guardar ou transmitir sua senha de banco; iniciar pagamento; expor
-webhook. A autenticação acontece dentro do iframe da Pluggy, em `connect.pluggy.ai` — o
-Hermes só recebe o `itemId` no fim.
+**Não faz:** criar, atualizar ou apagar conexão bancária; pedir consentimento; guardar
+credencial de banco; iniciar pagamento; expor webhook. Nenhum método do cliente HTTP
+escreve na Pluggy — a leitura é a única operação que existe no código.
 
-**Faz:** abrir o widget, adotar o Item criado, criar ou vincular contas, gravar transações
-no ledger, registrar saldos com a data de observação do provedor, e transformar faturas
+**Faz:** ler os Items que você registrou, criar ou vincular contas, gravar transações no
+ledger, registrar saldos com a data de observação do provedor, e transformar faturas
 fechadas em ciclos confirmados.
 
-Senha trocada, MFA ou consentimento expirado se resolvem no botão **Reconnect**, que
-reabre o widget em modo de atualização **sobre o mesmo Item** — os vínculos de conta e o
-histórico importado continuam presos a ele. Criar uma conexão nova no lugar duplicaria
-tudo.
+Todo remédio de conexão (senha trocada, MFA, consentimento expirado) acontece no
+meu.pluggy.ai. A tela de configurações diz isso quando o Item está travado.
 
 ## Configuração
 
@@ -40,35 +38,12 @@ PLUGGY_CLIENT_SECRET=...
 docker compose up -d --build web
 ```
 
-5. Em **Settings → Open Finance**, clique em **Connect a bank**.
+5. Em **Settings → Open Finance**, cole o **Item ID** de cada conexão. No dashboard da
+   Pluggy ele sai no menu de três pontos, em *Copiar Item ID*.
 
-As credenciais são do *deployment*, não de um usuário: não há token por usuário e nenhuma
-coluna criptografada de segredo.
-
-### Bancos conectados antes desta tela existir
-
-Há um campo secundário para colar um **Item ID** à mão. Ele existe porque o
-`GET /v2/items` da Pluggy é opt-in e vem desabilitado, então Items criados fora daqui
-(no meu.pluggy.ai, por exemplo) não podem ser descobertos — só adotados pelo id.
-
-## Como a conexão é criada
-
-1. O navegador pede um **connect token** a `POST /api/open-finance/connect-token`. O token
-   é criado no servidor porque precisa da API key do deployment, que nunca vai ao browser.
-   Dura 30 minutos.
-2. Sem `itemId`, o token só serve para **criar** conexão. Com `itemId` — o caso do
-   *Reconnect* — ele autoriza o widget a mexer naquele Item, e por isso a posse da conexão
-   é conferida **antes** de emitir o token: entregar um token para o Item de outro usuário
-   seria um buraco que nenhuma checagem posterior fecharia.
-3. O widget abre, o usuário autentica no banco, e devolve o `itemId` no `onSuccess`.
-4. `adoptConnection` grava a conexão e dispara o primeiro sync na hora — uma conexão que
-   aparece vazia é indistinguível, para quem está olhando, de uma que falhou.
-
-O widget é carregado de `cdn.pluggy.ai` e abre um iframe em `connect.pluggy.ai`. Isso exige
-afrouxar a CSP, o que é feito **apenas nessa rota** (`apps/web/next.config.ts`): a tela de
-transações não tem por que aceitar script de terceiro, e uma CSP relaxada no app inteiro
-para servir uma tela de configuração deixa de ser uma CSP. A versão do widget é fixada, não
-flutuante — versão que se move é fronteira de confiança que se move.
+O `GET /v2/items` da Pluggy é opt-in e vem desabilitado por padrão, por isso os Item IDs
+são colados à mão em vez de descobertos. As credenciais são do *deployment*, não de um
+usuário: não há token por usuário e nenhuma coluna criptografada de segredo.
 
 ## Como o sync funciona
 

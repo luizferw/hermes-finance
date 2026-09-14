@@ -45,11 +45,10 @@ const envSchema = z.object({
   KOSH_MCP_AUTH_SECRET: z.string().optional(),
 
   // ── Open Finance (Pluggy) ───────────────────────────────────────────────
-  // Read-only ingestion of accounts, cards, transactions and bills. Bank
-  // connections are made through Pluggy's widget, which authenticates the user
-  // against their institution directly — no bank credential ever reaches this
-  // process. These API credentials belong to the deployment, not to a user, so
-  // they live here rather than in the database.
+  // Read-only ingestion of accounts, cards, transactions and bills. Hermes
+  // never creates or updates a connection: the user does that at meu.pluggy.ai
+  // and pastes the item id into settings. Credentials belong to the deployment,
+  // not to a user, so they live here rather than in the database.
   PLUGGY_ENABLED: z
     .enum(["true", "false"])
     .default("false")

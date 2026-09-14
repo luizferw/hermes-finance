@@ -6,15 +6,10 @@ import { requireUser } from "@/lib/session";
 import { ApiError } from "@/modules/shared/api";
 import { assertAccountsOwned } from "@/modules/shared/ownership";
 import { logAudit } from "@/modules/shared/audit";
-import { getPluggyClient } from "./provider";
 import {
-  adoptConnectionSchema,
-  connectTokenSchema,
   registerConnectionSchema,
   updateAccountLinkSchema,
   updateConnectionSchema,
-  type AdoptConnectionInput,
-  type ConnectTokenInput,
   type RegisterConnectionInput,
   type UpdateAccountLinkInput,
   type UpdateConnectionInput,
@@ -25,82 +20,6 @@ function revalidateOpenFinance(): void {
   revalidatePath("/settings/open-finance");
   revalidatePath("/accounts");
   revalidatePath("/overview");
-}
-
-/**
- * Mint a connect token for the widget.
- *
- * Ownership is checked before the token is minted, not after: a token carrying
- * an `itemId` authorizes the widget to reach that Item, so handing one out for a
- * connection the session user does not own would be a cross-tenant hole that no
- * later check could close.
- */
-export async function createConnectTokenCore(userId: string, input: ConnectTokenInput) {
-  const data = connectTokenSchema.parse(input);
-  const client = getPluggyClient();
-  if (!client) return null;
-
-  let itemId: string | undefined;
-  if (data.connectionId) {
-    const connection = await db.query.openFinanceConnections.findFirst({
-      where: and(
-        eq(openFinanceConnections.id, data.connectionId),
-        eq(openFinanceConnections.userId, userId),
-      ),
-    });
-    if (!connection) throw new ApiError(404, "not_found", "Connection not found.");
-    itemId = connection.itemId;
-  }
-
-  const accessToken = await client.createConnectToken({ itemId, clientUserId: userId });
-  return { accessToken, itemId: itemId ?? null };
-}
-
-/**
- * Take ownership of an Item the user just created in the widget.
- *
- * The widget reports the Item id on success and this is where it becomes ours.
- * An Item that is already registered is not an error: `avoidDuplicates` makes
- * Pluggy hand back the existing connection when the same bank is connected
- * twice, and a reconnection returns the very Item being repaired.
- */
-export async function adoptConnectionCore(userId: string, input: AdoptConnectionInput) {
-  const data = adoptConnectionSchema.parse(input);
-
-  const existing = await db.query.openFinanceConnections.findFirst({
-    where: and(
-      eq(openFinanceConnections.userId, userId),
-      eq(openFinanceConnections.itemId, data.itemId),
-    ),
-  });
-  if (existing) return existing;
-
-  const [connection] = await db
-    .insert(openFinanceConnections)
-    .values({ userId, itemId: data.itemId, label: data.label ?? null })
-    .returning();
-
-  await logAudit({
-    userId,
-    action: "open_finance.connection_created",
-    entityType: "open_finance_connection",
-    entityId: connection!.id,
-  });
-  return connection!;
-}
-
-/**
- * Called by the widget's success handler: adopt the connection and pull it in.
- *
- * The first sync runs immediately because a connection that shows up empty is
- * indistinguishable, to the user, from one that failed.
- */
-export async function adoptConnection(input: AdoptConnectionInput) {
-  const user = await requireUser();
-  const connection = await adoptConnectionCore(user.id, input);
-  const summary = await syncConnection(user.id, connection.id, { trigger: "manual" });
-  revalidateOpenFinance();
-  return { connection, summary };
 }
 
 /**
