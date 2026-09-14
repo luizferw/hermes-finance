@@ -167,6 +167,31 @@ No banco, `PENDING` é autorização que pode nunca liquidar: fica fora do saldo
 partiria o cartão ao meio, já que `deriveLedgerCycles` conta linhas de cartão sem filtrar
 status enquanto o teto de dívida vem do saldo, que filtra.
 
+### Categorias
+
+O sync aplica a categoria que a própria Pluggy atribuiu, traduzida para os mesmos nomes
+que o Meu Pluggy mostra (`packages/open-finance/src/categories.ts`). Um vocabulário só nas
+duas telas, e a cauda longa de estabelecimentos que aparecem uma ou duas vezes fica
+categorizada — nenhuma regra por descrição alcança isso sem virar uma regra por
+estabelecimento.
+
+É um ponto de partida, não autoridade: as regras rodam **depois** do sync e sobrescrevem.
+É assim que `AMAZON BR` acaba em *Compras online* em vez de *Livraria*, que é onde a
+Pluggy coloca.
+
+Três recusas deliberadas:
+
+- **Transferência nunca recebe categoria** (R5). PIX entre contas próprias, pagamento de
+  fatura e movimentação de investimento ficam sem categoria de propósito; dar categoria a
+  elas inflaria todo relatório de gastos com dinheiro que só mudou de lugar.
+- **Categoria do provedor sem tradução** não é chutada: fica sem categoria e o nome cru vai
+  para `stats.unmappedCategories` do run, para você decidir e preencher a tabela.
+- **Nome traduzido sem categoria correspondente** no seu cadastro também não é criado
+  sozinho; vai para `stats.missingCategories`.
+
+Numa releitura de janela, `category_id` **não** é atualizado — senão cada sync desfaria a
+categoria que uma regra ou você definiram depois.
+
 ## Operação
 
 ```bash

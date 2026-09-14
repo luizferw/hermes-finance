@@ -57,6 +57,10 @@ export interface OpenFinanceSyncStats {
   cardPaymentsPaired?: number;
   /** Opening balances re-solved so an auto-created account lands on the bank's number. */
   openingBalanceCorrections?: { accountId: string; correctionMinor: number }[];
+  /** Provider categories this build has no Portuguese name for — a gap worth filling. */
+  unmappedCategories?: string[];
+  /** Mapped names this user has no category row for, so nothing was assigned. */
+  missingCategories?: string[];
 }
 
 /**

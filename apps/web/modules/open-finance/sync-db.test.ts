@@ -4,6 +4,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import {
   accounts,
   balanceSnapshots,
+  categories,
   creditCardBillingCycles,
   creditCardPurchases,
   creditCards,
@@ -12,6 +13,7 @@ import {
   installments,
   openFinanceAccountLinks,
   openFinanceConnections,
+  openFinanceSyncRuns,
   transactionMetadata,
   transactions,
   users,
@@ -816,5 +818,91 @@ describe("the opening balance of an auto-created account", () => {
 
     const account = await db.query.accounts.findFirst({ where: eq(accounts.id, own!.id) });
     expect(account!.openingBalanceMinor).toBe(100000);
+  });
+});
+
+describe("the category the provider suggests", () => {
+  async function categoryOf(externalId: string) {
+    const [row] = await db
+      .select({ name: categories.name })
+      .from(transactions)
+      .leftJoin(categories, eq(categories.id, transactions.categoryId))
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, externalId)));
+    return row?.name ?? null;
+  }
+
+  it("is applied when the user has a category by that name", async () => {
+    const connectionId = await freshConnection();
+    await db.insert(categories).values({ userId, name: "Supermercado" }).onConflictDoNothing();
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount()],
+        transactions: { "prov-bank": [tx({ id: "a", category: "Groceries" })] },
+      }),
+      now: NOW,
+    });
+
+    expect(await categoryOf("a")).toBe("Supermercado");
+  });
+
+  it("never categorizes a transfer", async () => {
+    const connectionId = await freshConnection();
+    await db.insert(categories).values({ userId, name: "Supermercado" }).onConflictDoNothing();
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount()],
+        transactions: {
+          "prov-bank": [tx({ id: "a", amount: -100, category: "Same person transfer" })],
+        },
+      }),
+      now: NOW,
+    });
+
+    // R5: categorizing it would inflate spending with money that only moved.
+    expect(await categoryOf("a")).toBeNull();
+  });
+
+  it("reports a provider category it has no name for instead of guessing", async () => {
+    const connectionId = await freshConnection();
+    const summary = await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount()],
+        transactions: { "prov-bank": [tx({ id: "a", category: "Brand New Pluggy Category" })] },
+      }),
+      now: NOW,
+    });
+
+    expect(await categoryOf("a")).toBeNull();
+    const [run] = await db
+      .select({ stats: openFinanceSyncRuns.stats })
+      .from(openFinanceSyncRuns)
+      .where(eq(openFinanceSyncRuns.id, summary.runId!));
+    expect(run!.stats.unmappedCategories).toContain("Brand New Pluggy Category");
+  });
+
+  it("does not undo a category set after the import when the window is re-read", async () => {
+    const connectionId = await freshConnection();
+    await db.insert(categories).values({ userId, name: "Supermercado" }).onConflictDoNothing();
+    const [other] = await db
+      .insert(categories).values({ userId, name: "Categoria escolhida" })
+      .onConflictDoNothing().returning({ id: categories.id });
+
+    const payload = {
+      accounts: [bankAccount()],
+      transactions: { "prov-bank": [tx({ id: "a", category: "Groceries" })] },
+    };
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(payload), now: NOW });
+
+    // Stand in for a rule, or for the user picking a category by hand.
+    await db.update(transactions).set({ categoryId: other!.id })
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "a")));
+
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(payload), now: NOW });
+    expect(await categoryOf("a")).toBe("Categoria escolhida");
   });
 });

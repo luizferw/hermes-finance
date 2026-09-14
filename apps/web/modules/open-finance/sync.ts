@@ -3,6 +3,7 @@ import { and, between, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "
 import {
   accounts,
   balanceSnapshots,
+  categories,
   db,
   openFinanceAccountLinks,
   openFinanceCardPayments,
@@ -18,6 +19,7 @@ import {
   accountKindOf,
   brazilianCalendarDay,
   matchCardPayments,
+  providerCategoryName,
   normalizeAccount,
   normalizeBill,
   normalizeTransaction,
@@ -446,6 +448,15 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
     rows.push(normalized);
   }
 
+  // Loaded once: the provider's category is a name here, and resolving it per
+  // row would be a query per transaction.
+  const categoryIds = new Map(
+    (await db
+      .select({ id: categories.id, name: categories.name })
+      .from(categories)
+      .where(eq(categories.userId, args.userId))).map((row) => [row.name, row.id]),
+  );
+
   await db.transaction(async (trx) => {
     const existing = await loadExistingWindow(trx, args.accountId, rows);
     const knownExternalIds = new Set(
@@ -500,6 +511,7 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
           externalId: row.externalId,
           importHash,
           suspectedDuplicateOfId,
+          categoryId: resolveCategoryId(row, categoryIds, args.stats),
         })
         .onConflictDoUpdate({
           target: [transactions.accountId, transactions.externalId],
@@ -511,6 +523,8 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
             description: row.description,
             merchant: row.merchant,
             updatedAt: new Date(),
+            // categoryId is deliberately absent. Re-reading a window must never
+            // undo a category a rule or a person set afterwards.
           },
           // Never overwrite work a human has done. Once a row has been reviewed
           // or posted, the provider no longer gets to rewrite its category,
@@ -796,6 +810,37 @@ async function loadExistingWindow(
         between(transactions.date, from, to),
       ),
     );
+}
+
+/**
+ * The category the provider suggests, if this user has one by that name.
+ *
+ * A starting point, not an authority: rules run after the sync and overwrite it.
+ * A transfer is never categorized (R5), and a provider category this
+ * installation has no name for is recorded as a gap rather than forced into
+ * something approximate.
+ */
+function resolveCategoryId(
+  row: NormalizedTransaction,
+  categoryIds: ReadonlyMap<string, string>,
+  stats: OpenFinanceSyncStats,
+): string | null {
+  const match = providerCategoryName(row.providerCategory);
+  if (match.kind === "transfer") return null;
+  if (match.kind === "unmapped") {
+    if (row.providerCategory) {
+      stats.unmappedCategories = [
+        ...new Set([...(stats.unmappedCategories ?? []), row.providerCategory]),
+      ];
+    }
+    return null;
+  }
+  const id = categoryIds.get(match.name);
+  if (!id) {
+    stats.missingCategories = [...new Set([...(stats.missingCategories ?? []), match.name])];
+    return null;
+  }
+  return id;
 }
 
 /**
