@@ -5,6 +5,7 @@
 
 const MINOR_UNIT_EXPONENTS: Record<string, number> = {
   INR: 2,
+  BRL: 2,
   USD: 2,
   EUR: 2,
   GBP: 2,

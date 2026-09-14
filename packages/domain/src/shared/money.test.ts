@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatMoney, majorToMinor, minorToMajor, parseAmountToMinor } from "./money";
+import {
+  formatMoney,
+  majorToMinor,
+  minorToMajor,
+  minorUnitExponent,
+  parseAmountToMinor,
+} from "./money";
 
 describe("parseAmountToMinor", () => {
   it("parses plain decimals", () => {
@@ -80,5 +86,22 @@ describe("major/minor conversion", () => {
   });
   it("rounds half-up at the minor unit", () => {
     expect(majorToMinor(10.005, "INR")).toBe(1001);
+  });
+});
+
+describe("minorUnitExponent", () => {
+  it("knows BRL is a two-decimal currency", () => {
+    // BRL used to reach the correct answer through the default. Pinning it here
+    // means a change to that default cannot silently move every Brazilian
+    // amount by a factor of ten.
+    expect(minorUnitExponent("BRL")).toBe(2);
+    expect(minorUnitExponent("brl")).toBe(2);
+    expect(majorToMinor(10000.76, "BRL")).toBe(1000076);
+  });
+
+  it("still varies by currency", () => {
+    expect(minorUnitExponent("JPY")).toBe(0);
+    expect(minorUnitExponent("KWD")).toBe(3);
+    expect(minorUnitExponent("ZZZ")).toBe(2);
   });
 });
