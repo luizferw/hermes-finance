@@ -158,9 +158,15 @@ inside the `xCore` functions.
 ### Agent / MCP surface
 
 `modules/agent/registry.ts` holds `readTools` and `writeTools`, each Zod-typed with a `kind` and a
-`risk`. `MCP_TOOLS = readTools` — **the external MCP endpoint exposes read tools only.** Scopes are
-checked in three places: tool filtering (`agent.ts`), execution (`execute.ts`), and token validation
-(`app/api/mcp/route.ts`).
+`risk`. `MCP_TOOLS = TOOLS` — **the external MCP endpoint exposes both**, and what actually stops a
+write is the caller's scopes, checked in three places: tool filtering (`agent.ts`), execution
+(`execute.ts`), and token validation (`app/api/mcp/route.ts`). A token minted with only
+`finance:read` is read-only; one minted with `transactions:write` writes for real. The `409
+read_only` below gates `/api/agent/prepare` and `/confirm`, **not** this endpoint.
+
+`KOSH_MCP_ALLOW_ANONYMOUS=true` serves `/api/mcp` with no bearer at all, resolving to the single
+account on the instance and granting every scope. It is for a personal deployment whose port is not
+published beyond the machine; check what the reverse proxy listens on before trusting that.
 
 The proposal/confirm flow (HMAC-signed `ActionProposal` + idempotency key) is fully built but
 deliberately switched off: `/api/agent/prepare` and `/api/agent/confirm` always return `409

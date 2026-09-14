@@ -15,6 +15,7 @@ beforeEach(() => {
   vi.stubEnv("KOSH_ENCRYPTION_KEY", strongKey);
   vi.stubEnv("KOSH_AI_ENABLED", "false");
   vi.stubEnv("KOSH_MCP_ENABLED", "false");
+  vi.stubEnv("KOSH_MCP_ALLOW_ANONYMOUS", "false");
   vi.stubEnv("PLUGGY_ENABLED", "false");
   vi.stubEnv("PLUGGY_CLIENT_ID", "");
   vi.stubEnv("PLUGGY_CLIENT_SECRET", "");
@@ -87,5 +88,18 @@ describe("Open Finance configuration", () => {
     expect(env().PLUGGY_ENABLED).toBe(false);
     expect(env().PLUGGY_TIMEZONE_OFFSET_MINUTES).toBe(-180);
     expect(env().PLUGGY_BACKFILL_DAYS).toBe(365);
+  });
+});
+
+describe("anonymous MCP", () => {
+  it("is off unless asked for by name", async () => {
+    const { env } = await loadEnv();
+    expect(env().KOSH_MCP_ALLOW_ANONYMOUS).toBe(false);
+  });
+
+  it("can be turned on", async () => {
+    vi.stubEnv("KOSH_MCP_ALLOW_ANONYMOUS", "true");
+    const { env } = await loadEnv();
+    expect(env().KOSH_MCP_ALLOW_ANONYMOUS).toBe(true);
   });
 });

@@ -1,10 +1,12 @@
 import { createMcpHandler, withMcpAuth } from "mcp-handler";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { z } from "zod";
+import { db, users } from "@kosh/db";
 import { env } from "@/lib/env";
 import { getUserSettings } from "@/modules/settings/queries";
 import { MCP_TOOLS } from "@/modules/agent/registry";
 import { verifyMcpToken } from "@/modules/agent/mcp-tokens";
+import { MCP_SCOPES } from "@/modules/agent/types";
 import type { ReadToolResult, Scope, ToolContext, WriteTool } from "@/modules/agent/types";
 import { logAudit } from "@/modules/shared/audit";
 
@@ -97,10 +99,34 @@ const baseHandler = createMcpHandler(
   { basePath: "/api" },
 );
 
+/**
+ * Who a request with no bearer token belongs to, when KOSH_MCP_ALLOW_ANONYMOUS
+ * is on.
+ *
+ * Only ever one answer: the single account on this instance. With none, or with
+ * more than one, there is no non-arbitrary choice of whose money to hand over,
+ * so the request is refused instead of guessed at.
+ */
+async function anonymousLocalAuth(): Promise<AuthInfo | undefined> {
+  const rows = await db.select({ id: users.id }).from(users).limit(2);
+  if (rows.length !== 1) return undefined;
+  return {
+    token: "anonymous",
+    clientId: "mcp-local",
+    scopes: [...MCP_SCOPES],
+    extra: { userId: rows[0]!.id },
+  };
+}
+
 const authed = withMcpAuth(
   baseHandler,
   async (_req, bearer): Promise<AuthInfo | undefined> => {
-    if (!bearer) return undefined;
+    // A bearer that was sent and is wrong is always refused. The anonymous path
+    // is for a request that carries no credential at all, never a fallback that
+    // quietly rescues a revoked or mistyped token.
+    if (!bearer) {
+      return env().KOSH_MCP_ALLOW_ANONYMOUS ? anonymousLocalAuth() : undefined;
+    }
     const resolved = await verifyMcpToken(bearer);
     if (!resolved) return undefined;
     return {

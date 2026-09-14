@@ -195,6 +195,12 @@ Três recusas deliberadas:
 Numa releitura de janela, `category_id` **não** é atualizado — senão cada sync desfaria a
 categoria que uma regra ou você definiram depois.
 
+## MCP
+
+O endpoint `/api/mcp` expõe `get_open_finance_status`, que relata conexão, status do item,
+idade do dado e o resultado do último sync — para o modelo responder "por que meu saldo está
+desatualizado?" com o estado real em vez de um chute (R6, R8).
+
 ## Operação
 
 ```bash

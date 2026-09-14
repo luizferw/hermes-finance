@@ -40,6 +40,18 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
   KOSH_MCP_BASE_URL: z.string().optional(),
+  /**
+   * Serve /api/mcp without a bearer token.
+   *
+   * For a single-user instance whose port is not published beyond the machine.
+   * It is a real hole and not a convenience toggle: the endpoint exposes every
+   * read tool and every write tool, so anything that can reach the port reads
+   * the whole ledger and can write to it. Off unless asked for, by name.
+   */
+  KOSH_MCP_ALLOW_ANONYMOUS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   /** Secret for signing confirmation payloads + (optionally) MCP. Falls back to
    * BETTER_AUTH_SECRET when unset. */
   KOSH_MCP_AUTH_SECRET: z.string().optional(),

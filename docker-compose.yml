@@ -53,6 +53,7 @@ services:
       KOSH_MCP_ENABLED: ${KOSH_MCP_ENABLED:-false}
       KOSH_MCP_BASE_URL: ${KOSH_MCP_BASE_URL:-}
       KOSH_MCP_AUTH_SECRET: ${KOSH_MCP_AUTH_SECRET:-}
+      KOSH_MCP_ALLOW_ANONYMOUS: ${KOSH_MCP_ALLOW_ANONYMOUS:-false}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       # Open Finance. Without these the container starts fine and the feature
