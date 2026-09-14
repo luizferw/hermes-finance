@@ -14,17 +14,26 @@ describe("providerCategoryName", () => {
     });
   });
 
-  it("refuses to categorize a movement between the user's own accounts", () => {
-    // R5: a transfer is neither income nor expense, and categorizing one would
-    // inflate every spending report with money that only changed place.
+  it("labels a movement between the user's own accounts as one", () => {
+    // Still not spending (R5), but named rather than blank: left uncategorized
+    // it was the largest block in the breakdown and told the reader nothing.
     for (const transfer of [
       "Transfer - PIX",
       "Same person transfer",
       "Credit card payment",
       "Investments",
     ]) {
-      expect(providerCategoryName(transfer)).toEqual({ kind: "transfer" });
+      expect(providerCategoryName(transfer)).toEqual({
+        kind: "transfer",
+        name: "Transferências",
+      });
     }
+  });
+
+  it("keeps the movement distinguishable by kind, not by name", () => {
+    // A report that excludes transfers should not have to know the label.
+    expect(providerCategoryName("Transfer - PIX").kind).toBe("transfer");
+    expect(providerCategoryName("Groceries").kind).toBe("category");
   });
 
   it("separates a gap in the table from a deliberate refusal", () => {
@@ -44,8 +53,10 @@ describe("providerCategoryNames", () => {
     expect(names).toContain("Seguro de veículo");
   });
 
-  it("never lists a transfer", () => {
+  it("includes the transfer label, since it is a real category now", () => {
+    expect(providerCategoryNames()).toContain("Transferências");
+    // The provider's individual transfer flavours never become categories.
     expect(providerCategoryNames()).not.toContain("PIX");
-    expect(providerCategoryNames()).not.toContain("Transferências");
+    expect(providerCategoryNames()).not.toContain("Same person transfer");
   });
 });

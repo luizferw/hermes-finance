@@ -20,6 +20,7 @@ import {
   brazilianCalendarDay,
   matchCardPayments,
   providerCategoryName,
+  TRANSFER_CATEGORY_NAME,
   normalizeAccount,
   normalizeBill,
   normalizeTransaction,
@@ -816,9 +817,9 @@ async function loadExistingWindow(
  * The category the provider suggests, if this user has one by that name.
  *
  * A starting point, not an authority: rules run after the sync and overwrite it.
- * A transfer is never categorized (R5), and a provider category this
- * installation has no name for is recorded as a gap rather than forced into
- * something approximate.
+ * A movement between the user's own accounts gets the transfer label rather than
+ * a spending category, and a provider category this installation has no name for
+ * is recorded as a gap rather than forced into something approximate.
  */
 function resolveCategoryId(
   row: NormalizedTransaction,
@@ -826,7 +827,6 @@ function resolveCategoryId(
   stats: OpenFinanceSyncStats,
 ): string | null {
   const match = providerCategoryName(row.providerCategory);
-  if (match.kind === "transfer") return null;
   if (match.kind === "unmapped") {
     if (row.providerCategory) {
       stats.unmappedCategories = [
@@ -1014,6 +1014,12 @@ export async function pairCardPayments(
     })) satisfies CardPaymentLeg[],
   );
 
+  const [transferCategory] = await db
+    .select({ id: categories.id })
+    .from(categories)
+    .where(and(eq(categories.userId, userId), eq(categories.name, TRANSFER_CATEGORY_NAME)));
+  const transferCategoryId = transferCategory?.id ?? null;
+
   let matched = 0;
   let ambiguous = 0;
   const touchedAccountIds = new Set<string>();
@@ -1035,9 +1041,10 @@ export async function pairCardPayments(
         .set({
           type: "transfer",
           transferAccountId: decision.cardAccountId,
-          // A transfer between your own accounts is neither income nor expense,
-          // so whatever category a rule guessed is wrong by definition (R5).
-          categoryId: null,
+          // Labelled as a movement rather than left blank: whatever spending
+          // category a rule guessed is wrong by definition (R5), but blank told
+          // the reader nothing about what the row is.
+          categoryId: transferCategoryId,
         })
         .where(eq(transactions.id, decision.transactionId));
 

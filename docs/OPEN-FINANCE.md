@@ -181,9 +181,12 @@ Pluggy coloca.
 
 Três recusas deliberadas:
 
-- **Transferência nunca recebe categoria** (R5). PIX entre contas próprias, pagamento de
-  fatura e movimentação de investimento ficam sem categoria de propósito; dar categoria a
-  elas inflaria todo relatório de gastos com dinheiro que só mudou de lugar.
+- **Transferência recebe a categoria «Transferências»**, e só ela. PIX entre contas
+  próprias, pagamento de fatura e movimentação de investimento não são gasto (R5), mas
+  deixá-las em branco fazia delas o maior bloco anônimo do relatório — escondia, não
+  excluía. O conserto aritmético de verdade é virarem `type='transfer'`, que é o que o
+  pareamento de fatura faz; o rótulo é sobre legibilidade. Quem precisa excluí-las de um
+  total distingue por `kind`, sem precisar saber o nome.
 - **Categoria do provedor sem tradução** não é chutada: fica sem categoria e o nome cru vai
   para `stats.unmappedCategories` do run, para você decidir e preencher a tabela.
 - **Nome traduzido sem categoria correspondente** no seu cadastro também não é criado

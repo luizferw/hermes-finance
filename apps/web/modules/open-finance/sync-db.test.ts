@@ -847,9 +847,9 @@ describe("the category the provider suggests", () => {
     expect(await categoryOf("a")).toBe("Supermercado");
   });
 
-  it("never categorizes a transfer", async () => {
+  it("labels a movement between own accounts instead of leaving it blank", async () => {
     const connectionId = await freshConnection();
-    await db.insert(categories).values({ userId, name: "Supermercado" }).onConflictDoNothing();
+    await db.insert(categories).values({ userId, name: "Transferências" }).onConflictDoNothing();
 
     await syncConnection(userId, connectionId, {
       trigger: "manual",
@@ -862,8 +862,35 @@ describe("the category the provider suggests", () => {
       now: NOW,
     });
 
-    // R5: categorizing it would inflate spending with money that only moved.
-    expect(await categoryOf("a")).toBeNull();
+    // Still not spending (R5) — but named, so it stops being the anonymous
+    // block that dominated the breakdown.
+    expect(await categoryOf("a")).toBe("Transferências");
+  });
+
+  it("gives a paired card payment the same label rather than none", async () => {
+    const connectionId = await freshConnection();
+    await db.insert(categories).values({ userId, name: "Transferências" }).onConflictDoNothing();
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: {
+          "prov-bank": [tx({ id: "a", amount: -500, description: "PAGAMENTO DE FATURA CARTAO",
+            date: "2026-03-07T00:00:00.000Z" })],
+          "prov-card": [tx({ id: "c2", accountId: "prov-card", amount: -500,
+            date: "2026-03-07T00:00:00.000Z" })],
+        },
+      }),
+      now: NOW,
+    });
+
+    const [row] = await db
+      .select({ type: transactions.type })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "a")));
+    expect(row!.type).toBe("transfer");
+    expect(await categoryOf("a")).toBe("Transferências");
   });
 
   it("reports a provider category it has no name for instead of guessing", async () => {

@@ -11,11 +11,12 @@
  * the sync and overrides it, which is how `AMAZON BR` ends up in "Compras
  * online" rather than "Livraria", where the provider puts it.
  *
- * Transfer categories are deliberately absent. Money moving between your own
- * accounts is neither income nor expense (PRD R5), so a PIX between your own
- * accounts, a card bill payment or an investment move must stay uncategorized —
- * giving them a category would inflate every spending report with money that
- * only changed place.
+ * Transfers get a category of their own rather than none. They are still not
+ * spending — money moving between your own accounts is neither income nor
+ * expense (PRD R5) — but leaving them blank made the largest single block in the
+ * breakdown anonymous, which hides them rather than excluding them. The honest
+ * fix for the double count is turning them into `transfer` rows, which the card
+ * payment pairing does; labelling them is about legibility, not arithmetic.
  */
 const PROVIDER_CATEGORY_NAMES: Record<string, string> = {
   // Alimentação
@@ -131,16 +132,22 @@ const PROVIDER_CATEGORY_NAMES: Record<string, string> = {
 
   // Receitas
   "Proceeds interests and dividends": "Rendimentos",
+  "Fixed income": "Rendimentos",
+  Taxes: "Imposto de renda",
   Salary: "Salário",
   Refunds: "Reembolsos",
 };
 
 /**
- * Provider categories that must never become a Hermes category.
+ * The one category every movement between the user's own accounts lands in.
  *
- * Listed rather than merely omitted so an unmapped category can be reported as
- * a gap worth filling, while these are reported as nothing at all.
+ * Kept separate from the table above so a caller that needs to exclude transfers
+ * from a spending figure can still tell them apart by `kind`, without having to
+ * know the name.
  */
+export const TRANSFER_CATEGORY_NAME = "Transferências";
+
+/** Provider categories that are movements, not spending. */
 const TRANSFER_CATEGORIES = new Set([
   "Transfer - PIX",
   "Transfer - Bank Slip",
@@ -154,26 +161,29 @@ const TRANSFER_CATEGORIES = new Set([
 
 /** Every Portuguese category name this mapping can produce. */
 export function providerCategoryNames(): string[] {
-  return [...new Set(Object.values(PROVIDER_CATEGORY_NAMES))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  return [...new Set([...Object.values(PROVIDER_CATEGORY_NAMES), TRANSFER_CATEGORY_NAME])]
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
 }
 
 export type ProviderCategoryMatch =
   | { kind: "category"; name: string }
-  | { kind: "transfer" }
+  | { kind: "transfer"; name: string }
   | { kind: "unmapped" };
 
 /**
  * What the provider's category means here.
  *
  * `unmapped` is a distinct answer from `transfer`: the first is a gap in this
- * table, worth surfacing so it can be filled, and the second is a deliberate
- * refusal to categorize.
+ * table, worth surfacing so it can be filled; the second is a movement, which is
+ * labelled as one and never counted as spending.
  */
 export function providerCategoryName(
   providerCategory: string | null | undefined,
 ): ProviderCategoryMatch {
   if (!providerCategory) return { kind: "unmapped" };
-  if (TRANSFER_CATEGORIES.has(providerCategory)) return { kind: "transfer" };
+  if (TRANSFER_CATEGORIES.has(providerCategory)) {
+    return { kind: "transfer", name: TRANSFER_CATEGORY_NAME };
+  }
   const name = PROVIDER_CATEGORY_NAMES[providerCategory];
   return name ? { kind: "category", name } : { kind: "unmapped" };
 }
