@@ -4,45 +4,58 @@ import { cn } from "@/lib/utils";
 /**
  * Safe-to-spend as a calm status, not an alarm. The number leads, a one-line
  * read names the state in plain words, and the arithmetic is one tap away
- * (native <details>) so the figure is never a black box. Tone is carried by a
- * soft tint and the word — red is reserved for genuinely over, never for
- * "a bit tight".
+ * (native <details>) so the figure is never a black box.
  *
- * The breakdown mirrors exactly what `getSafeToSpend` computed — the lowest
- * projected balance ahead, minus the protected reserve — rather than a
- * separate "earned minus spent" narrative. Showing any other equation here
- * would make the reveal lie about how the headline number was actually
- * derived, and the two would drift the moment they disagreed.
+ * The figure is route-dependent and says so. Cash spent today has to survive
+ * every dip between now and the horizon; the same amount on a card leaves on
+ * that card's due date and only has to survive what comes after it. Printing the
+ * amount without naming the route and the date would be printing a number the
+ * reader cannot act on.
+ *
+ * The breakdown mirrors exactly what `getSafeToSpend` computed rather than a
+ * separate "earned minus spent" narrative, which would drift from the headline
+ * the moment the two disagreed.
  */
+export interface SpendingRoute {
+  label: string;
+  settlementDate: string;
+  amountMinor: number;
+}
+
 export function SafeToSpendCard({
   safeMinor,
   minimumBalanceMinor,
   minimumBalanceDate,
+  floorMinor,
   hardReserveMinor,
   hardReserveViolated,
+  bestRoute,
+  routes,
   currency,
 }: {
   safeMinor: number;
   minimumBalanceMinor: number;
   minimumBalanceDate: string;
+  floorMinor: number;
   hardReserveMinor: number;
   hardReserveViolated: boolean;
+  bestRoute: SpendingRoute;
+  routes: SpendingRoute[];
   currency: string;
 }) {
   const over = hardReserveViolated;
-  // How far the projected trough falls below the reserve — the deficit a
-  // violated reserve represents, shown instead of a negative safe-to-spend
-  // (which the engine never returns; it floors at 0).
-  const deficitMinor = Math.max(0, hardReserveMinor - minimumBalanceMinor);
   // "Tight" once less than ~15% of the reserve is left as headroom — only
   // meaningful when a reserve is actually configured.
   const tight = !over && hardReserveMinor > 0 && safeMinor < hardReserveMinor * 0.15;
 
   const tone = over ? "over" : tight ? "tight" : "clear";
   const read = {
-    over: "Projected to dip below your protected reserve — ease off where you can.",
+    // The reserve being broken no longer blanks the figure. The amount is still
+    // the answer to "what can I spend without being worse off than I am", which
+    // is the question worth answering when you are already under water.
+    over: `Already below your reserve — this is what you can spend on ${bestRoute.label} without going deeper.`,
     tight: "Running tight against your reserve. Worth slowing down on the extras.",
-    clear: "You're clear. This is yours to spend or save.",
+    clear: `Yours to spend. On ${bestRoute.label} it leaves on ${formatDate(bestRoute.settlementDate)}.`,
   }[tone];
   const accent = {
     over: "text-destructive",
@@ -59,8 +72,7 @@ export function SafeToSpendCard({
           accent,
         )}
       >
-        {formatMoney(over ? deficitMinor : safeMinor, currency)}
-        {over && <span className="ml-2 align-middle text-base font-normal text-destructive">short</span>}
+        {formatMoney(safeMinor, currency)}
       </p>
       <p className="mt-2 max-w-[40ch] text-sm text-muted-foreground">{read}</p>
 
@@ -77,9 +89,17 @@ export function SafeToSpendCard({
             value={formatMoney(minimumBalanceMinor, currency)}
           />
           {hardReserveMinor > 0 && (
-            <Row label="Protected reserve" value={`− ${formatMoney(hardReserveMinor, currency)}`} />
+            <Row label="Protected reserve" value={formatMoney(hardReserveMinor, currency)} />
           )}
-          <Row label="Safe to spend" value={formatMoney(safeMinor, currency)} strong />
+          <Row label="Floor this is measured to" value={formatMoney(floorMinor, currency)} />
+          {routes.map((route) => (
+            <Row
+              key={route.label}
+              label={`${route.label} · leaves ${formatDate(route.settlementDate)}`}
+              value={formatMoney(route.amountMinor, currency)}
+              strong={route.label === bestRoute.label}
+            />
+          ))}
         </dl>
       </details>
     </div>

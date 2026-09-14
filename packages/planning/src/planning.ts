@@ -42,6 +42,92 @@ export function calculateSafeToSpend(input: SafeToSpendInput): SafeToSpendResult
   };
 }
 
+export interface SpendingRoomInput {
+  forecastInput: BuildForecastInput;
+  hardReserveMinor: number;
+  /**
+   * The day the money actually leaves the account. Today for cash; for a card
+   * purchase, the due date of the statement the charge lands on — which is what
+   * makes this answer larger than the cash one, and later.
+   */
+  settlementDate: DateString;
+}
+
+export interface SpendingRoomResult {
+  /** How much may be spent today, settling on `settlementDate`. */
+  spendingRoomMinor: number;
+  settlementDate: DateString;
+  /** The level the trough must not fall below. See the note on the floor. */
+  floorMinor: number;
+  /** The forecast's trough as it stands, before spending anything. */
+  troughMinor: number;
+  troughDate: DateString;
+  /** The trough from the settlement date onward — the part a spend eats into. */
+  troughAfterSettlementMinor: number;
+  troughAfterSettlementDate: DateString;
+  /** True when the forecast is already under the hard reserve without spending. */
+  hardReserveViolated: boolean;
+  forecast: Forecast;
+}
+
+/**
+ * How much can be spent today without deepening the forecast's low point.
+ *
+ * `calculateSafeToSpend` answers the cash question: money gone today, so every
+ * day of the horizon is exposed to it. A card purchase is a different question —
+ * the cash leaves on the statement's due date, so the days before it are
+ * untouched and only the trough from that date onward constrains the amount.
+ * That is why a card can absorb a purchase that cash cannot.
+ *
+ * The floor is `min(hardReserve, trough)`, not the hard reserve. When the
+ * forecast already dips below the reserve, measuring against the reserve
+ * declares every amount a violation and the answer collapses to zero — true but
+ * useless, because it cannot distinguish a purchase that makes things worse from
+ * one that does not. Holding the existing trough as the floor answers the
+ * question actually being asked: how much can I spend without being worse off
+ * than I already am. Where the forecast is healthy the two coincide, and the
+ * reserve governs.
+ */
+export function calculateSpendingRoom(input: SpendingRoomInput): SpendingRoomResult {
+  assertMinorUnits(input.hardReserveMinor, "hardReserveMinor");
+  if (input.hardReserveMinor < 0) throw new Error("hardReserveMinor must not be negative");
+  assertValidDate(input.settlementDate, "settlementDate");
+
+  const forecast = buildForecast(input.forecastInput);
+  const days = forecast.days;
+
+  let troughAfter = Number.POSITIVE_INFINITY;
+  let troughAfterDate = input.settlementDate;
+  for (const day of days) {
+    if (day.date < input.settlementDate) continue;
+    if (day.closingBalanceMinor < troughAfter) {
+      troughAfter = day.closingBalanceMinor;
+      troughAfterDate = day.date;
+    }
+  }
+  // A settlement past the horizon is not constrained by anything we modelled,
+  // and claiming unlimited room would be a lie by omission. The horizon's own
+  // trough is the honest bound.
+  if (troughAfter === Number.POSITIVE_INFINITY) {
+    troughAfter = forecast.minimumBalanceMinor;
+    troughAfterDate = forecast.minimumBalanceDate;
+  }
+
+  const floorMinor = Math.min(input.hardReserveMinor, forecast.minimumBalanceMinor);
+
+  return {
+    spendingRoomMinor: Math.max(0, troughAfter - floorMinor),
+    settlementDate: input.settlementDate,
+    floorMinor,
+    troughMinor: forecast.minimumBalanceMinor,
+    troughDate: forecast.minimumBalanceDate,
+    troughAfterSettlementMinor: troughAfter,
+    troughAfterSettlementDate: troughAfterDate,
+    hardReserveViolated: forecast.minimumBalanceMinor < input.hardReserveMinor,
+    forecast,
+  };
+}
+
 /** Credit headroom for the card an option would be charged to. */
 export interface CardConstraint {
   cardId: string;

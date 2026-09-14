@@ -32,6 +32,7 @@ import {
 } from "@hermes-finance/forecast";
 import {
   calculateSafeToSpend,
+  calculateSpendingRoom,
   simulatePurchasePlan,
   type PlanItemOption,
   type PurchasePlanSimulation,
@@ -544,9 +545,101 @@ function safeToSpendFrom(forecast: Forecast, hardReserveMinor: number, position:
   };
 }
 
-export async function getSafeToSpend(userId: string, horizonDays = 30) {
-  const { forecast, position } = await buildUserForecastDetailed(userId, horizonDays);
-  return safeToSpendFrom(forecast, await getHardReserveMinor(userId), position);
+export interface SpendingRoomOption {
+  /** Null for cash, which settles today. */
+  cardId: string | null;
+  label: string;
+  /** The day a purchase made today actually leaves the account. */
+  settlementDate: string;
+  amountMinor: number;
+}
+
+export interface SpendingRoomView {
+  /** The headline: the most room any single route offers. */
+  safeToSpendMinor: number;
+  bestOption: SpendingRoomOption;
+  options: SpendingRoomOption[];
+  /** The forecast's low point today, and the floor the room is measured to. */
+  minimumBalanceMinor: number;
+  minimumBalanceDate: string;
+  floorMinor: number;
+  hardReserveViolated: boolean;
+  hardReserveMinor: number;
+  /** Everything the horizon expects to pay out, as a positive magnitude. */
+  committedMinor: number;
+  staleAccountNames: string[];
+  forecast: Forecast;
+  position: FinancePosition;
+}
+
+/**
+ * How much can be spent today, by the route that buys the most room.
+ *
+ * Cash leaves the account now, so it is constrained by the whole horizon —
+ * including a dip before payday that the money would have to survive. A card
+ * charge leaves on its statement's due date, so it is constrained only from that
+ * date onward. The difference is the point: it answers "what can I spend this
+ * month, knowing what next month looks like" rather than "what can I spend
+ * without touching the next dip".
+ *
+ * Every route is reported, not just the winner, because which card to reach for
+ * is the decision this number exists to inform.
+ */
+export async function getSafeToSpend(userId: string, horizonDays = 60): Promise<SpendingRoomView> {
+  const [{ forecast, position }, hardReserveMinor, cards] = await Promise.all([
+    buildUserForecastDetailed(userId, horizonDays),
+    getHardReserveMinor(userId),
+    listCreditCards(userId),
+  ]);
+
+  const asOf = forecast.asOf;
+  const forecastInput = {
+    asOf,
+    horizonEnd: forecast.horizonEnd,
+    balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: asOf }],
+    events: forecast.events,
+  };
+
+  const routes: { cardId: string | null; label: string; settlementDate: string }[] = [
+    { cardId: null, label: "À vista", settlementDate: asOf },
+    ...cards.map((card) => ({
+      cardId: card.id,
+      label: card.name,
+      // A purchase today lands on whichever statement is open today, and that
+      // statement's due date is when the cash actually goes.
+      settlementDate: nominalCycleFor(asOf, card.defaultClosingDay, card.defaultDueDay).dueAt,
+    })),
+  ];
+
+  let floorMinor = 0;
+  let hardReserveViolated = false;
+  const options = routes.map((route) => {
+    const room = calculateSpendingRoom({ forecastInput, hardReserveMinor, settlementDate: route.settlementDate });
+    floorMinor = room.floorMinor;
+    hardReserveViolated = room.hardReserveViolated;
+    return { ...route, amountMinor: room.spendingRoomMinor };
+  });
+
+  const bestOption = options.reduce((best, option) =>
+    option.amountMinor > best.amountMinor ? option : best,
+  );
+
+  return {
+    safeToSpendMinor: bestOption.amountMinor,
+    bestOption,
+    options: [...options].sort((a, b) => b.amountMinor - a.amountMinor),
+    minimumBalanceMinor: forecast.minimumBalanceMinor,
+    minimumBalanceDate: forecast.minimumBalanceDate,
+    floorMinor,
+    hardReserveViolated,
+    hardReserveMinor,
+    committedMinor: forecast.events
+      .filter((event) => event.amountMinor < 0)
+      .reduce((total, event) => total + -event.amountMinor, 0),
+    staleAccountNames: position.staleAccountNames,
+    forecast,
+    position,
+  };
 }
 
 /**
