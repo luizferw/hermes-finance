@@ -796,7 +796,13 @@ export async function getCardStatement(userId: string, cardId: string) {
       dueAt: entry.dueAt,
       chargesMinor: entry.chargesMinor,
       creditsMinor: entry.creditsMinor,
-      totalMinor: entry.chargesMinor - entry.creditsMinor,
+      // Charges only. A payment posted inside this period settles the *previous*
+      // statement — paying the August bill on 5 September posts in September —
+      // so subtracting it here cancels the wrong month and can drive an open
+      // statement negative. Which statement a payment settled is reconciliation
+      // (PRD §29) and cannot be inferred from dates; the credits stay reported
+      // beside the total rather than inside it.
+      totalMinor: entry.chargesMinor,
       isReconciled: false,
       source: "derived",
       // A derived cycle carries no recorded status, so the only honest one is

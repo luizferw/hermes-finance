@@ -270,6 +270,35 @@ export function nominalCycleFor(purchaseDate: DateString, closingDay: number, du
 }
 
 /**
+ * Which statement a bill belongs to, given the date it is due.
+ *
+ * The inverse of `nominalCycleFor`, and it exists because a provider publishes a
+ * bill with a real closing date that drifts off the nominal day — a card closing
+ * on the 2nd closes on the 3rd when the 2nd is a Sunday. Feeding that drifted
+ * date to `nominalCycleFor` pushes the statement a whole month forward while the
+ * due date stays put, producing a cycle whose due date falls before its own
+ * statement month. The due date does not drift that way, so it is the safer
+ * anchor.
+ */
+export function statementMonthForDueDate(
+  dueAt: DateString,
+  closingDay: number,
+  dueDay: number,
+): string {
+  assertValidDate(dueAt, "dueAt");
+  if (!Number.isInteger(closingDay) || closingDay < 1 || closingDay > 31) {
+    throw new Error("closingDay must be an integer between 1 and 31");
+  }
+  if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) {
+    throw new Error("dueDay must be an integer between 1 and 31");
+  }
+  const dueMonth = dueAt.slice(0, 7);
+  // Mirrors nominalCycleFor: a due day after the closing day is paid in the
+  // statement's own month, otherwise in the month after it closes.
+  return dueDay > closingDay ? dueMonth : addStatementMonths(dueMonth, -1);
+}
+
+/**
  * Due dates of the `count` consecutive statements starting with the one a
  * purchase falls into — the cash dates of an N-installment plan.
  */

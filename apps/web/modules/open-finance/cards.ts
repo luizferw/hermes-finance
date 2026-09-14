@@ -11,6 +11,7 @@ import {
   expandInstallmentTail,
   nominalCycleFor,
   nominalCycleDueDates,
+  statementMonthForDueDate,
 } from "@hermes-finance/forecast";
 import {
   uniqueAccountName,
@@ -118,11 +119,12 @@ export async function syncBills(
   let written = 0;
 
   for (const bill of bills) {
-    // A closed bill is keyed by the day it closed. An open one has not closed
-    // yet, so the due date is the only anchor available.
-    const anchor = bill.closedAt ?? bill.dueAt;
-    const cycle = nominalCycleFor(anchor, closingDay, dueDay);
-    const statementMonth = `${cycle.statementMonth}-01`;
+    // Keyed off the due date, not the closing date. A real closing date drifts
+    // off the nominal day — a card closing on the 2nd closes on the 3rd when
+    // the 2nd falls on a Sunday — and feeding that to `nominalCycleFor` pushes
+    // the statement a month forward while the due date stays, producing a cycle
+    // due before its own statement month.
+    const statementMonth = `${statementMonthForDueDate(bill.dueAt, closingDay, dueDay)}-01`;
 
     const status = bill.isPaid
       ? "paid"
@@ -137,7 +139,7 @@ export async function syncBills(
       .values({
         creditCardId,
         statementMonth,
-        openedAt: previousDay(bill.closedAt ?? cycle.closesAt, 30),
+        openedAt: previousDay(bill.closedAt ?? bill.dueAt, 30),
         closedAt: bill.closedAt,
         dueAt: bill.dueAt,
         confirmedTotalMinor: bill.totalMinor,
@@ -354,14 +356,14 @@ export async function flagUnreconciledCycles(
     // not that the bill is empty. Saying "needs review" there would cry wolf.
     if (charged === undefined || charged === bill.totalMinor) continue;
 
-    const cycle = nominalCycleFor(bill.closedAt ?? bill.dueAt, closingDay, dueDay);
+    const statementMonth = statementMonthForDueDate(bill.dueAt, closingDay, dueDay);
     await trx
       .update(creditCardBillingCycles)
       .set({ status: "needs_review" })
       .where(
         and(
           eq(creditCardBillingCycles.creditCardId, creditCardId),
-          eq(creditCardBillingCycles.statementMonth, `${cycle.statementMonth}-01`),
+          eq(creditCardBillingCycles.statementMonth, `${statementMonth}-01`),
         ),
       );
     flagged += 1;

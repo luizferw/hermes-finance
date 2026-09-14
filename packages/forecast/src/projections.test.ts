@@ -8,6 +8,7 @@ import {
   projectRecurrences,
   projectStatements,
   resolveProjectedEvents,
+  statementMonthForDueDate,
 } from "./projections";
 
 describe("projectRecurrences", () => {
@@ -316,5 +317,37 @@ describe("nominalCycleDueDates", () => {
 
   it("returns a single date for a 1x purchase", () => {
     expect(nominalCycleDueDates("2026-09-07", 25, 2, 1)).toEqual(["2026-10-02"]);
+  });
+});
+
+describe("statementMonthForDueDate", () => {
+  it("inverts nominalCycleFor for both day orderings", () => {
+    // Due after closing: paid in the statement's own month.
+    expect(statementMonthForDueDate("2026-08-10", 2, 10)).toBe("2026-08");
+    // Due before closing: paid the month after the statement closes.
+    expect(statementMonthForDueDate("2026-09-07", 30, 7)).toBe("2026-08");
+    expect(statementMonthForDueDate("2026-08-19", 12, 19)).toBe("2026-08");
+  });
+
+  it("round-trips against nominalCycleFor", () => {
+    for (const [closing, due] of [[2, 10], [30, 7], [12, 19], [25, 5]] as const) {
+      for (const day of ["2026-01-15", "2026-06-01", "2026-12-28"]) {
+        const cycle = nominalCycleFor(day, closing, due);
+        expect(statementMonthForDueDate(cycle.dueAt, closing, due)).toBe(cycle.statementMonth);
+      }
+    }
+  });
+
+  it("is unmoved by a closing date that drifted off the nominal day", () => {
+    // A card closing on the 2nd closes on the 3rd when the 2nd is a Sunday.
+    // Anchoring on the closing date would jump the statement a month forward
+    // and leave the due date behind it.
+    expect(nominalCycleFor("2026-08-03", 2, 10).statementMonth).toBe("2026-09");
+    expect(statementMonthForDueDate("2026-08-10", 2, 10)).toBe("2026-08");
+  });
+
+  it("rejects out-of-range days", () => {
+    expect(() => statementMonthForDueDate("2026-08-10", 0, 10)).toThrow(/closingDay/);
+    expect(() => statementMonthForDueDate("2026-08-10", 2, 32)).toThrow(/dueDay/);
   });
 });
