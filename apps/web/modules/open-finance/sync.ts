@@ -1,10 +1,11 @@
 import "server-only";
-import { and, between, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, between, eq, gte, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import {
   accounts,
   balanceSnapshots,
   db,
   openFinanceAccountLinks,
+  openFinanceCardPayments,
   openFinanceConnections,
   creditCards,
   openFinanceSyncRuns,
@@ -16,12 +17,14 @@ import {
 import {
   accountKindOf,
   brazilianCalendarDay,
+  matchCardPayments,
   normalizeAccount,
   normalizeBill,
   normalizeTransaction,
   PluggyError,
   type NormalizedAccount,
   type NormalizedBill,
+  type CardPaymentLeg,
   type NormalizedTransaction,
   type PluggyClient,
   type PluggyItem,
@@ -260,7 +263,19 @@ export async function syncConnection(
       }
     }
 
-    if (touched.length > 0) await recomputeAccountBalances(touched);
+    // Pairing runs after every account of this connection has landed, and looks
+    // across all of them: the card and the account that pays its bill are
+    // frequently at different institutions, so the two legs arrive from
+    // different connections and often on different days.
+    const paired = await pairCardPayments(userId);
+    counts.needsReview += paired.ambiguous;
+    if (paired.matched > 0) stats.cardPaymentsPaired = paired.matched;
+
+    // Balances are recomputed last, and after pairing on purpose: a payment that
+    // has just become a transfer credits the card, and computing before it would
+    // leave the card short by exactly the amount that was paid.
+    const toRecompute = [...new Set([...touched, ...paired.touchedAccountIds])];
+    if (toRecompute.length > 0) await recomputeAccountBalances(toRecompute);
   } catch (error) {
     status = "error";
     message = failureMessage(error);
@@ -413,12 +428,18 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
   }
 
   const rows: NormalizedTransaction[] = [];
+  const paymentLegs: { providerTransactionId: string; paidAt: string; amountMinor: number }[] = [];
   for (const entry of raw) {
     const normalized = normalizeTransaction(entry, args.kind, context);
     if (normalized.kind === "skipped") {
       counts.skipped += 1;
       if (normalized.reason === "card_payment_leg") {
         args.stats.skippedCardPayments = (args.stats.skippedCardPayments ?? 0) + 1;
+        paymentLegs.push({
+          providerTransactionId: normalized.externalId,
+          paidAt: normalized.date,
+          amountMinor: normalized.amountMinor,
+        });
       } else {
         args.stats.skippedZeroAmount = (args.stats.skippedZeroAmount ?? 0) + 1;
       }
@@ -520,6 +541,27 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
     }
 
     if (args.kind === "credit") {
+      // The payment legs are remembered rather than booked. They are not
+      // expenses of the card (PRD R4); they are the evidence that lets the
+      // paying account's outflow be recognised as a transfer.
+      if (paymentLegs.length > 0) {
+        await trx
+          .insert(openFinanceCardPayments)
+          .values(
+            paymentLegs.map((leg) => ({
+              userId: args.userId,
+              accountLinkId: args.linkId,
+              accountId: args.accountId,
+              ...leg,
+            })),
+          )
+          .onConflictDoNothing({
+            target: [
+              openFinanceCardPayments.accountLinkId,
+              openFinanceCardPayments.providerTransactionId,
+            ],
+          });
+      }
       mergeCounts(counts, await syncCardSide(trx, args, bills, rows));
     }
 
@@ -822,4 +864,128 @@ export async function listFlaggedDuplicates(userId: string, since: Date) {
         inArray(transactions.type, ["income", "expense"]),
       ),
     );
+}
+
+/**
+ * Turn bank outflows that settled a card bill into transfers.
+ *
+ * Only the bank side is ever stored. `deriveLedgerCycles` already reads card
+ * payments that way — "a transfer is one row on the source account, its
+ * destination leg is derived, never stored" — so this points the existing row at
+ * the card rather than inventing a second one. `recomputeAccountBalances` then
+ * credits the card automatically, which is what stops a card fed only with
+ * purchases from drifting further into debt every month.
+ *
+ * Idempotent: a leg that has already been matched is not offered again, and a
+ * row that is already a transfer is not a candidate.
+ */
+export async function pairCardPayments(
+  userId: string,
+): Promise<{ matched: number; ambiguous: number; touchedAccountIds: string[] }> {
+  const legs = await db
+    .select({
+      cardAccountId: openFinanceCardPayments.accountId,
+      date: openFinanceCardPayments.paidAt,
+      amountMinor: openFinanceCardPayments.amountMinor,
+      id: openFinanceCardPayments.id,
+    })
+    .from(openFinanceCardPayments)
+    .where(
+      and(
+        eq(openFinanceCardPayments.userId, userId),
+        isNull(openFinanceCardPayments.matchedTransactionId),
+        isNotNull(openFinanceCardPayments.accountId),
+      ),
+    );
+  if (legs.length === 0) return { matched: 0, ambiguous: 0, touchedAccountIds: [] };
+
+  // Candidates are the rows the sync tagged as looking like a bill payment and
+  // that are still ordinary expenses.
+  const candidates = await db
+    .select({
+      transactionId: transactions.id,
+      date: transactions.date,
+      amountMinor: transactions.amountMinor,
+    })
+    .from(transactions)
+    .innerJoin(
+      transactionMetadata,
+      eq(transactionMetadata.transactionId, transactions.id),
+    )
+    .where(
+      and(
+        eq(transactions.userId, userId),
+        eq(transactions.type, "expense"),
+        isNull(transactions.deletedAt),
+        eq(transactionMetadata.key, "open_finance.card_payment_candidate"),
+      ),
+    );
+  if (candidates.length === 0) return { matched: 0, ambiguous: 0, touchedAccountIds: [] };
+
+  const legsByKey = new Map<string, string>();
+  for (const leg of legs) legsByKey.set(`${leg.cardAccountId}|${leg.date}|${leg.amountMinor}`, leg.id);
+
+  const decisions = matchCardPayments(
+    candidates,
+    legs.map((leg) => ({
+      cardAccountId: leg.cardAccountId!,
+      date: leg.date,
+      amountMinor: leg.amountMinor,
+    })) satisfies CardPaymentLeg[],
+  );
+
+  let matched = 0;
+  let ambiguous = 0;
+  const touchedAccountIds = new Set<string>();
+  for (const decision of decisions) {
+    if (decision.kind === "ambiguous") {
+      ambiguous += 1;
+      continue;
+    }
+    if (decision.kind !== "matched") continue;
+
+    const candidate = candidates.find((row) => row.transactionId === decision.transactionId)!;
+    const legId = legsByKey.get(
+      `${decision.cardAccountId}|${candidate.date}|${Math.abs(candidate.amountMinor)}`,
+    );
+
+    await db.transaction(async (trx) => {
+      await trx
+        .update(transactions)
+        .set({
+          type: "transfer",
+          transferAccountId: decision.cardAccountId,
+          // A transfer between your own accounts is neither income nor expense,
+          // so whatever category a rule guessed is wrong by definition (R5).
+          categoryId: null,
+        })
+        .where(eq(transactions.id, decision.transactionId));
+
+      await trx
+        .update(openFinanceCardPayments)
+        .set({ matchedTransactionId: decision.transactionId, matchedAt: new Date() })
+        .where(
+          legId
+            ? eq(openFinanceCardPayments.id, legId)
+            : and(
+                eq(openFinanceCardPayments.userId, userId),
+                eq(openFinanceCardPayments.accountId, decision.cardAccountId),
+                isNull(openFinanceCardPayments.matchedTransactionId),
+              ),
+        );
+
+      await trx
+        .insert(transactionMetadata)
+        .values({
+          transactionId: decision.transactionId,
+          key: "open_finance.card_payment_matched",
+          value: decision.cardAccountId,
+        })
+        .onConflictDoNothing();
+    });
+    matched += 1;
+    touchedAccountIds.add(decision.cardAccountId);
+  }
+
+  return { matched, ambiguous, touchedAccountIds: [...touchedAccountIds] };
 }

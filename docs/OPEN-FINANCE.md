@@ -95,13 +95,29 @@ mês inteiro de parcelas. Meia-noite exata é lida como data; horário real é d
 Em conta bancária, positivo é entrada. Em cartão, positivo é **compra** e negativo é o
 **pagamento da fatura**.
 
-### O pagamento da fatura (limitação conhecida)
+### O pagamento da fatura
 
-A perna do cartão é pulada e contada, nunca lançada duas vezes (R4). Mas a perna do banco —
-o débito da fatura na conta corrente — **entra hoje como despesa avulsa**, que é exatamente
-a segunda despesa que a R4 proíbe. É uma lacuna deliberada: essas linhas recebem
-`transaction_metadata['open_finance.card_payment_candidate']`, para que uma fase futura
-transforme o par em `transfer` sem rebuscar nada do provedor.
+A perna do cartão nunca é lançada: um pagamento de fatura não é despesa do cartão (R4).
+Ela é **lembrada** em `open_finance_card_payments`, e é essa lembrança que permite
+reconhecer a saída correspondente na conta pagadora.
+
+A saída do banco, que já existe como despesa, é então convertida em **`transfer`** apontando
+para a conta do cartão. Uma linha só, porque é assim que o resto do sistema já lê pagamento
+de fatura — o comentário em `deriveLedgerCycles` diz: *"a transfer is one row on the source
+account, its destination leg is derived, never stored"*. O `recomputeAccountBalances` credita
+o cartão sozinho.
+
+Sem isso o saldo do cartão **divergiria para sempre**: entrariam só as compras, nunca os
+pagamentos que as quitam, e a dívida afundaria um pouco mais a cada mês.
+
+A conversão só acontece quando **exatamente um** cartão tem um pagamento pulado de mesmo
+valor absoluto em ±2 dias. Zero ou mais de um candidato: a linha fica como despesa e entra em
+`needs_review` — §14 proíbe escolher arbitrariamente. Cada perna é consumida uma única vez,
+então uma saída não pode quitar duas faturas.
+
+A categoria é zerada na conversão: transferência entre contas próprias não é receita nem
+despesa (R5), então qualquer categoria que uma regra tenha adivinhado está errada por
+definição.
 
 ### Saldo de abertura é resolvido de trás para frente
 

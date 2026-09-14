@@ -53,6 +53,8 @@ export interface OpenFinanceSyncStats {
   /** Difference between the provider balance and the ledger, on a matched account. */
   balanceDrift?: { accountId: string; driftMinor: number }[];
   perAccount?: Record<string, { seen: number; created: number; updated: number }>;
+  /** Bank outflows recognised as the settlement of a card bill (PRD R4, R5). */
+  cardPaymentsPaired?: number;
 }
 
 /**
@@ -152,6 +154,41 @@ export const openFinanceAccountLinks = pgTable("open_finance_account_links", {
     .where(sql`${t.accountId} IS NOT NULL`),
   index("open_finance_account_links_user_idx").on(t.userId),
   index("open_finance_account_links_connection_idx").on(t.connectionId),
+]);
+
+/**
+ * Card bill payments seen on the card side and deliberately not booked there.
+ *
+ * A bill payment is a cash-flow event, not an expense of the card, so it never
+ * becomes a transaction on the card account (PRD R4). But it has to be
+ * remembered: it is the evidence that lets the matching outflow on the paying
+ * bank account be recognised as a transfer instead of a second categorized
+ * expense — and the two legs routinely arrive from different connections, so the
+ * knowledge cannot live inside one sync run.
+ */
+export const openFinanceCardPayments = pgTable("open_finance_card_payments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  accountLinkId: uuid("account_link_id")
+    .notNull()
+    .references(() => openFinanceAccountLinks.id, { onDelete: "cascade" }),
+  /** The Hermes card account this payment settled. */
+  accountId: uuid("account_id").references(() => accounts.id, { onDelete: "cascade" }),
+  /** The provider's id for the card-side row, which makes re-reading idempotent. */
+  providerTransactionId: text("provider_transaction_id").notNull(),
+  paidAt: date("paid_at", { mode: "string" }).notNull(),
+  /** Positive magnitude. */
+  amountMinor: bigint("amount_minor", { mode: "number" }).notNull(),
+  /** The bank-side transaction turned into a transfer by this leg, once matched. */
+  matchedTransactionId: uuid("matched_transaction_id"),
+  matchedAt: timestamp("matched_at", { withTimezone: true }),
+  ...timestamps,
+}, (t) => [
+  check("open_finance_card_payments_amount_positive", sql`${t.amountMinor} > 0`),
+  uniqueIndex("open_finance_card_payments_provider_unique")
+    .on(t.accountLinkId, t.providerTransactionId),
+  // The lookup the matcher does: this user's unmatched legs around a date.
+  index("open_finance_card_payments_user_paid_idx").on(t.userId, t.paidAt),
 ]);
 
 /**

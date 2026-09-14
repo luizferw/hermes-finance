@@ -167,16 +167,26 @@ describe("normalizeTransaction", () => {
 
   it("skips the bill payment leg on a card instead of booking a second expense", () => {
     const payment = normalizeTransaction(transaction({ amount: -1000 }), "credit", context);
+    // The amount and date are kept: they are what lets the matching bank
+    // outflow be recognised as a transfer later.
     expect(payment).toEqual({
       kind: "skipped",
       externalId: "txn-1",
       reason: "card_payment_leg",
+      date: "2026-03-10",
+      amountMinor: 100000,
     });
   });
 
   it("skips a zero amount, which no ledger sign check would accept", () => {
     const zero = normalizeTransaction(transaction({ amount: 0 }), "bank", context);
-    expect(zero).toEqual({ kind: "skipped", externalId: "txn-1", reason: "zero_amount" });
+    expect(zero).toEqual({
+      kind: "skipped",
+      externalId: "txn-1",
+      reason: "zero_amount",
+      date: "2026-03-10",
+      amountMinor: 0,
+    });
   });
 
   it("keeps a pending bank authorization out of the balance", () => {

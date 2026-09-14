@@ -259,6 +259,13 @@ export interface SkippedTransaction {
   kind: "skipped";
   externalId: string;
   reason: "card_payment_leg" | "zero_amount";
+  date: string;
+  /**
+   * Positive magnitude. A skipped bill payment is not booked on the card, but it
+   * has to be remembered: it is the evidence that lets the matching bank outflow
+   * be recognised as a transfer rather than an expense (PRD R4, R5).
+   */
+  amountMinor: number;
 }
 
 export type NormalizedTransactionResult = NormalizedTransaction | SkippedTransaction;
@@ -340,15 +347,29 @@ export function normalizeTransaction(
   const exponent = context.minorUnitExponent(currencyCode);
   const signedMinor = amountToMinor(transaction.amount, exponent);
 
+  const date = brazilianCalendarDay(transaction.date, context.utcOffsetMinutes);
+
   if (signedMinor === 0) {
-    return { kind: "skipped", externalId: transaction.id, reason: "zero_amount" };
+    return {
+      kind: "skipped",
+      externalId: transaction.id,
+      reason: "zero_amount",
+      date,
+      amountMinor: 0,
+    };
   }
 
   // On a card, a negative amount is the statement settlement. It is a cash-flow
   // event on the paying account, not an expense of its own (PRD R4), and the
   // bank side of the pair is ingested instead.
   if (accountKind === "credit" && signedMinor < 0) {
-    return { kind: "skipped", externalId: transaction.id, reason: "card_payment_leg" };
+    return {
+      kind: "skipped",
+      externalId: transaction.id,
+      reason: "card_payment_leg",
+      date,
+      amountMinor: Math.abs(signedMinor),
+    };
   }
 
   const ledgerMinor = accountKind === "credit" ? -signedMinor : signedMinor;
@@ -360,7 +381,7 @@ export function normalizeTransaction(
     externalId: transaction.id,
     type: ledgerMinor > 0 ? "income" : "expense",
     status: statusFor(transaction.status, accountKind),
-    date: brazilianCalendarDay(transaction.date, context.utcOffsetMinutes),
+    date,
     amountMinor: ledgerMinor,
     currencyCode,
     description,

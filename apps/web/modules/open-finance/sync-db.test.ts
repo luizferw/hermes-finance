@@ -578,3 +578,159 @@ describe("credit card bills", () => {
     expect(parcels.filter((p) => p.number > 3).every((p) => p.status === "projected")).toBe(true);
   });
 });
+
+describe("paying a card bill", () => {
+  /**
+   * The whole point of R4 and R5 in one test: the bank outflow that settles a
+   * statement is one transfer, not an expense plus a mystery, and the card's
+   * balance comes back up by exactly what was paid.
+   */
+  it("becomes a transfer that credits the card", async () => {
+    const connectionId = await freshConnection();
+
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: {
+          "prov-bank": [
+            tx({ id: "b1", amount: -500, description: "PAGAMENTO DE FATURA CARTAO",
+                 date: "2026-03-07T00:00:00.000Z" }),
+          ],
+          "prov-card": [
+            tx({ id: "c1", accountId: "prov-card", amount: 120, description: "Mercado",
+                 date: "2026-03-02T00:00:00.000Z" }),
+            // The card side of the same payment: skipped, but remembered.
+            tx({ id: "c2", accountId: "prov-card", amount: -500, description: "Pagamento recebido",
+                 date: "2026-03-07T00:00:00.000Z" }),
+          ],
+        },
+      }),
+      now: NOW,
+    });
+
+    const bankAccountRow = await accountFor("prov-bank");
+    const cardAccountRow = await accountFor("prov-card");
+
+    const [payment] = await db
+      .select({
+        type: transactions.type,
+        amountMinor: transactions.amountMinor,
+        transferAccountId: transactions.transferAccountId,
+        categoryId: transactions.categoryId,
+      })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "b1")));
+
+    expect(payment).toMatchObject({
+      type: "transfer",
+      amountMinor: -50000,
+      transferAccountId: cardAccountRow!.id,
+      // Never categorized: a transfer between your own accounts is neither
+      // income nor expense, so any category a rule guessed is wrong (R5).
+      categoryId: null,
+    });
+
+    // The card was fed one purchase of 120 and credited 500 by the transfer.
+    // Without the pairing it would sit at -12000 and drift further every month.
+    const card = await db.query.accounts.findFirst({ where: eq(accounts.id, cardAccountRow!.id) });
+    const bank = await db.query.accounts.findFirst({ where: eq(accounts.id, bankAccountRow!.id) });
+    expect(card!.currentBalanceMinor - card!.openingBalanceMinor).toBe(-12000 + 50000);
+    // The paying account is unaffected by the reclassification: the same money
+    // still left it.
+    expect(bank!.currentBalanceMinor - bank!.openingBalanceMinor).toBe(-50000);
+
+    // The card side is never booked as a transaction of its own (R4).
+    const cardRows = await db
+      .select({ externalId: transactions.externalId })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.accountId, cardAccountRow!.id)));
+    expect(cardRows.map((r) => r.externalId)).toEqual(["c1"]);
+  });
+
+  it("leaves the outflow alone when no card payment explains it", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [bankAccount(), cardAccount()],
+        transactions: {
+          "prov-bank": [
+            tx({ id: "b1", amount: -500, description: "PAGAMENTO DE FATURA CARTAO" }),
+          ],
+          // No matching leg on the card: the bill was paid from somewhere else.
+          "prov-card": [],
+        },
+      }),
+      now: NOW,
+    });
+
+    const [payment] = await db
+      .select({ type: transactions.type, transferAccountId: transactions.transferAccountId })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "b1")));
+    expect(payment).toMatchObject({ type: "expense", transferAccountId: null });
+  });
+
+  it("does not let one outflow settle two cards", async () => {
+    const connectionId = await freshConnection();
+    await syncConnection(userId, connectionId, {
+      trigger: "manual",
+      client: stubClient({
+        accounts: [
+          bankAccount(),
+          cardAccount(),
+          cardAccount({ id: "prov-card-2", number: "9999", name: "Cartão Dois" }),
+        ],
+        transactions: {
+          "prov-bank": [
+            tx({ id: "b1", amount: -500, description: "PAGAMENTO DE FATURA CARTAO",
+                 date: "2026-03-07T00:00:00.000Z" }),
+          ],
+          // Both cards report a payment of the same value on the same day.
+          "prov-card": [
+            tx({ id: "c2", accountId: "prov-card", amount: -500, date: "2026-03-07T00:00:00.000Z" }),
+          ],
+          "prov-card-2": [
+            tx({ id: "d2", accountId: "prov-card-2", amount: -500, date: "2026-03-07T00:00:00.000Z" }),
+          ],
+        },
+      }),
+      now: NOW,
+    });
+
+    const [payment] = await db
+      .select({ type: transactions.type })
+      .from(transactions)
+      .where(and(eq(transactions.userId, userId), eq(transactions.externalId, "b1")));
+    // PRD §14: two plausible answers means no answer, not a coin toss.
+    expect(payment).toMatchObject({ type: "expense" });
+  });
+
+  it("is idempotent — a second sync does not pair it twice", async () => {
+    const connectionId = await freshConnection();
+    const payload = {
+      accounts: [bankAccount(), cardAccount()],
+      transactions: {
+        "prov-bank": [
+          tx({ id: "b1", amount: -500, description: "PAGAMENTO DE FATURA CARTAO",
+               date: "2026-03-07T00:00:00.000Z" }),
+        ],
+        "prov-card": [
+          tx({ id: "c2", accountId: "prov-card", amount: -500, date: "2026-03-07T00:00:00.000Z" }),
+        ],
+      },
+    };
+
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(payload), now: NOW });
+    const card = await accountFor("prov-card");
+    const afterFirst = (await db.query.accounts.findFirst({ where: eq(accounts.id, card!.id) }))!
+      .currentBalanceMinor;
+
+    await syncConnection(userId, connectionId, { trigger: "manual", client: stubClient(payload), now: NOW });
+    const afterSecond = (await db.query.accounts.findFirst({ where: eq(accounts.id, card!.id) }))!
+      .currentBalanceMinor;
+
+    expect(afterSecond).toBe(afterFirst);
+  });
+});

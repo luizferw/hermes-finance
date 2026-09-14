@@ -35,6 +35,7 @@ import {
   openFinanceConnections,
   openFinanceAccountLinks,
   openFinanceSyncRuns,
+  openFinanceCardPayments,
   users,
 } from "./schema";
 
@@ -348,5 +349,16 @@ export const openFinanceSyncRunsRelations = relations(openFinanceSyncRuns, ({ on
   connection: one(openFinanceConnections, {
     fields: [openFinanceSyncRuns.connectionId],
     references: [openFinanceConnections.id],
+  }),
+}));
+
+export const openFinanceCardPaymentsRelations = relations(openFinanceCardPayments, ({ one }) => ({
+  accountLink: one(openFinanceAccountLinks, {
+    fields: [openFinanceCardPayments.accountLinkId],
+    references: [openFinanceAccountLinks.id],
+  }),
+  account: one(accounts, {
+    fields: [openFinanceCardPayments.accountId],
+    references: [accounts.id],
   }),
 }));
