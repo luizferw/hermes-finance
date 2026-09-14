@@ -74,6 +74,9 @@ pnpm db:studio
 `pnpm --filter @kosh/db seed:prd-scenario` loads the PRD's worked scenario, which the finance tests
 assert against. It has no root-level alias — the `--filter` form is the only way to invoke it.
 
+All of these read `DATABASE_URL` from the root `.env`, which names the **in-container** host. Run
+from the host they fail with `ENOTFOUND db` — see "Local deploy" for the override.
+
 `pnpm db:dedupe-imports` soft-deletes duplicate transactions and recalculates balances. It refuses
 to run without `KOSH_ALLOW_DEDUPLICATION=true` *and* proof of a backup (`KOSH_BACKUP_CREATED=true`
 or `KOSH_BACKUP_FILE`). Those gates are the review, so don't set them to get past an error.
@@ -89,10 +92,40 @@ create real users and data against a running server; they are deliberately outsi
 
 ### Local deploy
 
-A **systemd user unit** owns the running app — `systemctl --user restart hermes-finance.service`
-after `pnpm build`. It serves the standalone build on 127.0.0.1:3119 and brings up the `db`
-container first. It has `Restart=always`, so killing the `next-server` PID by hand does not stop
-it; systemd respawns it and a follow-up `pnpm start` then dies with `EADDRINUSE`.
+**Docker Compose owns the running app** — the `web` service, built from the Dockerfile's `runner`
+target, on `127.0.0.1:3000` (`KOSH_BIND_ADDRESS` × `PORT`). Deploying a change is a rebuild:
+
+```bash
+docker compose up -d --build web
+```
+
+`pnpm build` does **not** affect what is running. It builds on the host; the container serves what
+was baked into its image. A change that works under `pnpm dev` and does not show up in the browser
+is usually this.
+
+`web` starts behind two gates in `depends_on`: `db` must pass its healthcheck, and the one-shot
+`migrate` service must exit 0. That service runs `pnpm db:migrate:safe` (backup, migrate, verify)
+with `./backups` bind-mounted, so bringing the stack up is what migrates it — there is no separate
+deploy step, and a failing migration leaves `web` never starting rather than serving against a
+half-migrated schema. Both long-lived services are `restart: unless-stopped`.
+
+`docs/operations.md` also documents a systemd user unit running the standalone build outside Docker.
+It is an alternative for a machine that would rather not containerize the app, not what runs here —
+check `ss -ltnp` before assuming either.
+
+**Host tooling needs `DATABASE_URL` overridden.** The root `.env` points at `db:5432`, which only
+resolves inside the compose network; from the host that is `ENOTFOUND db`. The `db` container does
+publish `127.0.0.1:${POSTGRES_HOST_PORT:-5432}`, so anything run from the host — `pnpm test`,
+`db:migrate`, `db:studio`, drizzle-kit — needs the host spelling:
+
+```bash
+DATABASE_URL="postgres://kosh:$POSTGRES_PASSWORD@127.0.0.1:${POSTGRES_HOST_PORT:-5432}/kosh" pnpm test
+```
+
+`pg_dump` and `psql` are not necessarily installed on the host, while the `db` container has both.
+`pnpm db:backup` and `db:dedupe-imports` shell out to them and fail with "not found" if they are
+missing; `docker compose exec -T db pg_dump -U kosh --format=custom kosh > backups/<name>.dump` is
+the way around that.
 
 ## Architecture
 
