@@ -189,15 +189,15 @@ describe("listTransactions", () => {
     });
 
     const transactions = await client(fetchImpl).listTransactions("acc-1", {
-      from: "2025-03-10",
-      to: "2026-03-10",
+      dateFrom: "2025-03-10",
+      dateTo: "2026-03-10",
     });
 
     expect(transactions.map((t) => t.id)).toEqual(["a", "b", "c"]);
     const dataCalls = calls.filter((call) => call.url.includes("/v2/transactions"));
     expect(dataCalls).toHaveLength(2);
-    expect(dataCalls[0]!.url).toContain("from=2025-03-10");
-    expect(dataCalls[0]!.url).toContain("pageSize=500");
+    expect(dataCalls[0]!.url).toContain("dateFrom=2025-03-10");
+    expect(dataCalls[0]!.url).toContain("dateTo=2026-03-10");
     expect(dataCalls[1]!.url).toContain("after=CURSOR_1");
   });
 
@@ -215,6 +215,25 @@ describe("listTransactions", () => {
     expect(transactions).toHaveLength(2);
   });
 
+  it("sends only the parameters /v2/transactions accepts", async () => {
+    // It rejects unknown query parameters with a 400 instead of ignoring them,
+    // so `from`, `to` and `pageSize` — the deprecated v1 spelling — turn every
+    // sync into a failure. This pins the v2 names.
+    const { fetchImpl, calls } = stubFetch((call) =>
+      call.url.endsWith("/auth")
+        ? { body: { apiKey: "key" } }
+        : { body: { results: [], next: null } },
+    );
+
+    await client(fetchImpl).listTransactions("acc-1", {
+      dateFrom: "2025-03-10",
+      dateTo: "2026-03-10",
+    });
+
+    const url = new URL(calls.find((call) => call.url.includes("/v2/transactions"))!.url);
+    expect([...url.searchParams.keys()].sort()).toEqual(["accountId", "dateFrom", "dateTo"]);
+  });
+
   it("omits the date bounds when none are given", async () => {
     const { fetchImpl, calls } = stubFetch((call) =>
       call.url.endsWith("/auth")
@@ -224,8 +243,7 @@ describe("listTransactions", () => {
 
     await client(fetchImpl).listTransactions("acc-1");
 
-    const dataCall = calls.find((call) => call.url.includes("/v2/transactions"))!;
-    expect(dataCall.url).not.toContain("from=");
-    expect(dataCall.url).not.toContain("to=");
+    const url = new URL(calls.find((call) => call.url.includes("/v2/transactions"))!.url);
+    expect([...url.searchParams.keys()]).toEqual(["accountId"]);
   });
 });

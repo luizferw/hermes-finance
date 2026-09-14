@@ -240,7 +240,11 @@ export async function syncConnection(
           account: incoming,
           providerBalanceMinor: incoming.balanceMinor,
           observedAt,
-          derivedOpeningBalance: resolved.createdAccount,
+          // Not `createdAccount`: an account created by a run that then failed
+          // mid-way would never get its opening balance solved, because the
+          // next run finds the link already there. `openingBalanceDerivedAt` is
+          // the real once-only guard, and it is checked inside.
+          derivedOpeningBalance: resolved.mode === "auto_created",
           now: now(),
           stats,
           createdIds,
@@ -336,7 +340,17 @@ function blockingReason(item: PluggyItem, now: Date): string | null {
   return null;
 }
 
+/**
+ * What to record about a failure.
+ *
+ * The name alone is what `system_jobs` stores, and it proved useless here: every
+ * account failed as "PluggyError" and finding out why took a round trip to the
+ * API. The status and Pluggy's own error code are safe to keep — they describe
+ * the request, not the account holder — while the message still never lands in
+ * the database.
+ */
 function errorName(error: unknown): string {
+  if (error instanceof PluggyError) return `PluggyError(${error.status}/${error.code})`;
   return error instanceof Error ? error.name : "UnknownError";
 }
 
@@ -379,7 +393,10 @@ async function syncAccount(args: SyncAccountArgs): Promise<SyncCounts> {
     ? addDaysIso(link.syncedThrough, -REWINDOW_DAYS)
     : addDaysIso(today, -config.PLUGGY_BACKFILL_DAYS);
 
-  const raw = await args.client.listTransactions(args.providerAccountId, { from, to: today });
+  const raw = await args.client.listTransactions(args.providerAccountId, {
+    dateFrom: from,
+    dateTo: today,
+  });
   counts.seen = raw.length;
 
   // Bills are only fetched for cards, and only from connectors that carry the

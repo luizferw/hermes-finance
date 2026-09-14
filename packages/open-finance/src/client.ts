@@ -25,9 +25,6 @@ import {
 
 export const PLUGGY_BASE_URL = "https://api.pluggy.ai";
 
-/** Pluggy caps transaction pages at 500. */
-const TRANSACTIONS_PAGE_SIZE = 500;
-
 /** An API key lives two hours; renew early so a long run never trips over it. */
 const API_KEY_TTL_MS = 110 * 60 * 1000;
 
@@ -62,9 +59,9 @@ export interface PluggyClientOptions {
 
 export interface ListTransactionsOptions {
   /** Inclusive `YYYY-MM-DD` lower bound. */
-  from?: string;
+  dateFrom?: string;
   /** Inclusive `YYYY-MM-DD` upper bound. */
-  to?: string;
+  dateTo?: string;
 }
 
 export interface PluggyClient {
@@ -171,12 +168,13 @@ export function createPluggyClient(options: PluggyClientOptions): PluggyClient {
     },
 
     async listTransactions(accountId, listOptions = {}) {
-      const params = new URLSearchParams({
-        accountId,
-        pageSize: String(TRANSACTIONS_PAGE_SIZE),
-      });
-      if (listOptions.from) params.set("from", listOptions.from);
-      if (listOptions.to) params.set("to", listOptions.to);
+      // `/v2/transactions` names its filters `dateFrom`/`dateTo` and rejects
+      // anything it does not know — including `from`, `to` and `pageSize`, which
+      // belong to the deprecated v1 endpoint. It answers 400 rather than
+      // ignoring them, so every unknown parameter is a failed sync.
+      const params = new URLSearchParams({ accountId });
+      if (listOptions.dateFrom) params.set("dateFrom", listOptions.dateFrom);
+      if (listOptions.dateTo) params.set("dateTo", listOptions.dateTo);
 
       const collected: PluggyTransaction[] = [];
       const seenCursors = new Set<string>();
