@@ -38,6 +38,9 @@ importers:
       '@hermes-finance/forecast':
         specifier: workspace:*
         version: link:../../packages/forecast
+      '@hermes-finance/open-finance':
+        specifier: workspace:*
+        version: link:../../packages/open-finance
       '@hermes-finance/planning':
         specifier: workspace:*
         version: link:../../packages/planning

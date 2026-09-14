@@ -329,3 +329,19 @@ describe("statusFor", () => {
     expect(statusFor(undefined, "credit")).toBe("imported");
   });
 });
+
+describe("normalizeAccount provider type", () => {
+  it("keeps the provider's own type so an investment is not read as a bank", () => {
+    const investment = {
+      id: "acc-inv",
+      type: "INVESTMENT",
+      subtype: null,
+      balance: 100,
+      currencyCode: "BRL",
+    } as PluggyAccount;
+    const normalized = normalizeAccount(investment, context);
+    expect(normalized.providerType).toBe("INVESTMENT");
+    // `kind` stays coarse because it only drives the sign convention.
+    expect(normalized.kind).toBe("bank");
+  });
+});

@@ -6,6 +6,7 @@ import { bills, db, systemJobs } from "@kosh/db";
 import { todayIso } from "@kosh/domain";
 import { env } from "@/lib/env";
 import { ensureCurrentBudgetPeriods } from "@/modules/budgets/jobs";
+import { runScheduledOpenFinanceSync } from "@/modules/open-finance/jobs";
 import { generateDueRecurringTransactions } from "@/modules/recurring/jobs";
 
 interface JobDefinition {
@@ -70,7 +71,22 @@ async function startJobsOnce(): Promise<PgBoss | null> {
 
   await boss.start();
 
-  for (const job of JOBS) {
+  // Appended here rather than in JOBS because its schedule is configurable, and
+  // reading the environment at module scope would make importing this file throw
+  // on a misconfigured deployment.
+  const scheduledJobs = config.PLUGGY_ENABLED
+    ? [
+        ...JOBS,
+        {
+          name: "open-finance-sync",
+          description: "Collects accounts, transactions and bills from Open Finance connections",
+          schedule: config.PLUGGY_SYNC_SCHEDULE,
+          run: runScheduledOpenFinanceSync,
+        },
+      ]
+    : JOBS;
+
+  for (const job of scheduledJobs) {
     await registerJob(job);
     await boss.createQueue(job.name, {
       retryLimit: 2,

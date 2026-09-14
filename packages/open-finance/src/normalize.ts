@@ -153,7 +153,18 @@ export type NormalizedAccountKind = "bank" | "credit";
 
 export interface NormalizedAccount {
   externalId: string;
+  /**
+   * `bank` or `credit`, which is all the sign convention needs to know.
+   * Deliberately coarse: everything that is not CREDIT behaves like a bank
+   * account as far as amounts go.
+   */
   kind: NormalizedAccountKind;
+  /**
+   * The provider's own type, uppercased and unflattened — INVESTMENT and LOAN
+   * are not banks, and collapsing them into `kind` is how one would end up
+   * modelled as a checking account.
+   */
+  providerType: string;
   subtype: string | null;
   name: string;
   /** Account number, or the last four digits for a card. */
@@ -190,8 +201,9 @@ export function normalizeAccount(
   return {
     externalId: account.id,
     kind,
+    providerType: account.type.toUpperCase(),
     subtype: account.subtype ?? null,
-    name: (account.name ?? account.marketingName ?? "Conta").trim(),
+    name: (account.name ?? account.marketingName ?? "Account").trim(),
     numberMask: account.number?.trim() || null,
     currencyCode,
     balanceMinor: kind === "credit" ? -reportedBalanceMinor : reportedBalanceMinor,
@@ -341,7 +353,7 @@ export function normalizeTransaction(
 
   const ledgerMinor = accountKind === "credit" ? -signedMinor : signedMinor;
   const description =
-    transaction.description?.trim() || transaction.descriptionRaw?.trim() || "Sem descrição";
+    transaction.description?.trim() || transaction.descriptionRaw?.trim() || "Untitled transaction";
 
   return {
     kind: "transaction",

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  BankIcon,
   DatabaseIcon,
   Shield01Icon,
   Settings01Icon,
@@ -71,6 +72,24 @@ export default async function SettingsPage() {
               </div>
               <Button asChild variant="outline" size="sm">
                 <Link href="/settings/health">Open health view</Link>
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <HugeiconsIcon icon={BankIcon} className="size-4" />
+                Open Finance
+              </CardTitle>
+              <CardDescription>
+                Read balances, transactions and card bills from banks you connected at
+                meu.pluggy.ai. Read-only.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/settings/open-finance">Manage connections</Link>
               </Button>
             </CardContent>
           </Card>
