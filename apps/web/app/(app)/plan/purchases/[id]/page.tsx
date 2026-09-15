@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -9,8 +10,12 @@ import {
 import { requireUser } from "@/lib/session";
 import { formatDate, formatMonth, formatMoney } from "@/lib/format";
 import { listAccounts } from "@/modules/accounts/queries";
-import { buildUserForecastDetailed, getPurchasePlanImpact } from "@/modules/finance/queries";
-import type { MonthlyOutlookEntry, PurchasePlanSimulation } from "@hermes-finance/planning";
+import { getPurchasePlanImpact } from "@/modules/finance/queries";
+import type {
+  MonthlyOutlookEntry,
+  PlanItemMonthlyOutflow,
+  PurchasePlanSimulation,
+} from "@hermes-finance/planning";
 import { Badge } from "@/components/ui/badge";
 import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
 import { cn } from "@/lib/utils";
@@ -20,9 +25,6 @@ import { PurchasePlanActions } from "../plan-actions";
 import { PlanTotalsLine } from "../plan-totals";
 
 export const metadata: Metadata = { title: "Purchase plan" };
-
-/** Matches the horizon `getPurchasePlanImpact` builds its own forecast over. */
-const PLAN_HORIZON_DAYS = 365;
 
 const REJECTION_LABEL: Record<string, string> = {
   HARD_RESERVE_VIOLATED: "Breaks the protected reserve",
@@ -48,14 +50,13 @@ export default async function PurchasePlanDetailPage({
   const user = await requireUser();
   const { id } = await params;
 
-  const [impact, accounts, baseline] = await Promise.all([
+  const [impact, accounts] = await Promise.all([
     getPurchasePlanImpact(user.id, id),
     listAccounts(user.id),
-    buildUserForecastDetailed(user.id, PLAN_HORIZON_DAYS),
   ]);
   if (!impact) notFound();
 
-  const { plan, simulation, unprojectedItems } = impact;
+  const { plan, simulation, baseline, unprojectedItems } = impact;
   const accountOptions = accounts.map((account) => ({
     id: account.id,
     name: account.name,
@@ -63,12 +64,14 @@ export default async function PurchasePlanDetailPage({
   }));
   const accountById = new Map(accountOptions.map((account) => [account.id, account]));
 
-  // Joined on the date, not the position: the two forecasts are built by
-  // separate calls, each resolving "today" on its own, so a render across
-  // midnight would shift one series against the other. Days without a
-  // counterpart are dropped rather than defaulted.
+  // Both series come from the one forecast build `getPurchasePlanImpact` sized
+  // to this plan, so they cannot disagree about "today" or about how far out
+  // the horizon runs — which is the whole reason the baseline is returned
+  // rather than rebuilt here against a horizon of this page's own choosing.
+  // Still joined on the date, not the position, and a day without a
+  // counterpart is dropped rather than defaulted.
   const baselineByDate = new Map(
-    baseline.forecast.days.map((day) => [day.date, day.closingBalanceMinor]),
+    (baseline?.forecast.days ?? []).map((day) => [day.date, day.closingBalanceMinor]),
   );
   const chartData = simulation
     ? simulation.forecastAfter.days.flatMap((day) => {
@@ -219,9 +222,16 @@ function HorizonImpact({
             {fits ? "This fits on the horizon" : "This does not fit on the horizon"}
           </h3>
         </div>
-        <span className="font-amount text-sm tabular-nums text-muted-foreground">
-          {formatMoney(simulation.totalCostMinor, currencyCode)} total
-        </span>
+        <div className="flex flex-col items-end">
+          <span className="font-amount text-sm tabular-nums text-muted-foreground">
+            {formatMoney(simulation.totalCostMinor, currencyCode)} total
+          </span>
+          {simulation.lastPaymentDate && (
+            <span className="text-xs text-muted-foreground">
+              paid off {formatDate(simulation.lastPaymentDate)}
+            </span>
+          )}
+        </div>
       </div>
 
       {simulation.rejections.length > 0 && (
@@ -245,10 +255,21 @@ function HorizonImpact({
           note={`on ${formatDate(simulation.minimumBalanceAfterDate)}`}
           currencyCode={currencyCode}
         />
+        {/*
+          Safe-to-spend floors at zero, so a horizon already under the reserve
+          reads "R$0 → R$0" however much worse the plan makes it. The unclamped
+          surplus is the number that still moves, and without it this tile says
+          nothing at exactly the moment it matters most.
+        */}
         <BeforeAfter
           label="Safe to spend"
           beforeMinor={simulation.safeToSpendBeforeMinor}
           afterMinor={simulation.safeToSpendAfterMinor}
+          note={
+            simulation.safeToSpendSurplusAfterMinor < 0
+              ? `${formatMoney(-simulation.safeToSpendSurplusAfterMinor, currencyCode)} below the protected reserve`
+              : undefined
+          }
           currencyCode={currencyCode}
         />
       </dl>
@@ -355,6 +376,40 @@ function trimQuietTail(entries: MonthlyOutlookEntry[]): MonthlyOutlookEntry[] {
 }
 
 /**
+ * One item's settlement inside a month — which parcel of which purchase made up
+ * that month's outflow. The engine attributes it; this only prints it, and in
+ * particular never derives "3 of 12" by dividing anything.
+ */
+function InstallmentRow({
+  outflow,
+  currencyCode,
+}: {
+  outflow: PlanItemMonthlyOutflow;
+  currencyCode: string;
+}) {
+  return (
+    // `!border-t-0` beats `divide-y`'s `& > * + *`, which a plain
+    // `border-none` loses to on specificity: a parcel belongs to the month
+    // above it, not to a row of its own.
+    <tr className="!border-t-0 text-muted-foreground">
+      <td className="py-0.5 pl-3 text-[0.6875rem]" colSpan={1}>
+        <span className="mr-1.5 text-muted-foreground/40">└</span>
+        {outflow.label}
+        {outflow.totalInstallments > 1 && (
+          <span className="ml-1.5 text-muted-foreground/70">
+            {outflow.installmentNumber}/{outflow.totalInstallments}
+          </span>
+        )}
+      </td>
+      <td className="py-0.5 text-right font-amount text-[0.6875rem] tabular-nums">
+        {formatMoney(outflow.amountMinor, currencyCode)}
+      </td>
+      <td colSpan={2} />
+    </tr>
+  );
+}
+
+/**
  * Answers "what does this cost me each month, and what's left". Every column
  * is a field `simulatePurchasePlan` already computed on the same forecast the
  * verdict above is — nothing here sums or nets minor units.
@@ -384,25 +439,34 @@ function MonthlyOutlookTable({
           {rows.map((entry) => {
             const negative = entry.minimumBalanceMinor < 0;
             return (
-              <tr key={entry.month}>
-                <td className="py-1.5 text-muted-foreground">{formatMonth(entry.month)}</td>
-                <td className="py-1.5 text-right font-amount tabular-nums">
-                  {entry.purchaseOutflowMinor > 0
-                    ? formatMoney(entry.purchaseOutflowMinor, currencyCode)
-                    : "—"}
-                </td>
-                <td
-                  className={cn(
-                    "py-1.5 text-right font-amount tabular-nums",
-                    negative && "font-medium text-destructive",
-                  )}
-                >
-                  {formatMoney(entry.minimumBalanceMinor, currencyCode)}
-                </td>
-                <td className="py-1.5 text-right font-amount tabular-nums">
-                  {formatMoney(entry.closingBalanceMinor, currencyCode)}
-                </td>
-              </tr>
+              <Fragment key={entry.month}>
+                <tr>
+                  <td className="py-1.5 text-muted-foreground">{formatMonth(entry.month)}</td>
+                  <td className="py-1.5 text-right font-amount tabular-nums">
+                    {entry.purchaseOutflowMinor > 0
+                      ? formatMoney(entry.purchaseOutflowMinor, currencyCode)
+                      : "—"}
+                  </td>
+                  <td
+                    className={cn(
+                      "py-1.5 text-right font-amount tabular-nums",
+                      negative && "font-medium text-destructive",
+                    )}
+                  >
+                    {formatMoney(entry.minimumBalanceMinor, currencyCode)}
+                  </td>
+                  <td className="py-1.5 text-right font-amount tabular-nums">
+                    {formatMoney(entry.closingBalanceMinor, currencyCode)}
+                  </td>
+                </tr>
+                {entry.items.map((outflow) => (
+                  <InstallmentRow
+                    key={`${entry.month}:${outflow.itemId}:${outflow.installmentNumber}`}
+                    outflow={outflow}
+                    currencyCode={currencyCode}
+                  />
+                ))}
+              </Fragment>
             );
           })}
         </tbody>

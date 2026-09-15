@@ -333,3 +333,77 @@ export function resolveProjectedEvents(events: ForecastEvent[], facts: SettledFa
     return transactionId ? { ...event, resolvedByTransactionId: transactionId } : event;
   });
 }
+
+export interface CardDebtCycle {
+  statementMonth: string;
+  dueAt: DateString;
+  /** Purchases and fees posted in the period, as a positive magnitude. */
+  chargesMinor: number;
+}
+
+export interface CardDebtAllocation {
+  /** What each statement month still owes, as a positive magnitude. */
+  billedByStatementMonth: Map<string, number>;
+  /**
+   * Balance that landed on cycles already past due, and was not projected.
+   *
+   * Not a rounding leftover and not necessarily money you owe on a future
+   * statement — see the note on `allocateCardDebt` for why it is dropped rather
+   * than carried. Reported so a caller can say the balance did not fit instead
+   * of the figure vanishing without a trace.
+   */
+  unplacedMinor: number;
+}
+
+/**
+ * Spreads a card's outstanding balance over the statements that will collect it.
+ *
+ * A payment cannot be matched to a cycle by its own date: paying the August
+ * bill on 5 September posts inside September's period but settles August. So
+ * the credits are not netted per period — the account balance is the real debt,
+ * and since a card settles oldest first, what is left unpaid is the most recent
+ * charges. Hence newest-first.
+ *
+ * Balance that spills past the cycles still ahead is dropped, and that is the
+ * load-bearing part. It is tempting to read the spill as overdue debt and carry
+ * it onto the next statement — it is usually not. A provider reports a card's
+ * balance as everything outstanding, future installments included, and those
+ * installments are already projected from the installment ledger onto the
+ * statements that will actually bill them. Carrying the spill forward bills
+ * them a second time, weeks early, and can inflate one statement past a whole
+ * month of income (PRD R3).
+ *
+ * Dropping it errs the other way, and that is a real cost: a card genuinely in
+ * arrears understates its next statement. `unplacedMinor` is what makes that
+ * visible, and it is the number to reach for before changing this rule.
+ */
+export function allocateCardDebt(
+  cycles: CardDebtCycle[],
+  debtMinor: number,
+  asOf: DateString,
+): CardDebtAllocation {
+  assertMinorUnits(debtMinor, "debtMinor");
+  assertValidDate(asOf, "asOf");
+  if (debtMinor < 0) throw new Error("debtMinor must be a positive magnitude");
+
+  const billedByStatementMonth = new Map<string, number>();
+  if (debtMinor === 0) return { billedByStatementMonth, unplacedMinor: 0 };
+
+  const newestFirst = [...cycles].sort((left, right) =>
+    right.statementMonth.localeCompare(left.statementMonth),
+  );
+  let remainingMinor = debtMinor;
+  let unplacedMinor = 0;
+  for (const cycle of newestFirst) {
+    if (remainingMinor <= 0) break;
+    assertValidDate(cycle.dueAt, `cycle ${cycle.statementMonth}.dueAt`);
+    assertMinorUnits(cycle.chargesMinor, `cycle ${cycle.statementMonth}.chargesMinor`);
+    const billedMinor = Math.min(cycle.chargesMinor, remainingMinor);
+    if (billedMinor <= 0) continue;
+    remainingMinor -= billedMinor;
+    if (cycle.dueAt < asOf) unplacedMinor += billedMinor;
+    else billedByStatementMonth.set(cycle.statementMonth, billedMinor);
+  }
+
+  return { billedByStatementMonth, unplacedMinor };
+}

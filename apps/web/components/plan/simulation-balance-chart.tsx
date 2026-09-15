@@ -28,7 +28,9 @@ export function SimulationBalanceChart({
   currencyCode: string;
 }) {
   return (
-    <ChartContainer config={config}>
+    // Fixed height rather than `aspect-video`: on a wide panel a 16:9 box turns
+    // a one-line trend into half a screen of empty plot.
+    <ChartContainer config={config} className="aspect-auto h-44 w-full">
       <AreaChart data={data} margin={{ left: 4, right: 4, top: 8 }}>
         <defs>
           <linearGradient id="simulationAfterFill" x1="0" y1="0" x2="0" y2="1">

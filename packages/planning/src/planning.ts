@@ -17,6 +17,16 @@ export interface SafeToSpendInput {
 
 export interface SafeToSpendResult {
   safeToSpendMinor: number;
+  /**
+   * `minimumBalanceMinor - hardReserveMinor`, unclamped.
+   *
+   * `safeToSpendMinor` answers "how much may I spend", so it floors at zero —
+   * you cannot spend a negative amount. That floor also erases the only number
+   * that matters once the trough is already under the reserve: how far under.
+   * Two plans that both report zero safe-to-spend are not the same plan, and
+   * this is what tells them apart.
+   */
+  surplusMinor: number;
   minimumBalanceMinor: number;
   minimumBalanceDate: string;
   hardReserveViolated: boolean;
@@ -35,6 +45,7 @@ export function calculateSafeToSpend(input: SafeToSpendInput): SafeToSpendResult
   const available = forecast.minimumBalanceMinor - input.hardReserveMinor;
   return {
     safeToSpendMinor: Math.max(0, available),
+    surplusMinor: available,
     minimumBalanceMinor: forecast.minimumBalanceMinor,
     minimumBalanceDate: forecast.minimumBalanceDate,
     hardReserveViolated: forecast.minimumBalanceMinor < input.hardReserveMinor,
@@ -575,11 +586,28 @@ export interface CardLoad {
   exceededMinor: number;
 }
 
+/** One settlement of one plan item, landing in one month. */
+export interface PlanItemMonthlyOutflow {
+  itemId: string;
+  label: string;
+  /** Cash leaving for this item this month, as a positive magnitude. */
+  amountMinor: number;
+  /** Which settlement of the item this is, and of how many. `1 of 1` when paid outright. */
+  installmentNumber: number;
+  totalInstallments: number;
+}
+
 export interface MonthlyOutlookEntry {
   /** `YYYY-MM`. */
   month: string;
   /** Cash this plan takes out during the month. */
   purchaseOutflowMinor: number;
+  /**
+   * What made up that outflow, one entry per settlement, in date order.
+   * Sums to `purchaseOutflowMinor` — a month's total and its parts are read off
+   * the same events, so the table can never show a total its rows contradict.
+   */
+  items: PlanItemMonthlyOutflow[];
   /** Lowest the balance gets during the month, and the day it happens. */
   minimumBalanceMinor: number;
   minimumBalanceDate: DateString;
@@ -602,6 +630,9 @@ export interface PurchasePlanSimulation {
   items: PlanItemContribution[];
   safeToSpendBeforeMinor: number;
   safeToSpendAfterMinor: number;
+  /** The same two figures unclamped — negative once the trough is under the reserve. */
+  safeToSpendSurplusBeforeMinor: number;
+  safeToSpendSurplusAfterMinor: number;
   minimumBalanceBeforeMinor: number;
   minimumBalanceBeforeDate: DateString;
   minimumBalanceAfterMinor: number;
@@ -748,11 +779,34 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     }
   }
 
+  // The monthly total and its per-item breakdown are derived in one pass, from
+  // the same events, so the table can never show a total its own rows disagree
+  // with. Walking items rather than the flattened `planEvents` is what keeps
+  // each settlement attributable — flattening loses which item paid.
   const monthlyImpactMinor: Record<string, number> = {};
-  for (const event of planEvents) {
-    if (event.amountMinor >= 0) continue;
-    const key = monthKey(event.expectedAt);
-    monthlyImpactMinor[key] = (monthlyImpactMinor[key] ?? 0) + -event.amountMinor;
+  const outflowsByMonth = new Map<string, PlanItemMonthlyOutflow[]>();
+  for (const item of input.items) {
+    const settlements = item.option.cashEvents
+      .filter((event) => event.amountMinor < 0)
+      .sort((left, right) => left.expectedAt.localeCompare(right.expectedAt));
+    // The engine never reads an installment number off the option: a card
+    // settles one cycle per parcel, so the position in date order *is* the
+    // parcel number. `installments` is only trusted for the denominator, and
+    // falls back to the settlements actually produced.
+    const totalInstallments = item.option.installments ?? Math.max(1, settlements.length);
+    settlements.forEach((event, index) => {
+      const key = monthKey(event.expectedAt);
+      monthlyImpactMinor[key] = (monthlyImpactMinor[key] ?? 0) + -event.amountMinor;
+      const forMonth = outflowsByMonth.get(key) ?? [];
+      forMonth.push({
+        itemId: item.itemId,
+        label: item.label,
+        amountMinor: -event.amountMinor,
+        installmentNumber: index + 1,
+        totalInstallments,
+      });
+      outflowsByMonth.set(key, forMonth);
+    });
   }
 
   const settlementDates = planEvents.map((event) => event.expectedAt).sort();
@@ -765,6 +819,7 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
       outlookByMonth.set(month, {
         month,
         purchaseOutflowMinor: monthlyImpactMinor[month] ?? 0,
+        items: outflowsByMonth.get(month) ?? [],
         minimumBalanceMinor: day.closingBalanceMinor,
         minimumBalanceDate: day.date,
         closingBalanceMinor: day.closingBalanceMinor,
@@ -784,6 +839,8 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     items,
     safeToSpendBeforeMinor: before.safeToSpendMinor,
     safeToSpendAfterMinor: after.safeToSpendMinor,
+    safeToSpendSurplusBeforeMinor: before.surplusMinor,
+    safeToSpendSurplusAfterMinor: after.surplusMinor,
     minimumBalanceBeforeMinor: before.minimumBalanceMinor,
     minimumBalanceBeforeDate: before.minimumBalanceDate,
     minimumBalanceAfterMinor: after.minimumBalanceMinor,

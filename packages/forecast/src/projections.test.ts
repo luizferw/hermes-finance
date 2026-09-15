@@ -7,6 +7,7 @@ import {
   nominalCycleFor,
   projectRecurrences,
   projectStatements,
+  allocateCardDebt,
   resolveProjectedEvents,
   statementMonthForDueDate,
 } from "./projections";
@@ -349,5 +350,52 @@ describe("statementMonthForDueDate", () => {
   it("rejects out-of-range days", () => {
     expect(() => statementMonthForDueDate("2026-08-10", 0, 10)).toThrow(/closingDay/);
     expect(() => statementMonthForDueDate("2026-08-10", 2, 32)).toThrow(/dueDay/);
+  });
+});
+
+describe("allocateCardDebt", () => {
+  const cycles = [
+    { statementMonth: "2026-07", dueAt: "2026-08-07", chargesMinor: 400_000 },
+    { statementMonth: "2026-08", dueAt: "2026-09-07", chargesMinor: 300_000 },
+    { statementMonth: "2026-09", dueAt: "2026-10-07", chargesMinor: 200_000 },
+  ];
+
+  it("hands the balance out newest-first, because a card settles oldest-first", () => {
+    const result = allocateCardDebt(cycles, 250_000, "2026-09-15");
+
+    expect(result.billedByStatementMonth.get("2026-09")).toBe(200_000);
+    expect(result.unplacedMinor).toBe(50_000);
+  });
+
+  it("never bills a statement for balance that spilled past the cycles ahead", () => {
+    // A provider reports the whole outstanding balance, future installments
+    // included, and those are projected from the installment ledger onto the
+    // statements that will bill them. Pushing the spill onto October would
+    // charge them twice, weeks early — once past a whole month of income.
+    const result = allocateCardDebt(cycles, 900_000, "2026-09-15");
+
+    expect(result.billedByStatementMonth.get("2026-09")).toBe(200_000);
+    expect(result.billedByStatementMonth.size).toBe(1);
+    expect(result.unplacedMinor).toBe(700_000);
+  });
+
+  it("caps each cycle at its own charges and stops once the balance is spent", () => {
+    const result = allocateCardDebt(cycles, 1_000_000, "2026-07-01");
+
+    const total = [...result.billedByStatementMonth.values()].reduce((sum, value) => sum + value, 0);
+    expect(total).toBe(900_000);
+    expect(result.unplacedMinor).toBe(0);
+  });
+
+  it("reports balance it could not place rather than absorbing it silently", () => {
+    const past = [{ statementMonth: "2026-07", dueAt: "2026-08-07", chargesMinor: 400_000 }];
+    const result = allocateCardDebt(past, 400_000, "2026-09-15");
+
+    expect(result.unplacedMinor).toBe(400_000);
+    expect(result.billedByStatementMonth.size).toBe(0);
+  });
+
+  it("projects nothing for a card that is paid off", () => {
+    expect(allocateCardDebt(cycles, 0, "2026-09-15").billedByStatementMonth.size).toBe(0);
   });
 });

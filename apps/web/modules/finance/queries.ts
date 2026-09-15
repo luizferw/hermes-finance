@@ -16,9 +16,10 @@ import {
   purchasePlans,
   transactions,
 } from "@kosh/db";
-import { addDays, todayIso } from "@kosh/domain";
+import { addDays, monthRange, todayIso } from "@kosh/domain";
 import { getUserSettings } from "@/modules/settings/queries";
 import {
+  allocateCardDebt,
   buildForecast,
   projectRecurrences,
   projectStatements,
@@ -164,10 +165,29 @@ function toRecurrenceInterval(interval: string): RecurrenceInterval {
   return interval as RecurrenceInterval;
 }
 
+/**
+ * Card balance that did not fit on any statement still ahead, and so is absent
+ * from the horizon.
+ *
+ * Usually not a gap: a provider reports a card's balance as everything
+ * outstanding, future installments included, and those are already projected
+ * onto the statements that will bill them. On a card genuinely in arrears it is
+ * a real understatement. Either way it is surfaced rather than dropped in
+ * silence — see `allocateCardDebt`.
+ */
+export interface CardDebtUnplaced {
+  cardId: string;
+  cardName: string;
+  /** How much of the balance found no statement, as a positive magnitude. */
+  unplacedMinor: number;
+}
+
 export interface UserForecast {
   forecast: Forecast;
   labels: Map<string, string>;
   position: FinancePosition;
+  /** Empty whenever every card's balance fits on statements still ahead. */
+  cardDebtUnplaced: CardDebtUnplaced[];
 }
 
 /**
@@ -187,6 +207,7 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
   const range = { from: asOf, to: horizonEnd };
   const labels = new Map<string, string>();
   const events: ForecastEvent[] = [];
+  const cardDebtUnplaced: CardDebtUnplaced[] = [];
 
   // 1. Events already materialized with explicit provenance.
   const persisted = await db.query.projectedEvents.findMany({
@@ -341,45 +362,37 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     const debtByAccountId = new Map(
       cardAccounts.map((account) => [account.id, Math.max(0, -account.currentBalanceMinor)]),
     );
-
     for (const card of cards) {
       const derived = await deriveLedgerCycles(userId, card);
 
-      // How much of each statement is still owed.
-      //
-      // A payment cannot be matched to a cycle by its own date: paying the
-      // August bill on 5 September posts inside September's period but settles
-      // August. Netting per period therefore cancels the wrong statement — it
-      // erases the charges you have not been billed for yet and leaves the ones
-      // you already paid. So the credits are not netted here at all.
-      //
-      // Instead the card account's balance — every charge less every payment,
-      // transfer legs included — is the real debt, and a card settles oldest
-      // first. What is left unpaid is the most recent charges, so the debt is
-      // handed out newest-first. A card paid off has a debt of zero and
-      // projects nothing, which is the point: a settled bill must stop taking
-      // cash out of the horizon.
-      let remainingDebtMinor = debtByAccountId.get(card.accountId) ?? 0;
-      const billedByMonth = new Map<string, number>();
-      const newestFirst = [...derived.entries()].sort(([left], [right]) => right.localeCompare(left));
-      for (const [month, entry] of newestFirst) {
-        if (remainingDebtMinor <= 0) break;
-        const billedMinor = Math.min(entry.chargesMinor, remainingDebtMinor);
-        remainingDebtMinor -= billedMinor;
-        billedByMonth.set(month, billedMinor);
+      // How much of each statement is still owed. `allocateCardDebt` owns the
+      // rule — including where debt that spills onto an already-overdue cycle
+      // goes, which is forward onto the next statement rather than off the
+      // horizon entirely.
+      const allocation = allocateCardDebt(
+        [...derived.entries()].map(([statementMonth, entry]) => ({
+          statementMonth,
+          dueAt: entry.dueAt,
+          chargesMinor: entry.chargesMinor,
+        })),
+        debtByAccountId.get(card.accountId) ?? 0,
+        asOf,
+      );
+      if (allocation.unplacedMinor > 0) {
+        cardDebtUnplaced.push({
+          cardId: card.id,
+          cardName: card.name,
+          unplacedMinor: allocation.unplacedMinor,
+        });
       }
 
-      for (const [month, entry] of derived) {
+      for (const [month, billedMinor] of allocation.billedByStatementMonth) {
         if (recordedMonths.has(`${card.id}:${month}`)) continue;
-        if (entry.dueAt < asOf || entry.dueAt > horizonEnd) continue;
-        // Debt allocated to a cycle already past due is not projected: the
-        // forecast asks about what is still ahead, and an overdue statement
-        // has no future date to charge it on.
-        const billedMinor = billedByMonth.get(month) ?? 0;
-        if (billedMinor === 0) continue;
+        const dueAt = derived.get(month)?.dueAt;
+        if (!dueAt || dueAt < asOf || dueAt > horizonEnd) continue;
 
         const id = `derived:${card.id}:${month}`;
-        billingCycles.push({ id, creditCardId: card.id, statementMonth: month, dueAt: entry.dueAt });
+        billingCycles.push({ id, creditCardId: card.id, statementMonth: month, dueAt });
         charges.push({ billingCycleId: id, amountMinor: billedMinor });
       }
     }
@@ -517,7 +530,7 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     `ms=${Math.round(performance.now() - startedAt)}`,
   );
 
-  return { forecast, labels, position };
+  return { forecast, labels, position, cardDebtUnplaced };
 }
 
 function tagLabels(
@@ -1131,9 +1144,24 @@ export interface PurchasePlanImpactResult {
   plan: NonNullable<Awaited<ReturnType<typeof getPurchasePlan>>>;
   /** Undefined only when no item in the plan carries both an account and a purchase date. */
   simulation?: PurchasePlanSimulation;
+  /**
+   * The forecast without the plan, over the very horizon the simulation was
+   * measured on. Returned rather than left to the caller to rebuild: the two
+   * series are only comparable while they share one `asOf` and one
+   * `horizonEnd`, and that horizon is derived here. Undefined exactly when
+   * `simulation` is.
+   */
+  baseline?: UserForecast;
   /** Items missing an account or a purchase date — excluded from the simulation, reported instead of silently dropped. */
   unprojectedItems: Array<{ id: string; name: string }>;
 }
+
+/**
+ * How far a plan is looked at when its own instalments do not reach further.
+ * A plan paid off next month still gets asked the same question as one paid
+ * off next year: what does the year ahead look like.
+ */
+const MIN_PLAN_HORIZON_DAYS = 365;
 
 /**
  * What this plan's items do to the horizon.
@@ -1168,15 +1196,8 @@ export async function getPurchasePlanImpact(
   }
 
   if (projectable.length === 0) {
-    return { plan, simulation: undefined, unprojectedItems };
+    return { plan, simulation: undefined, baseline: undefined, unprojectedItems };
   }
-
-  const horizonDays = 365;
-  const [{ forecast }, hardReserveMinor, softReserves] = await Promise.all([
-    buildUserForecastDetailed(userId, horizonDays),
-    getHardReserveMinor(userId),
-    getSoftReserves(userId),
-  ]);
 
   const items: PlanItemOption[] = await Promise.all(
     projectable.map(async (item) => {
@@ -1198,6 +1219,32 @@ export async function getPurchasePlanImpact(
     }),
   );
 
+  // The horizon has to outlast the plan. `buildForecast` keeps only the
+  // events inside [asOf, horizonEnd] and drops the rest without a word, so a
+  // fixed year would cut the tail off anything bought late in it: the last
+  // instalments would be absent from the trough and absent from the monthly
+  // outlook, and the plan would read cheaper than it is. Stretching to
+  // the end of the month the final instalment lands in also keeps that closing
+  // row a whole month, like every other row in the table.
+  //
+  // This is why the forecast cannot be built alongside the options above: the
+  // horizon is not knowable until the settlement dates are.
+  const asOf = todayIso();
+  const lastPaymentDate = items
+    .flatMap((item) => item.option.cashEvents.map((event) => event.expectedAt))
+    .reduce((latest, date) => (date > latest ? date : latest), asOf);
+  const horizonDays = Math.max(
+    MIN_PLAN_HORIZON_DAYS,
+    daysBetween(asOf, monthRange(lastPaymentDate).end),
+  );
+
+  const [baseline, hardReserveMinor, softReserves] = await Promise.all([
+    buildUserForecastDetailed(userId, horizonDays),
+    getHardReserveMinor(userId),
+    getSoftReserves(userId),
+  ]);
+  const { forecast } = baseline;
+
   const simulation = simulatePurchasePlan({
     forecastInput: {
       asOf: forecast.asOf,
@@ -1215,7 +1262,7 @@ export async function getPurchasePlanImpact(
     items,
   });
 
-  return { plan, simulation, unprojectedItems };
+  return { plan, simulation, baseline, unprojectedItems };
 }
 
 

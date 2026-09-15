@@ -256,3 +256,78 @@ describe("monthlyOutlook", () => {
     expect([...months].sort()).toEqual(months);
   });
 });
+
+describe("monthlyOutlook breakdown", () => {
+  it("attributes each month's outflow to the item and parcel that caused it", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        cardItem("stroller", 240_000, ["2026-10-10", "2026-11-10"], {
+          cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
+        }),
+        cashItem("mattress", 100_000, "2026-10-20"),
+      ],
+    });
+
+    const october = result.monthlyOutlook.find((entry) => entry.month === "2026-10")!;
+    expect(october.items).toEqual([
+      { itemId: "stroller", label: "stroller", amountMinor: 120_000, installmentNumber: 1, totalInstallments: 2 },
+      { itemId: "mattress", label: "mattress", amountMinor: 100_000, installmentNumber: 1, totalInstallments: 1 },
+    ]);
+
+    const november = result.monthlyOutlook.find((entry) => entry.month === "2026-11")!;
+    expect(november.items).toEqual([
+      { itemId: "stroller", label: "stroller", amountMinor: 120_000, installmentNumber: 2, totalInstallments: 2 },
+    ]);
+  });
+
+  it("never lets a month's parts disagree with its total", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        cardItem("stroller", 240_000, ["2026-10-10", "2026-11-10"], {
+          cardId: "card-1", label: "Inter", creditLimitMinor: 900_000, committedMinor: 0,
+        }),
+        cashItem("mattress", 100_000, "2026-10-20"),
+        cashItem("floor", 190_000, "2026-12-03"),
+      ],
+    });
+
+    for (const entry of result.monthlyOutlook) {
+      const summed = entry.items.reduce((total, item) => total + item.amountMinor, 0);
+      expect(summed).toBe(entry.purchaseOutflowMinor);
+    }
+  });
+
+  it("leaves a quiet month with an empty breakdown, not a missing one", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [cashItem("mattress", 100_000, "2026-10-20")],
+    });
+
+    const september = result.monthlyOutlook.find((entry) => entry.month === "2026-09")!;
+    expect(september.items).toEqual([]);
+  });
+});
+
+describe("safe-to-spend surplus", () => {
+  it("keeps reporting how far under the reserve a plan drives the trough", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      // A reserve nothing can satisfy, so safe-to-spend floors at zero on both
+      // sides and the clamped pair stops telling the two apart.
+      hardReserveMinor: 5_000_000,
+      // Bought before the first salary lands, so it moves the trough rather
+      // than being absorbed by a later peak.
+      items: [cashItem("mattress", 500_000, "2026-09-08")],
+    });
+
+    expect(result.safeToSpendBeforeMinor).toBe(0);
+    expect(result.safeToSpendAfterMinor).toBe(0);
+    expect(result.safeToSpendSurplusAfterMinor).toBeLessThan(result.safeToSpendSurplusBeforeMinor);
+    expect(result.safeToSpendSurplusBeforeMinor - result.safeToSpendSurplusAfterMinor).toBe(500_000);
+  });
+});
