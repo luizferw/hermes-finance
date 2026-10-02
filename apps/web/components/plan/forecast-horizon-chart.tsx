@@ -2,19 +2,28 @@
 
 import { useState } from "react";
 import { Area, AreaChart, CartesianGrid, ReferenceDot, XAxis, YAxis } from "recharts";
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from "@/components/ui/chart";
+import { ChartContainer, ChartTooltip, type ChartConfig } from "@/components/ui/chart";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { formatDate, formatDateShort, formatMoney } from "@/lib/format";
+
+export interface HorizonMovement {
+  id: string;
+  label: string;
+  /** Signed cash impact, as the engine projected it. */
+  amountMinor: number;
+}
+
+export interface HorizonPoint {
+  date: string;
+  closingBalanceMinor: number;
+  /** The projected events that land on this day. */
+  movements: HorizonMovement[];
+}
 
 export interface HorizonSeries {
   horizonDays: number;
   label: string;
-  data: Array<{ date: string; closingBalanceMinor: number }>;
+  data: HorizonPoint[];
   /** Every figure below comes straight from the forecast engine for this exact horizon. */
   openingBalanceMinor: number;
   minimumBalanceMinor: number;
@@ -89,16 +98,7 @@ export function ForecastHorizonChart({
             tickFormatter={(v: string) => formatDateShort(v)}
           />
           <YAxis hide domain={["auto", "auto"]} />
-          <ChartTooltip
-            content={
-              <ChartTooltipContent
-                labelFormatter={(v) => formatDateShort(String(v))}
-                formatter={(value) => (
-                  <span className="font-amount">{formatMoney(Number(value), currency)}</span>
-                )}
-              />
-            }
-          />
+          <ChartTooltip content={<HorizonTooltip currency={currency} />} />
           <Area
             dataKey="closingBalanceMinor"
             type="monotone"
@@ -132,6 +132,51 @@ export function ForecastHorizonChart({
         {formatMoney(active.openingBalanceMinor, currency)} and fall to a low of{" "}
         {formatMoney(active.minimumBalanceMinor, currency)} on {formatDate(active.minimumBalanceDate)}.
       </p>
+    </div>
+  );
+}
+
+/**
+ * The day's closing balance plus the movements that produced it. Recharts
+ * injects `active` and `payload`; the point itself rides on the payload, so
+ * the list is whatever the engine put on that day.
+ */
+function HorizonTooltip({
+  active,
+  payload,
+  currency,
+}: {
+  active?: boolean;
+  payload?: ReadonlyArray<{ payload?: HorizonPoint }>;
+  currency: string;
+}) {
+  const point = payload?.[0]?.payload;
+  if (!active || !point) return null;
+
+  return (
+    <div className="grid min-w-44 gap-1.5 rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs/relaxed shadow-xl">
+      <div className="font-medium">{formatDateShort(point.date)}</div>
+      <div className="font-amount tabular-nums">{formatMoney(point.closingBalanceMinor, currency)}</div>
+      {point.movements.length > 0 ? (
+        <ul className="grid gap-1 border-t border-border/50 pt-1.5">
+          {point.movements.map((movement) => (
+            <li key={movement.id} className="flex items-baseline justify-between gap-4">
+              <span className="max-w-40 truncate text-muted-foreground">{movement.label}</span>
+              <span
+                className={
+                  movement.amountMinor < 0
+                    ? "font-amount text-destructive tabular-nums"
+                    : "font-amount text-success tabular-nums"
+                }
+              >
+                {formatMoney(movement.amountMinor, currency)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="border-t border-border/50 pt-1.5 text-muted-foreground">No movements this day</div>
+      )}
     </div>
   );
 }

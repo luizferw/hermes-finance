@@ -54,12 +54,19 @@ export default async function FuturePage() {
 
   // Each horizon is its own engine run — the chart only ever switches
   // between fully precomputed series, never recomputes one client-side.
-  const chartSeries: HorizonSeries[] = horizonForecasts.map(({ forecast }, i) => ({
+  const chartSeries: HorizonSeries[] = horizonForecasts.map(({ forecast, labels }, i) => ({
     horizonDays: CHART_HORIZONS[i]!.days,
     label: CHART_HORIZONS[i]!.label,
     data: forecast.days.map((day) => ({
       date: day.date,
       closingBalanceMinor: day.closingBalanceMinor,
+      // The engine's own events for the day, so the tooltip can say what moved
+      // the balance without the client deriving anything.
+      movements: day.events.map((event) => ({
+        id: event.id,
+        label: labels.get(event.logicalKey) ?? event.sourceType,
+        amountMinor: event.amountMinor,
+      })),
     })),
     openingBalanceMinor: forecast.openingBalanceMinor,
     minimumBalanceMinor: forecast.minimumBalanceMinor,
