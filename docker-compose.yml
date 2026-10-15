@@ -24,6 +24,10 @@ services:
       context: .
       target: builder
     command: pnpm db:migrate:safe
+    # One-shot job: web waits for it to exit. Explicit "no" because Coolify
+    # injects `restart: unless-stopped` into services that leave it unset,
+    # which turns the migration into a restart loop that never completes.
+    restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?set BETTER_AUTH_SECRET}
