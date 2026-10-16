@@ -20,6 +20,9 @@ COPY packages/open-finance/package.json packages/open-finance/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
+# Cap the build's V8 heap. On the 4 GB production host an uncapped `next build`
+# grew until the machine stalled; with this cap it peaks around 1.9 GB RSS.
+ENV NODE_OPTIONS=--max-old-space-size=1536
 COPY . .
 RUN pnpm build
 
