@@ -83,6 +83,12 @@ A UI nunca faz aritmética monetária: ela só formata números que o engine já
 
 `get_position` · `get_projection` · `get_projected_commitments` · `get_credit_cards` · `get_card_statement` · `get_confidence_breakdown` · `get_purchase_plans` · `get_purchase_plan` · `simulate_purchase` · `compare_payment_options`
 
+### Tools MCP de escrita de planos (scope `plans:write`)
+
+`create_purchase_plan` · `update_purchase_plan` · `delete_purchase_plan` · `create_purchase_item` · `update_purchase_item` · `set_purchase_item_active` · `delete_purchase_item`
+
+Gerenciam as listas de planejamento (PRD §19, §43). Valores entram em unidades maiores, na moeda do plano (default: a moeda do usuário); ids vêm de `get_purchase_plans`/`get_purchase_plan`; a conta de um item é informada pelo nome e precisa casar com uma conta do usuário (sem fallback). Cada tool chama o `xCore` de `modules/finance/mutations.ts`, o mesmo da UI, que faz a checagem de ownership (404) e grava o audit log. Em `/api/mcp` uma write tool roda `prepare` e `execute` em sequência, sem cartão de confirmação: as duas exclusões (`risk: sensitive`) dependem da aprovação do próprio cliente MCP.
+
 `get_projected_commitments` é distinta da `get_upcoming_commitments` que já existia no Kosh, que lista apenas bills cadastradas.
 
 ## Qualidade

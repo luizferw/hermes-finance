@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq, like } from "drizzle-orm";
-import { db, users, savingsGoals, automationRules, aiConversations } from "@kosh/db";
+import {
+  db,
+  users,
+  accounts,
+  savingsGoals,
+  automationRules,
+  aiConversations,
+  purchaseItems,
+  purchasePlans,
+} from "@kosh/db";
 import {
   appendAssistantMessage,
   appendUserMessage,
@@ -12,6 +21,8 @@ import { prepareProposal } from "./execute";
 import { executeProposal } from "./execute";
 import { MCP_TOOLS, TOOL_BY_NAME } from "./registry";
 import { getSafeToSpend } from "@/modules/finance/queries";
+import { createPurchaseItemCore, createPurchasePlanCore } from "@/modules/finance/mutations";
+import { listAccounts } from "@/modules/accounts/queries";
 import {
   createMcpToken,
   verifyMcpToken,
@@ -36,6 +47,7 @@ afterAll(async () => {
   await db.delete(savingsGoals).where(like(savingsGoals.name, "VITEST_%"));
   await db.delete(automationRules).where(like(automationRules.name, "VITEST_%"));
   await db.delete(aiConversations).where(like(aiConversations.title, "VITEST%"));
+  await db.delete(purchasePlans).where(like(purchasePlans.name, "VITEST_%"));
 });
 
 describe("idempotency gate", () => {
@@ -317,5 +329,141 @@ describe("mcp scoped tokens", () => {
   it("grants configured write scopes", async () => {
     const { token } = await createMcpToken(userId, "VITEST write", ["rules:write"]);
     expect((await verifyMcpToken(token))?.scopes).toEqual(["rules:write"]);
+  });
+});
+
+/* ── purchase plan write tools, driven the way /api/mcp drives them:
+   parse → prepare → execute the prepared payload, no confirmation step ─── */
+
+async function runLikeMcp(name: string, args: Record<string, unknown>, as: ToolContext = ctx) {
+  const tool = TOOL_BY_NAME.get(name) as WriteTool;
+  const input = tool.input.parse(args);
+  const prepared = await tool.prepare(as, input);
+  return { prepared, result: await tool.execute(as, prepared.payload, newIdempotencyKey()) };
+}
+
+function idFrom(detail: string | undefined) {
+  const id = /id ([0-9a-f-]{36})/.exec(detail ?? "")?.[1];
+  if (!id) throw new Error(`no id in "${detail}"`);
+  return id;
+}
+
+describe("purchase plan write tools", () => {
+  it("creates, edits, sets aside and deletes a plan and its item", async () => {
+    const account = (await listAccounts(userId)).find((a) => !a.isArchived)!;
+
+    const created = await runLikeMcp("create_purchase_plan", {
+      name: `VITEST_plan_${Date.now()}`,
+      budget: 1000.5,
+      targetDate: "2026-12-01",
+    });
+    expect(created.result.status).toBe("completed");
+    expect(created.prepared.fields.find((f) => f.label === "Budget")?.value).toBeTruthy();
+    const planId = idFrom(created.result.detail);
+    let plan = await db.query.purchasePlans.findFirst({ where: eq(purchasePlans.id, planId) });
+    expect(plan).toMatchObject({ userId, currencyCode: "INR", budgetMinor: 100050, targetDate: "2026-12-01" });
+
+    const added = await runLikeMcp("create_purchase_item", {
+      planId,
+      name: "Crib",
+      amount: 899.9,
+      account: account.name,
+      installments: 3,
+    });
+    expect(added.result.status).toBe("completed");
+    const itemId = idFrom(added.result.detail);
+    let item = await db.query.purchaseItems.findFirst({ where: eq(purchaseItems.id, itemId) });
+    expect(item).toMatchObject({
+      purchasePlanId: planId,
+      estimatedPriceMinor: 89990,
+      accountId: account.id,
+      installments: 3,
+      isActive: true,
+    });
+
+    await expect(
+      runLikeMcp("create_purchase_item", { planId, name: "Typo", amount: 1, account: "VITEST_no_such_account" }),
+    ).rejects.toThrow(/No account matching/);
+
+    const edited = await runLikeMcp("update_purchase_item", {
+      id: itemId,
+      amount: 950,
+      purchaseDate: "2026-11-20",
+      account: null,
+    });
+    expect(edited.result.status).toBe("completed");
+    item = await db.query.purchaseItems.findFirst({ where: eq(purchaseItems.id, itemId) });
+    expect(item).toMatchObject({ name: "Crib", estimatedPriceMinor: 95000, purchaseDate: "2026-11-20", accountId: null });
+
+    await expect(runLikeMcp("update_purchase_item", { id: itemId })).rejects.toThrow(/Nothing to change/);
+
+    await runLikeMcp("set_purchase_item_active", { id: itemId, isActive: false });
+    item = await db.query.purchaseItems.findFirst({ where: eq(purchaseItems.id, itemId) });
+    expect(item?.isActive).toBe(false);
+
+    await runLikeMcp("update_purchase_plan", { id: planId, status: "archived", budget: null });
+    plan = await db.query.purchasePlans.findFirst({ where: eq(purchasePlans.id, planId) });
+    expect(plan).toMatchObject({ status: "archived", budgetMinor: null, targetDate: "2026-12-01" });
+
+    const removedItem = await runLikeMcp("delete_purchase_item", { id: itemId });
+    expect(removedItem.prepared.undoable).toBe(false);
+    expect(await db.query.purchaseItems.findFirst({ where: eq(purchaseItems.id, itemId) })).toBeUndefined();
+
+    const removedPlan = await runLikeMcp("delete_purchase_plan", { id: planId });
+    expect(removedPlan.result.status).toBe("completed");
+    expect(await db.query.purchasePlans.findFirst({ where: eq(purchasePlans.id, planId) })).toBeUndefined();
+  });
+
+  it("refuses another user's plan, item and account with a 404", async () => {
+    const [other] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, "prd-scenario@kosh.local"))
+      .limit(1);
+    if (!other) throw new Error("prd scenario user missing — run seed:prd-scenario");
+    const foreignPlan = await createPurchasePlanCore(other.id, { name: `VITEST_foreign_${Date.now()}`, currencyCode: "BRL", status: "active" });
+    const foreignItem = await createPurchaseItemCore(other.id, {
+      purchasePlanId: foreignPlan.id,
+      name: "Stroller",
+      amount: 2500,
+      installments: 1,
+    });
+    const [foreignAccount] = await db.select({ id: accounts.id }).from(accounts).where(eq(accounts.userId, other.id)).limit(1);
+
+    // The read used by prepare is owner-scoped, so a foreign id never gets a proposal.
+    for (const [name, args] of [
+      ["update_purchase_plan", { id: foreignPlan.id, name: "pwned" }],
+      ["delete_purchase_plan", { id: foreignPlan.id }],
+      ["create_purchase_item", { planId: foreignPlan.id, name: "x", amount: 1 }],
+      ["update_purchase_item", { id: foreignItem.id, name: "pwned" }],
+      ["set_purchase_item_active", { id: foreignItem.id, isActive: false }],
+      ["delete_purchase_item", { id: foreignItem.id }],
+    ] as const) {
+      await expect(runLikeMcp(name, args), name).rejects.toThrow(/not found/);
+    }
+
+    // A forged payload that skips prepare still hits the xCore ownership asserts.
+    const exec = (name: string, payload: unknown) =>
+      (TOOL_BY_NAME.get(name) as WriteTool).execute(ctx, payload, newIdempotencyKey());
+    await expect(exec("delete_purchase_plan", { id: foreignPlan.id })).rejects.toMatchObject({ status: 404 });
+    await expect(exec("update_purchase_plan", { id: foreignPlan.id, changes: { name: "pwned" } })).rejects.toMatchObject({ status: 404 });
+    await expect(
+      exec("create_purchase_item", { purchasePlanId: foreignPlan.id, name: "x", amount: 1, installments: 1 }),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(exec("delete_purchase_item", { id: foreignItem.id })).rejects.toMatchObject({ status: 404 });
+    await expect(exec("set_purchase_item_active", { id: foreignItem.id, isActive: false })).rejects.toMatchObject({ status: 404 });
+
+    const ownPlan = await createPurchasePlanCore(userId, { name: `VITEST_own_${Date.now()}`, currencyCode: "INR", status: "active" });
+    await expect(
+      exec("create_purchase_item", { purchasePlanId: ownPlan.id, name: "x", amount: 1, accountId: foreignAccount!.id, installments: 1 }),
+    ).rejects.toMatchObject({ status: 404 });
+
+    expect(await db.query.purchasePlans.findFirst({ where: eq(purchasePlans.id, foreignPlan.id) })).toMatchObject({
+      name: foreignPlan.name,
+    });
+    expect(await db.query.purchaseItems.findFirst({ where: eq(purchaseItems.id, foreignItem.id) })).toMatchObject({
+      name: "Stroller",
+      isActive: true,
+    });
   });
 });

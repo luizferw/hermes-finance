@@ -205,6 +205,100 @@ describe("registry", () => {
   });
 });
 
+/* ── purchase plan write tools ──────────────────────────────────────────── */
+
+describe("purchase plan write tools", () => {
+  const PLAN_WRITE_TOOLS = [
+    "create_purchase_plan",
+    "update_purchase_plan",
+    "delete_purchase_plan",
+    "create_purchase_item",
+    "update_purchase_item",
+    "set_purchase_item_active",
+    "delete_purchase_item",
+  ];
+  const ID = "11111111-1111-4111-8111-111111111111";
+
+  it("registers all seven as write tools gated behind plans:write", () => {
+    for (const name of PLAN_WRITE_TOOLS) {
+      const tool = TOOL_BY_NAME.get(name);
+      expect(tool, name).toBeDefined();
+      expect(tool!.kind, name).toBe("write");
+      expect(tool!.requiredScope, name).toBe("plans:write");
+    }
+    expect(TOOL_BY_NAME.get("delete_purchase_plan")!.risk).toBe("sensitive");
+    expect(TOOL_BY_NAME.get("delete_purchase_item")!.risk).toBe("sensitive");
+  });
+
+  it("is invisible to a read-only token and visible with plans:write", () => {
+    const readOnly = new Set(toolsForScopes(["finance:read"]).map((t) => t.name));
+    const withPlans = new Set(toolsForScopes(["finance:read", "plans:write"]).map((t) => t.name));
+    for (const name of PLAN_WRITE_TOOLS) {
+      expect(readOnly.has(name), name).toBe(false);
+      expect(withPlans.has(name), name).toBe(true);
+    }
+  });
+
+  it("keeps a plain object input so MCP can publish its shape", () => {
+    for (const name of PLAN_WRITE_TOOLS) {
+      const shape = (TOOL_BY_NAME.get(name)!.input as unknown as { shape?: object }).shape;
+      expect(shape && Object.keys(shape).length, name).toBeGreaterThan(0);
+    }
+  });
+
+  it("requires uuid ids for plans and items", () => {
+    for (const name of ["update_purchase_plan", "delete_purchase_plan", "update_purchase_item", "delete_purchase_item"]) {
+      const tool = TOOL_BY_NAME.get(name)!;
+      expect(tool.input.safeParse({ id: "not-a-uuid" }).success, name).toBe(false);
+      expect(tool.input.safeParse({}).success, name).toBe(false);
+      expect(tool.input.safeParse({ id: ID }).success, name).toBe(true);
+    }
+    const active = TOOL_BY_NAME.get("set_purchase_item_active")!;
+    expect(active.input.safeParse({ id: "x", isActive: true }).success).toBe(false);
+    expect(active.input.safeParse({ id: ID }).success).toBe(false);
+    expect(active.input.safeParse({ id: ID, isActive: false }).success).toBe(true);
+    const item = TOOL_BY_NAME.get("create_purchase_item")!;
+    expect(item.input.safeParse({ planId: "x", name: "Crib", amount: 10 }).success).toBe(false);
+  });
+
+  it("validates plan inputs like the plan form does", () => {
+    const tool = TOOL_BY_NAME.get("create_purchase_plan")!;
+    expect(tool.input.parse({ name: "Layette" })).toEqual({ name: "Layette", status: "active" });
+    expect(tool.input.safeParse({ name: "" }).success).toBe(false);
+    expect(tool.input.safeParse({ name: "x".repeat(121) }).success).toBe(false);
+    expect(tool.input.safeParse({ name: "Layette", budget: -1 }).success).toBe(false);
+    expect(tool.input.safeParse({ name: "Layette", targetDate: "01/12/2026" }).success).toBe(false);
+    expect(tool.input.safeParse({ name: "Layette", currencyCode: "REAL" }).success).toBe(false);
+    expect(tool.input.safeParse({ name: "Layette", status: "deleted" }).success).toBe(false);
+    expect(
+      tool.input.safeParse({ name: "Layette", budget: 1500.5, targetDate: "2026-12-01", currencyCode: "brl" }).success,
+    ).toBe(true);
+
+    const update = TOOL_BY_NAME.get("update_purchase_plan")!;
+    expect(update.input.safeParse({ id: ID, budget: null, targetDate: null }).success).toBe(true);
+    expect(update.input.safeParse({ id: ID, budget: -5 }).success).toBe(false);
+  });
+
+  it("validates item inputs like the item form does", () => {
+    const tool = TOOL_BY_NAME.get("create_purchase_item")!;
+    expect(tool.input.parse({ planId: ID, name: "Crib", amount: 899.9 })).toEqual({
+      planId: ID,
+      name: "Crib",
+      amount: 899.9,
+      installments: 1,
+    });
+    expect(tool.input.safeParse({ planId: ID, name: "Crib" }).success).toBe(false);
+    expect(tool.input.safeParse({ planId: ID, name: "Crib", amount: -1 }).success).toBe(false);
+    expect(tool.input.safeParse({ planId: ID, name: "Crib", amount: 1, installments: 0 }).success).toBe(false);
+    expect(tool.input.safeParse({ planId: ID, name: "Crib", amount: 1, installments: 2.5 }).success).toBe(false);
+    expect(tool.input.safeParse({ planId: ID, name: "Crib", amount: 1, purchaseDate: "2026-13" }).success).toBe(false);
+
+    const update = TOOL_BY_NAME.get("update_purchase_item")!;
+    expect(update.input.safeParse({ id: ID, account: null, purchaseDate: null }).success).toBe(true);
+    expect(update.input.safeParse({ id: ID, installments: 0 }).success).toBe(false);
+  });
+});
+
 /* ── agent loop with fakes (no DB, no model) ────────────────────────────── */
 
 let lastReadArgs: unknown = null;

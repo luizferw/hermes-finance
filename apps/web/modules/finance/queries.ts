@@ -13,6 +13,7 @@ import {
   installmentPlans,
   installments,
   projectedEvents,
+  purchaseItems,
   purchasePlans,
   transactions,
 } from "@kosh/db";
@@ -1143,6 +1144,19 @@ export async function getPurchasePlan(userId: string, id: string) {
     with: { items: { with: { paymentOptions: true, simulations: true } } },
   });
   return plan ? { ...plan, ...totalsFor(plan.items, plan.budgetMinor) } : undefined;
+}
+
+/**
+ * One purchase item with its parent plan, or undefined when the item does not
+ * exist or its plan belongs to someone else. Items carry no userId of their
+ * own, so tenancy is the plan's.
+ */
+export async function getPurchaseItem(userId: string, itemId: string) {
+  const item = await db.query.purchaseItems.findFirst({
+    where: eq(purchaseItems.id, itemId),
+    with: { purchasePlan: true },
+  });
+  return item && item.purchasePlan.userId === userId ? item : undefined;
 }
 
 export interface PurchasePlanImpactResult {

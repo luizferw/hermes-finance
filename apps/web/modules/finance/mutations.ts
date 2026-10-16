@@ -658,15 +658,19 @@ export async function deleteCardPurchase(purchaseId: string) {
 }
 
 // --- purchase plans --------------------------------------------------------------
+//
+// Every plan/item mutation is split per the module convention: the `xCore`
+// function carries the whole behavior (validation, ownership, write, audit) and
+// takes `userId` explicitly, so the MCP write tools reuse it without a session;
+// the server action only resolves the session and revalidates the page.
 
-export async function createPurchasePlan(input: CreatePurchasePlanInput) {
-  const user = await requireUser();
+export async function createPurchasePlanCore(userId: string, input: CreatePurchasePlanInput) {
   const data = createPurchasePlanSchema.parse(input);
 
   const [plan] = await db
     .insert(purchasePlans)
     .values({
-      userId: user.id,
+      userId,
       name: data.name,
       description: data.description,
       targetDate: data.targetDate ?? null,
@@ -677,20 +681,29 @@ export async function createPurchasePlan(input: CreatePurchasePlanInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_plan.created",
     entityType: "purchase_plan",
     entityId: plan!.id,
     data: { name: data.name },
   });
-  revalidateFinance();
   return plan!;
 }
 
-export async function updatePurchasePlan(planId: string, input: UpdatePurchasePlanInput) {
+export async function createPurchasePlan(input: CreatePurchasePlanInput) {
   const user = await requireUser();
+  const plan = await createPurchasePlanCore(user.id, input);
+  revalidateFinance();
+  return plan;
+}
+
+export async function updatePurchasePlanCore(
+  userId: string,
+  planId: string,
+  input: UpdatePurchasePlanInput,
+) {
   const data = updatePurchasePlanSchema.parse(input);
-  const existing = await loadOwnedPurchasePlan(user.id, planId);
+  const existing = await loadOwnedPurchasePlan(userId, planId);
   const currency = data.currencyCode ?? existing.currencyCode;
 
   await db
@@ -711,36 +724,44 @@ export async function updatePurchasePlan(planId: string, input: UpdatePurchasePl
     .where(eq(purchasePlans.id, planId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_plan.updated",
     entityType: "purchase_plan",
     entityId: planId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updatePurchasePlan(planId: string, input: UpdatePurchasePlanInput) {
+  const user = await requireUser();
+  await updatePurchasePlanCore(user.id, planId, input);
   revalidateFinance();
 }
 
-export async function deletePurchasePlan(planId: string) {
-  const user = await requireUser();
-  const existing = await loadOwnedPurchasePlan(user.id, planId);
+export async function deletePurchasePlanCore(userId: string, planId: string) {
+  const existing = await loadOwnedPurchasePlan(userId, planId);
   await db.delete(purchasePlans).where(eq(purchasePlans.id, planId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_plan.deleted",
     entityType: "purchase_plan",
     entityId: planId,
     data: { name: existing.name },
   });
+}
+
+export async function deletePurchasePlan(planId: string) {
+  const user = await requireUser();
+  await deletePurchasePlanCore(user.id, planId);
   revalidateFinance();
 }
 
 // --- purchase items ----------------------------------------------------------------
 
-export async function createPurchaseItem(input: CreatePurchaseItemInput) {
-  const user = await requireUser();
+export async function createPurchaseItemCore(userId: string, input: CreatePurchaseItemInput) {
   const data = createPurchaseItemSchema.parse(input);
-  const plan = await loadOwnedPurchasePlan(user.id, data.purchasePlanId);
-  await assertAccountsOwned(user.id, [data.accountId]);
+  const plan = await loadOwnedPurchasePlan(userId, data.purchasePlanId);
+  await assertAccountsOwned(userId, [data.accountId]);
 
   const [item] = await db
     .insert(purchaseItems)
@@ -755,22 +776,31 @@ export async function createPurchaseItem(input: CreatePurchaseItemInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_item.created",
     entityType: "purchase_item",
     entityId: item!.id,
     data: { name: data.name },
   });
-  revalidateFinance();
   return item!;
 }
 
-export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseItemInput) {
+export async function createPurchaseItem(input: CreatePurchaseItemInput) {
   const user = await requireUser();
+  const item = await createPurchaseItemCore(user.id, input);
+  revalidateFinance();
+  return item;
+}
+
+export async function updatePurchaseItemCore(
+  userId: string,
+  itemId: string,
+  input: UpdatePurchaseItemInput,
+) {
   const data = updatePurchaseItemSchema.parse(input);
-  const existing = await loadOwnedPurchaseItem(user.id, itemId);
+  const existing = await loadOwnedPurchaseItem(userId, itemId);
   const currency = existing.purchasePlan.currencyCode;
-  if (data.accountId !== undefined) await assertAccountsOwned(user.id, [data.accountId]);
+  if (data.accountId !== undefined) await assertAccountsOwned(userId, [data.accountId]);
 
   await db
     .update(purchaseItems)
@@ -785,20 +815,28 @@ export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseIt
     .where(eq(purchaseItems.id, itemId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_item.updated",
     entityType: "purchase_item",
     entityId: itemId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseItemInput) {
+  const user = await requireUser();
+  await updatePurchaseItemCore(user.id, itemId, input);
   revalidateFinance();
 }
 
 /** Sets an item aside, or brings it back, without touching anything else on it. */
-export async function setPurchaseItemActive(itemId: string, input: SetPurchaseItemActiveInput) {
-  const user = await requireUser();
+export async function setPurchaseItemActiveCore(
+  userId: string,
+  itemId: string,
+  input: SetPurchaseItemActiveInput,
+) {
   const data = setPurchaseItemActiveSchema.parse(input);
-  await loadOwnedPurchaseItem(user.id, itemId);
+  await loadOwnedPurchaseItem(userId, itemId);
 
   await db
     .update(purchaseItems)
@@ -806,25 +844,33 @@ export async function setPurchaseItemActive(itemId: string, input: SetPurchaseIt
     .where(eq(purchaseItems.id, itemId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: data.isActive ? "purchase_item.activated" : "purchase_item.deactivated",
     entityType: "purchase_item",
     entityId: itemId,
   });
+}
+
+export async function setPurchaseItemActive(itemId: string, input: SetPurchaseItemActiveInput) {
+  const user = await requireUser();
+  await setPurchaseItemActiveCore(user.id, itemId, input);
   revalidateFinance();
 }
 
-export async function deletePurchaseItem(itemId: string) {
-  const user = await requireUser();
-  const existing = await loadOwnedPurchaseItem(user.id, itemId);
+export async function deletePurchaseItemCore(userId: string, itemId: string) {
+  const existing = await loadOwnedPurchaseItem(userId, itemId);
   await db.delete(purchaseItems).where(eq(purchaseItems.id, itemId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "purchase_item.deleted",
     entityType: "purchase_item",
     entityId: itemId,
     data: { name: existing.name },
   });
-  revalidateFinance();
 }
 
+export async function deletePurchaseItem(itemId: string) {
+  const user = await requireUser();
+  await deletePurchaseItemCore(user.id, itemId);
+  revalidateFinance();
+}

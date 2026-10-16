@@ -28,6 +28,7 @@ import {
   getCardStatement,
   getConfidenceBreakdown,
   getFinancePosition,
+  getPurchaseItem,
   getPurchasePlan,
   getSafeToSpend,
   getUpcomingCommitments as getProjectedCommitments,
@@ -48,6 +49,21 @@ import {
   bulkCategorizeCore,
 } from "@/modules/transactions/mutations";
 import { createGoalCore } from "@/modules/goals/mutations";
+import {
+  createPurchaseItemCore,
+  createPurchasePlanCore,
+  deletePurchaseItemCore,
+  deletePurchasePlanCore,
+  setPurchaseItemActiveCore,
+  updatePurchaseItemCore,
+  updatePurchasePlanCore,
+} from "@/modules/finance/mutations";
+import type {
+  CreatePurchaseItemInput,
+  CreatePurchasePlanInput,
+  UpdatePurchaseItemInput,
+  UpdatePurchasePlanInput,
+} from "@/modules/finance/validators";
 import {
   createRuleCore,
   listRulesCore,
@@ -188,6 +204,33 @@ const planRecommendationItemInput = z.object({
   neededBy: isoDateSchema.optional(),
   maxInstallments: z.number().int().min(1).max(60).optional(),
 });
+
+/* ── purchase plan writes (inputs mirror modules/finance/validators.ts;
+   amounts arrive in major units and the xCore converts them against the
+   plan's own currency, exactly as the UI forms do) ─────────────────────── */
+
+const planStatusInput = z.enum(["active", "completed", "archived"]);
+const currencyCodeInput = z.string().regex(/^[A-Za-z]{3}$/, "Use a 3-letter ISO 4217 code");
+
+/**
+ * Account by name, with no fallback. `resolveAccount` defaults to the first
+ * account when nothing matches, which is right for "add an expense" but wrong
+ * here: an item's account decides whether it settles on a card's cycles, so a
+ * typo must fail loudly instead of quietly projecting onto another account.
+ */
+async function resolveNamedAccount(userId: string, name: string) {
+  const accounts = (await listAccounts(userId)).filter((a) => !a.isArchived);
+  const h = name.toLowerCase();
+  const account =
+    accounts.find((a) => a.name.toLowerCase() === h) ??
+    accounts.find((a) => a.name.toLowerCase().includes(h));
+  if (!account) throw new Error(`No account matching "${name}".`);
+  return account;
+}
+
+function formatMajor(amount: number, currency: string) {
+  return formatMoney(majorToMinor(amount, currency), currency);
+}
 
 /* ── rule construction (narrow, typed; values resolved to owned ids) ──────── */
 
@@ -1084,6 +1127,9 @@ const readTools: ReadTool[] = [
               deadline: item.deadline,
               status: item.status,
               isActive: item.isActive,
+              purchaseDate: item.purchaseDate,
+              accountId: item.accountId,
+              installments: item.installments,
               paymentOptions: item.paymentOptions.map((option) => ({
                 id: option.id,
                 method: option.paymentMethod,
@@ -1131,6 +1177,9 @@ const readTools: ReadTool[] = [
               deadline: item.deadline,
               status: item.status,
               isActive: item.isActive,
+              purchaseDate: item.purchaseDate,
+              accountId: item.accountId,
+              installments: item.installments,
               paymentOptions: item.paymentOptions.map((option) => ({
                 id: option.id,
                 method: option.paymentMethod,
@@ -1591,6 +1640,305 @@ const writeTools: WriteTool[] = [
       const p = payload as { id: string };
       const r = await runRuleCore(ctx.userId, p.id);
       return { status: "completed" as ExecStatus, title: `Applied to ${r.applied}`, detail: `${r.matched} matched, ${r.applied} changed` };
+    },
+  }),
+
+  write({
+    name: "create_purchase_plan",
+    title: "Create purchase plan",
+    description:
+      "Create a purchase plan (a planning list such as 'Baby layette' that groups items to buy by a target date). budget is optional and in major units (e.g. 1500.50, not cents). currencyCode defaults to the user's currency; items added later are priced in it. Returns the new plan id; add items with create_purchase_item.",
+    risk: "write",
+    requiredScope: "plans:write",
+    input: z.object({
+      name: z.string().min(1).max(120),
+      description: z.string().max(2000).optional(),
+      targetDate: isoDateSchema.optional().describe("yyyy-MM-dd"),
+      budget: z.number().nonnegative().optional().describe("major units"),
+      currencyCode: currencyCodeInput.optional(),
+      status: planStatusInput.default("active"),
+    }),
+    async prepare(ctx, args) {
+      const currencyCode = (args.currencyCode ?? ctx.currency).toUpperCase();
+      const payload: CreatePurchasePlanInput = {
+        name: args.name,
+        description: args.description,
+        targetDate: args.targetDate ?? null,
+        budget: args.budget ?? null,
+        currencyCode,
+        status: args.status,
+      };
+      return {
+        payload,
+        title: "Create purchase plan?",
+        summary: args.name,
+        fields: [
+          { label: "Name", value: args.name },
+          { label: "Currency", value: currencyCode },
+          ...(args.budget != null ? [{ label: "Budget", value: formatMajor(args.budget, currencyCode) }] : []),
+          ...(args.targetDate ? [{ label: "By", value: args.targetDate }] : []),
+          ...(args.status !== "active" ? [{ label: "Status", value: args.status }] : []),
+        ],
+        undoable: true,
+      };
+    },
+    async execute(ctx, payload) {
+      const plan = await createPurchasePlanCore(ctx.userId, payload as CreatePurchasePlanInput);
+      return {
+        status: "completed" as ExecStatus,
+        title: "Purchase plan created",
+        detail: `${plan.name} (id ${plan.id})`,
+      };
+    },
+  }),
+
+  write({
+    name: "update_purchase_plan",
+    title: "Update purchase plan",
+    description:
+      "Change fields of an existing purchase plan by id (get ids from get_purchase_plans). Only the fields you pass change. budget is in major units; pass null to clear budget or targetDate. Changing currencyCode does not convert existing item prices.",
+    risk: "write",
+    requiredScope: "plans:write",
+    input: z.object({
+      id: z.string().uuid(),
+      name: z.string().min(1).max(120).optional(),
+      description: z.string().max(2000).optional(),
+      targetDate: isoDateSchema.nullable().optional().describe("yyyy-MM-dd, or null to clear"),
+      budget: z.number().nonnegative().nullable().optional().describe("major units, or null to clear"),
+      currencyCode: currencyCodeInput.optional(),
+      status: planStatusInput.optional(),
+    }),
+    async prepare(ctx, args) {
+      const plan = await getPurchasePlan(ctx.userId, args.id);
+      if (!plan) throw new Error("Purchase plan not found.");
+      const { id, ...rest } = args;
+      const changes: UpdatePurchasePlanInput = Object.fromEntries(
+        Object.entries(rest).filter(([, value]) => value !== undefined),
+      );
+      if (changes.currencyCode) changes.currencyCode = changes.currencyCode.toUpperCase();
+      if (Object.keys(changes).length === 0) throw new Error("Nothing to change.");
+      const currency = changes.currencyCode ?? plan.currencyCode;
+      const fields = [
+        changes.name !== undefined && { label: "Name", value: changes.name },
+        changes.description !== undefined && { label: "Description", value: changes.description },
+        changes.targetDate !== undefined && { label: "By", value: changes.targetDate ?? "No date" },
+        changes.budget !== undefined && {
+          label: "Budget",
+          value: changes.budget == null ? "No budget" : formatMajor(changes.budget, currency),
+        },
+        changes.currencyCode !== undefined && { label: "Currency", value: changes.currencyCode },
+        changes.status !== undefined && { label: "Status", value: changes.status },
+      ].filter((field): field is { label: string; value: string } => Boolean(field));
+      return {
+        payload: { id, changes },
+        title: "Update purchase plan?",
+        summary: plan.name,
+        fields,
+        undoable: true,
+      };
+    },
+    async execute(ctx, payload) {
+      const p = payload as { id: string; changes: UpdatePurchasePlanInput };
+      await updatePurchasePlanCore(ctx.userId, p.id, p.changes);
+      return { status: "completed" as ExecStatus, title: "Purchase plan updated", detail: `id ${p.id}` };
+    },
+  }),
+
+  write({
+    name: "delete_purchase_plan",
+    title: "Delete purchase plan",
+    description:
+      "Permanently delete a purchase plan by id (get ids from get_purchase_plans), together with all of its items. Cannot be undone; to keep the plan but stop using it, use update_purchase_plan with status 'archived' instead.",
+    risk: "sensitive",
+    requiredScope: "plans:write",
+    input: z.object({ id: z.string().uuid() }),
+    async prepare(ctx, args) {
+      const plan = await getPurchasePlan(ctx.userId, args.id);
+      if (!plan) throw new Error("Purchase plan not found.");
+      return {
+        payload: { id: args.id },
+        title: "Delete purchase plan?",
+        summary: `${plan.name} and its ${plan.items.length} item(s) will be deleted.`,
+        fields: [
+          { label: "Plan", value: plan.name },
+          { label: "Items", value: String(plan.items.length) },
+        ],
+        affectedCount: plan.items.length + 1,
+        warning: "This permanently deletes the plan and every item in it.",
+        undoable: false,
+      };
+    },
+    async execute(ctx, payload) {
+      const p = payload as { id: string };
+      await deletePurchasePlanCore(ctx.userId, p.id);
+      return { status: "completed" as ExecStatus, title: "Purchase plan deleted", detail: `id ${p.id}` };
+    },
+  }),
+
+  write({
+    name: "create_purchase_item",
+    title: "Add purchase item",
+    description:
+      "Add an item to a purchase plan (planId from get_purchase_plans). amount is the estimated price in major units of the plan's currency (e.g. 2500 or 2499.90, not cents). Optionally set purchaseDate (yyyy-MM-dd), the paying account by name (as in get_accounts), and installments (only meaningful on a credit-card account). An item with both an account and a purchaseDate is drawn on the forecast. Returns the new item id.",
+    risk: "write",
+    requiredScope: "plans:write",
+    input: z.object({
+      planId: z.string().uuid(),
+      name: z.string().min(1).max(120),
+      amount: z.number().nonnegative().describe("major units"),
+      purchaseDate: isoDateSchema.optional().describe("yyyy-MM-dd"),
+      account: z.string().min(1).optional().describe("account name"),
+      installments: z.number().int().min(1).default(1),
+    }),
+    async prepare(ctx, args) {
+      const plan = await getPurchasePlan(ctx.userId, args.planId);
+      if (!plan) throw new Error("Purchase plan not found.");
+      const account = args.account ? await resolveNamedAccount(ctx.userId, args.account) : null;
+      const payload: CreatePurchaseItemInput = {
+        purchasePlanId: plan.id,
+        name: args.name,
+        amount: args.amount,
+        purchaseDate: args.purchaseDate ?? null,
+        accountId: account?.id ?? null,
+        installments: args.installments,
+      };
+      return {
+        payload,
+        title: "Add purchase item?",
+        summary: `${args.name} → ${plan.name}`,
+        fields: [
+          { label: "Plan", value: plan.name },
+          { label: "Item", value: args.name },
+          { label: "Price", value: formatMajor(args.amount, plan.currencyCode) },
+          { label: "Account", value: account?.name ?? "Not set" },
+          { label: "Installments", value: String(args.installments) },
+          { label: "Date", value: args.purchaseDate ?? "Not set" },
+        ],
+        undoable: true,
+      };
+    },
+    async execute(ctx, payload) {
+      const item = await createPurchaseItemCore(ctx.userId, payload as CreatePurchaseItemInput);
+      return {
+        status: "completed" as ExecStatus,
+        title: "Purchase item added",
+        detail: `${item.name} (id ${item.id})`,
+      };
+    },
+  }),
+
+  write({
+    name: "update_purchase_item",
+    title: "Update purchase item",
+    description:
+      "Change fields of an existing purchase item by id (item ids come from get_purchase_plans or get_purchase_plan). Only the fields you pass change. amount is in major units of the plan's currency. account is an account name; pass null to clear account or purchaseDate.",
+    risk: "write",
+    requiredScope: "plans:write",
+    input: z.object({
+      id: z.string().uuid(),
+      name: z.string().min(1).max(120).optional(),
+      amount: z.number().nonnegative().optional().describe("major units"),
+      purchaseDate: isoDateSchema.nullable().optional().describe("yyyy-MM-dd, or null to clear"),
+      account: z.string().min(1).nullable().optional().describe("account name, or null to clear"),
+      installments: z.number().int().min(1).optional(),
+    }),
+    async prepare(ctx, args) {
+      const item = await getPurchaseItem(ctx.userId, args.id);
+      if (!item) throw new Error("Purchase item not found.");
+      const account =
+        args.account == null ? args.account : await resolveNamedAccount(ctx.userId, args.account);
+      const changes: UpdatePurchaseItemInput = {};
+      if (args.name !== undefined) changes.name = args.name;
+      if (args.amount !== undefined) changes.amount = args.amount;
+      if (args.purchaseDate !== undefined) changes.purchaseDate = args.purchaseDate;
+      if (account !== undefined) changes.accountId = account?.id ?? null;
+      if (args.installments !== undefined) changes.installments = args.installments;
+      if (Object.keys(changes).length === 0) throw new Error("Nothing to change.");
+      const currency = item.purchasePlan.currencyCode;
+      const fields = [
+        changes.name !== undefined && { label: "Name", value: changes.name },
+        changes.amount !== undefined && { label: "Price", value: formatMajor(changes.amount, currency) },
+        changes.purchaseDate !== undefined && { label: "Date", value: changes.purchaseDate ?? "Not set" },
+        account !== undefined && { label: "Account", value: account?.name ?? "Not set" },
+        changes.installments !== undefined && { label: "Installments", value: String(changes.installments) },
+      ].filter((field): field is { label: string; value: string } => Boolean(field));
+      return {
+        payload: { id: args.id, changes },
+        title: "Update purchase item?",
+        summary: `${item.name} (${item.purchasePlan.name})`,
+        fields,
+        undoable: true,
+      };
+    },
+    async execute(ctx, payload) {
+      const p = payload as { id: string; changes: UpdatePurchaseItemInput };
+      await updatePurchaseItemCore(ctx.userId, p.id, p.changes);
+      return { status: "completed" as ExecStatus, title: "Purchase item updated", detail: `id ${p.id}` };
+    },
+  }),
+
+  write({
+    name: "set_purchase_item_active",
+    title: "Set purchase item aside / back",
+    description:
+      "Set a purchase item aside (isActive=false) or bring it back (isActive=true) by id (item ids come from get_purchase_plans or get_purchase_plan). An inactive item stays listed but counts toward neither the plan's totals nor its projection; use this for 'what if I skip this' instead of deleting.",
+    risk: "write",
+    requiredScope: "plans:write",
+    input: z.object({ id: z.string().uuid(), isActive: z.boolean() }),
+    async prepare(ctx, args) {
+      const item = await getPurchaseItem(ctx.userId, args.id);
+      if (!item) throw new Error("Purchase item not found.");
+      return {
+        payload: { id: args.id, isActive: args.isActive },
+        title: args.isActive ? "Bring item back?" : "Set item aside?",
+        summary: `${item.name} (${item.purchasePlan.name})`,
+        fields: [
+          { label: "Item", value: item.name },
+          { label: "Price", value: formatMoney(item.estimatedPriceMinor, item.purchasePlan.currencyCode) },
+          { label: "State", value: args.isActive ? "Counted in the plan" : "Set aside" },
+        ],
+        undoable: true,
+      };
+    },
+    async execute(ctx, payload) {
+      const p = payload as { id: string; isActive: boolean };
+      await setPurchaseItemActiveCore(ctx.userId, p.id, { isActive: p.isActive });
+      return {
+        status: "completed" as ExecStatus,
+        title: p.isActive ? "Purchase item brought back" : "Purchase item set aside",
+        detail: `id ${p.id}`,
+      };
+    },
+  }),
+
+  write({
+    name: "delete_purchase_item",
+    title: "Delete purchase item",
+    description:
+      "Permanently delete one purchase item by id (item ids come from get_purchase_plans or get_purchase_plan). Cannot be undone; to only exclude it from totals and projections, use set_purchase_item_active with isActive=false instead.",
+    risk: "sensitive",
+    requiredScope: "plans:write",
+    input: z.object({ id: z.string().uuid() }),
+    async prepare(ctx, args) {
+      const item = await getPurchaseItem(ctx.userId, args.id);
+      if (!item) throw new Error("Purchase item not found.");
+      return {
+        payload: { id: args.id },
+        title: "Delete purchase item?",
+        summary: `${item.name} will be removed from ${item.purchasePlan.name}.`,
+        fields: [
+          { label: "Plan", value: item.purchasePlan.name },
+          { label: "Item", value: item.name },
+          { label: "Price", value: formatMoney(item.estimatedPriceMinor, item.purchasePlan.currencyCode) },
+        ],
+        warning: "This permanently deletes the item.",
+        undoable: false,
+      };
+    },
+    async execute(ctx, payload) {
+      const p = payload as { id: string };
+      await deletePurchaseItemCore(ctx.userId, p.id);
+      return { status: "completed" as ExecStatus, title: "Purchase item deleted", detail: `id ${p.id}` };
     },
   }),
 ];
