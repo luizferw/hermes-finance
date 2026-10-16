@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
-import { db, users } from "@kosh/db";
+import { accounts, db, purchaseItems, users } from "@kosh/db";
+import { addDays, todayIso } from "@kosh/domain";
 import {
   buildUserForecastDetailed,
   getConfidenceBreakdown,
@@ -9,6 +10,8 @@ import {
   getSafeToSpend,
   getUpcomingCommitments,
   getCardStatement,
+  getPurchasePlan,
+  getPurchasePlanImpact,
   listCreditCards,
   listPurchasePlans,
 } from "./queries";
@@ -257,6 +260,57 @@ describe("card statement derivation", () => {
       const months = statement.cycles.map((cycle) => cycle.statementMonth);
       expect(new Set(months).size).toBe(months.length);
       expect([...months]).toEqual([...months].sort().reverse());
+    }
+  });
+});
+
+/**
+ * A switched-off purchase item stays in the plan but out of every sum: the
+ * totals and the projection must read exactly as if it were not there, and
+ * switching it back on must restore it in both.
+ */
+describe("inactive purchase items", () => {
+  it("leaves an inactive item out of the plan totals and the projection", async () => {
+    const [plan] = await listPurchasePlans(userId);
+    expect(plan).toBeDefined();
+    const [account] = await db
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.userId, userId))
+      .limit(1);
+    expect(account).toBeDefined();
+
+    const before = await getPurchasePlan(userId, plan!.id);
+    const priceMinor = 123_400;
+    const [item] = await db
+      .insert(purchaseItems)
+      .values({
+        purchasePlanId: plan!.id,
+        name: "inactive-item regression",
+        estimatedPriceMinor: priceMinor,
+        accountId: account!.id,
+        purchaseDate: addDays(todayIso(), 30),
+        isActive: false,
+      })
+      .returning();
+
+    try {
+      const inactive = await getPurchasePlan(userId, plan!.id);
+      expect(inactive!.estimatedTotalMinor).toBe(before!.estimatedTotalMinor);
+      expect(inactive!.remainingEstimateMinor).toBe(before!.remainingEstimateMinor);
+      const inactiveImpact = await getPurchasePlanImpact(userId, plan!.id);
+      const simulated = inactiveImpact!.simulation?.items.map((one) => one.itemId) ?? [];
+      expect(simulated).not.toContain(item!.id);
+      expect(inactiveImpact!.unprojectedItems.map((one) => one.id)).not.toContain(item!.id);
+
+      await db.update(purchaseItems).set({ isActive: true }).where(eq(purchaseItems.id, item!.id));
+
+      const active = await getPurchasePlan(userId, plan!.id);
+      expect(active!.estimatedTotalMinor).toBe(before!.estimatedTotalMinor + priceMinor);
+      const activeImpact = await getPurchasePlanImpact(userId, plan!.id);
+      expect(activeImpact!.simulation!.items.map((one) => one.itemId)).toContain(item!.id);
+    } finally {
+      await db.delete(purchaseItems).where(eq(purchaseItems.id, item!.id));
     }
   });
 });

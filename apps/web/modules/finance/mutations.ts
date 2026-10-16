@@ -36,6 +36,7 @@ import {
   createPurchasePlanSchema,
   reconcileBillingCycleSchema,
   registerCardPurchaseSchema,
+  setPurchaseItemActiveSchema,
   updateBillingCycleSchema,
   updateCreditCardSchema,
   updateFinancialReserveSchema,
@@ -49,6 +50,7 @@ import {
   type CreatePurchasePlanInput,
   type ReconcileBillingCycleInput,
   type RegisterCardPurchaseInput,
+  type SetPurchaseItemActiveInput,
   type UpdateBillingCycleInput,
   type UpdateCreditCardInput,
   type UpdateFinancialReserveInput,
@@ -788,6 +790,26 @@ export async function updatePurchaseItem(itemId: string, input: UpdatePurchaseIt
     entityType: "purchase_item",
     entityId: itemId,
     data: { changed: Object.keys(data) },
+  });
+  revalidateFinance();
+}
+
+/** Sets an item aside, or brings it back, without touching anything else on it. */
+export async function setPurchaseItemActive(itemId: string, input: SetPurchaseItemActiveInput) {
+  const user = await requireUser();
+  const data = setPurchaseItemActiveSchema.parse(input);
+  await loadOwnedPurchaseItem(user.id, itemId);
+
+  await db
+    .update(purchaseItems)
+    .set({ isActive: data.isActive })
+    .where(eq(purchaseItems.id, itemId));
+
+  await logAudit({
+    userId: user.id,
+    action: data.isActive ? "purchase_item.activated" : "purchase_item.deactivated",
+    entityType: "purchase_item",
+    entityId: itemId,
   });
   revalidateFinance();
 }

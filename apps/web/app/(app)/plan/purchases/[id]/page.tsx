@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { SimulationBalanceChart } from "@/components/plan/simulation-balance-chart";
 import { cn } from "@/lib/utils";
 import { PurchaseItemActions } from "../item-actions";
+import { PurchaseItemActiveToggle } from "../item-active-toggle";
 import { NewPurchaseItemDialog } from "./new-item-dialog";
 import { PurchasePlanActions } from "../plan-actions";
 import { PlanTotalsLine } from "../plan-totals";
@@ -138,7 +139,17 @@ export default async function PurchasePlanDetailPage({
                 className="flex flex-wrap items-center justify-between gap-2 py-2.5"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <span className="truncate text-sm">{item.name}</span>
+                  <PurchaseItemActiveToggle
+                    item={{ id: item.id, name: item.name, isActive: item.isActive }}
+                  />
+                  <span
+                    className={cn(
+                      "truncate text-sm",
+                      !item.isActive && "text-muted-foreground line-through",
+                    )}
+                  >
+                    {item.name}
+                  </span>
                   <span className="shrink-0 text-xs text-muted-foreground">
                     {item.purchaseDate ? formatDate(item.purchaseDate) : "no date yet"}
                   </span>
@@ -152,7 +163,12 @@ export default async function PurchasePlanDetailPage({
                     <span>no account yet</span>
                   )}
                   {item.installments > 1 && <span>{item.installments}×</span>}
-                  <span className="font-amount tabular-nums text-foreground">
+                  <span
+                    className={cn(
+                      "font-amount tabular-nums",
+                      item.isActive ? "text-foreground" : "line-through",
+                    )}
+                  >
                     {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
                   </span>
                   <PurchaseItemActions

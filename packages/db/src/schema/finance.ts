@@ -188,6 +188,14 @@ export const purchaseItems = pgTable("purchase_items", {
   /** Only meaningful on a credit-card account; 1 everywhere else. */
   installments: smallint("installments").notNull().default(1),
   /**
+   * Whether the item takes part in the plan. Switching it off sets the item
+   * aside without losing it: it stays listed, but counts toward neither the
+   * plan's totals nor its projection, so "what if I skip this" is a toggle
+   * rather than a delete and a retype. Distinct from `status = "cancelled"`,
+   * which records a decision; this one is meant to be flipped back and forth.
+   */
+  isActive: boolean("is_active").notNull().default(true),
+  /**
    * Kept from the recommender era, which now lives behind an MCP tool that
    * takes its inputs as arguments. Nothing in the app writes these any more;
    * they are left in place rather than dropped because a destructive

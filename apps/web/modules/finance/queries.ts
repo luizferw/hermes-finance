@@ -1092,12 +1092,17 @@ type PlanItemTotals = {
  *
  * Summed here rather than in the page because the UI's job is to format a
  * number someone else decided. A purchased item counts at what it actually
- * cost, not at the guess it was created with; a cancelled one counts for
- * nothing. Every item is priced in its plan's currency, which is what makes a
- * plain sum legitimate.
+ * cost, not at the guess it was created with; a cancelled or switched-off one
+ * counts for nothing. Every item is priced in its plan's currency, which is
+ * what makes a plain sum legitimate.
  */
 function totalsFor(
-  items: Array<{ status: string; estimatedPriceMinor: number; actualPriceMinor: number | null }>,
+  items: Array<{
+    status: string;
+    isActive: boolean;
+    estimatedPriceMinor: number;
+    actualPriceMinor: number | null;
+  }>,
   budgetMinor: number | null,
 ): PlanItemTotals {
   let estimatedTotalMinor = 0;
@@ -1105,7 +1110,7 @@ function totalsFor(
   let purchasedTotalMinor = 0;
 
   for (const item of items) {
-    if (item.status === "cancelled") continue;
+    if (item.status === "cancelled" || !item.isActive) continue;
     const priced = item.actualPriceMinor ?? item.estimatedPriceMinor;
     estimatedTotalMinor += priced;
     if (item.status === "purchased") purchasedTotalMinor += priced;
@@ -1188,6 +1193,9 @@ export async function getPurchasePlanImpact(
   const unprojectedItems: Array<{ id: string; name: string }> = [];
   const projectable: Array<(typeof plan.items)[number] & { accountId: string; purchaseDate: string }> = [];
   for (const item of plan.items) {
+    // Switched off by the user: out of the projection on purpose, so it is
+    // neither simulated nor reported as unprojected.
+    if (!item.isActive) continue;
     if (!item.accountId || !item.purchaseDate) {
       unprojectedItems.push({ id: item.id, name: item.name });
       continue;

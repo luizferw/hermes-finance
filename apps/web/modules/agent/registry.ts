@@ -1058,7 +1058,7 @@ const readTools: ReadTool[] = [
   read({
     name: "get_purchase_plans",
     title: "Purchase plans",
-    description: "All purchase plans with their items and payment options.",
+    description: "All purchase plans with their items and payment options. Items with isActive=false were set aside by the user and count toward neither totals nor projections.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -1083,6 +1083,7 @@ const readTools: ReadTool[] = [
               earliestPurchaseDate: item.earliestPurchaseDate,
               deadline: item.deadline,
               status: item.status,
+              isActive: item.isActive,
               paymentOptions: item.paymentOptions.map((option) => ({
                 id: option.id,
                 method: option.paymentMethod,
@@ -1103,7 +1104,7 @@ const readTools: ReadTool[] = [
   read({
     name: "get_purchase_plan",
     title: "Purchase plan",
-    description: "Full detail of one purchase plan by id, including items, payment options, and any stored simulations.",
+    description: "Full detail of one purchase plan by id, including items, payment options, and any stored simulations. Items with isActive=false were set aside by the user and count toward neither totals nor projections.",
     requiredScope: "finance:read",
     input: z.object({ id: z.string().uuid() }),
     async execute(ctx, args) {
@@ -1129,6 +1130,7 @@ const readTools: ReadTool[] = [
               earliestPurchaseDate: item.earliestPurchaseDate,
               deadline: item.deadline,
               status: item.status,
+              isActive: item.isActive,
               paymentOptions: item.paymentOptions.map((option) => ({
                 id: option.id,
                 method: option.paymentMethod,

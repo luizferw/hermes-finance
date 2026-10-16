@@ -8,6 +8,7 @@ import { listAccounts } from "@/modules/accounts/queries";
 import { listPurchasePlans } from "@/modules/finance/queries";
 import { getUserSettings } from "@/modules/settings/queries";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import {
   Empty,
   EmptyDescription,
@@ -16,6 +17,7 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { PurchaseItemActions } from "./item-actions";
+import { PurchaseItemActiveToggle } from "./item-active-toggle";
 import { NewPurchasePlanDialog } from "./new-plan-dialog";
 import { PurchasePlanActions } from "./plan-actions";
 import { PlanTotalsLine } from "./plan-totals";
@@ -137,7 +139,17 @@ export default async function PurchasesPage() {
                         className="flex flex-wrap items-center justify-between gap-2 py-2 first:pt-0 last:pb-0"
                       >
                         <div className="flex min-w-0 items-center gap-2">
-                          <span className="truncate text-sm">{item.name}</span>
+                          <PurchaseItemActiveToggle
+                            item={{ id: item.id, name: item.name, isActive: item.isActive }}
+                          />
+                          <span
+                            className={cn(
+                              "truncate text-sm",
+                              !item.isActive && "text-muted-foreground line-through",
+                            )}
+                          >
+                            {item.name}
+                          </span>
                           {item.purchaseDate && (
                             <span className="shrink-0 text-xs text-muted-foreground">
                               {formatDate(item.purchaseDate)}
@@ -147,7 +159,12 @@ export default async function PurchasesPage() {
                         <div className="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
                           {account && <Badge variant="outline" className="text-[10px]">{account.name}</Badge>}
                           {item.installments > 1 && <span>{item.installments}×</span>}
-                          <span className="font-amount tabular-nums text-foreground">
+                          <span
+                            className={cn(
+                              "font-amount tabular-nums",
+                              item.isActive ? "text-foreground" : "line-through",
+                            )}
+                          >
                             {formatMoney(item.estimatedPriceMinor, plan.currencyCode)}
                           </span>
                           <PurchaseItemActions

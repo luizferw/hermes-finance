@@ -141,5 +141,10 @@ export const updatePurchaseItemSchema = createPurchaseItemSchema
   .omit({ purchasePlanId: true })
   .partial();
 
+export const setPurchaseItemActiveSchema = z.object({
+  isActive: z.boolean(),
+});
+
 export type CreatePurchaseItemInput = z.infer<typeof createPurchaseItemSchema>;
 export type UpdatePurchaseItemInput = z.infer<typeof updatePurchaseItemSchema>;
+export type SetPurchaseItemActiveInput = z.infer<typeof setPurchaseItemActiveSchema>;
