@@ -131,6 +131,46 @@ describe("comparePaymentOptions hard constraints", () => {
     expect(result.recommendedOptionId).toBe("pix");
   });
 
+  it("counts the limit the statement paid on 02/10 frees before a later purchase", () => {
+    // 243 000 owed today is paid on 02/10; the stroller bought on 05/10 then
+    // only shares the limit with itself.
+    const five = {
+      id: "five",
+      label: "5x R$ 500",
+      totalCostMinor: 250_000,
+      installments: 5,
+      purchaseDate: "2026-10-05",
+      card: { cardId: "inter", creditLimitMinor: 300_000, committedMinor: 243_000 },
+      cashEvents: monthlySettlementEvents({
+        logicalKeyPrefix: "simulation:stroller:five",
+        sourceType: "purchase_simulation",
+        firstPaymentDate: "2026-11-02",
+        installments: 5,
+        installmentAmountMinor: 50_000,
+      }),
+    };
+    const result = comparePaymentOptions({
+      forecastInput: scenario,
+      hardReserveMinor: HARD_RESERVE,
+      options: [five],
+      cardActivity: {
+        debtPayments: [{ cardId: "inter", paidAt: "2026-10-02", amountMinor: 243_000 }],
+        charges: [],
+      },
+    });
+
+    const [option] = result.options;
+    // Summed, 243 000 + 250 000 would be 193 000 over.
+    expect(option!.rejections).not.toContain("CREDIT_LIMIT_EXCEEDED");
+    expect(option!.cardUsage).toMatchObject({
+      baselinePeakMinor: 243_000,
+      baselinePeakDate: "2026-09-07",
+      peakMinor: 250_000,
+      peakDate: "2026-10-05",
+      exceededMinor: 0,
+    });
+  });
+
   it("drops an option whose last installment lands after the deadline", () => {
     const result = comparePaymentOptions({
       forecastInput: scenario,

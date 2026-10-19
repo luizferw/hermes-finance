@@ -16,6 +16,7 @@ import {
 } from "@hermes-finance/planning";
 import {
   buildUserForecastDetailed,
+  cardActivityFor,
   getHardReserveMinor,
   getSoftReserves,
   listCreditCards,
@@ -201,6 +202,7 @@ export async function toEnginePaymentOption(
     installments: installmentCount,
     cashEvents,
     card,
+    purchaseDate,
   };
 }
 
@@ -235,13 +237,15 @@ export async function simulateUserPurchase(
   context: SimulationContext = {},
 ): Promise<PurchaseSimulation> {
   const horizonDays = context.horizonDays ?? 365;
-  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
 
   return simulatePurchase({
     hardReserveMinor,
     softReserves,
     maxLastPaymentDate: context.maxLastPaymentDate,
+    cardActivity: cardActivityFor(detailed),
     forecastInput: {
       asOf: forecast.asOf,
       horizonEnd: forecast.horizonEnd,
@@ -264,7 +268,8 @@ export async function compareUserPaymentOptions(
   context: SimulationContext = {},
 ): Promise<PaymentComparison> {
   const horizonDays = context.horizonDays ?? 365;
-  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
   const engineOptions = await Promise.all(options.map((option) => toEnginePaymentOption(userId, option)));
 
@@ -272,6 +277,7 @@ export async function compareUserPaymentOptions(
     hardReserveMinor,
     softReserves,
     maxLastPaymentDate: context.maxLastPaymentDate,
+    cardActivity: cardActivityFor(detailed),
     forecastInput: {
       asOf: forecast.asOf,
       horizonEnd: forecast.horizonEnd,
@@ -362,7 +368,8 @@ export async function recommendUserPurchasePlan(
   context: RecommendPlanContext = {},
 ): Promise<PurchasePlanRecommendation> {
   const horizonDays = context.horizonDays ?? 365;
-  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
   const cardContext = await loadCardContext(userId);
   const cards = cardContext.cards;
@@ -416,6 +423,7 @@ export async function recommendUserPurchasePlan(
   );
 
   return recommendPurchasePlan({
+    cardActivity: cardActivityFor(detailed),
     forecastInput: {
       asOf: forecast.asOf,
       horizonEnd: forecast.horizonEnd,

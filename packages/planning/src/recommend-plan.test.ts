@@ -331,6 +331,38 @@ describe("least-bad fallback", () => {
   });
 });
 
+describe("card limits over time", () => {
+  it("lets a later item use the limit an earlier one has already freed", () => {
+    const tight = { cardId: "inter", label: "Inter", creditLimitMinor: 300_000, committedMinor: 0 };
+    const result = recommendPurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        // Paid off on 10/10, before the second is bought on 15/10.
+        item("crib", [card("crib", 200_000, ["2026-10-10"], tight)], { purchaseDate: "2026-09-10" }),
+        item("stroller", [card("stroller", 200_000, ["2026-11-10"], tight)], { purchaseDate: "2026-10-15" }),
+      ],
+    });
+
+    expect(result.choices.every((choice) => choice.fits)).toBe(true);
+    expect(result.simulation?.cards[0]).toMatchObject({ peakMinor: 200_000, exceededMinor: 0 });
+  });
+
+  it("still refuses two items that are on the card at the same time", () => {
+    const tight = { cardId: "inter", label: "Inter", creditLimitMinor: 300_000, committedMinor: 0 };
+    const result = recommendPurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        item("crib", [card("crib", 200_000, ["2026-11-10"], tight)], { purchaseDate: "2026-09-10" }),
+        item("stroller", [card("stroller", 200_000, ["2026-11-10"], tight)], { purchaseDate: "2026-10-15" }),
+      ],
+    });
+
+    expect(result.choices.some((choice) => choice.rejections.includes("CREDIT_LIMIT_EXCEEDED"))).toBe(true);
+  });
+});
+
 describe("cash preservation when troughs tie", () => {
   it("spreads further when the low point sits before every settlement", () => {
     const result = recommendPurchasePlan({

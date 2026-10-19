@@ -153,6 +153,70 @@ export interface CardConstraint {
   committedMinor: number;
 }
 
+/** A card's limit at its busiest over the horizon, without and with what is being simulated. */
+export interface CardUsageSummary {
+  cardId: string;
+  creditLimitMinor: number;
+  /** Limit taken today. */
+  committedMinor: number;
+  baselinePeakMinor: number;
+  baselinePeakDate: DateString;
+  peakMinor: number;
+  peakDate: DateString;
+  /** How far past the limit the peak goes; 0 when it fits. */
+  exceededMinor: number;
+}
+
+/**
+ * What an option charges to its card: every instalment is taken from the limit
+ * on the purchase day and freed on the date it is paid.
+ */
+function cardChargesFor(option: PaymentOption, chargedAt: DateString): CardCharge[] {
+  const card = option.card;
+  if (!card) return [];
+  return option.cashEvents
+    .filter((event) => event.amountMinor < 0)
+    .map((event) => ({
+      cardId: card.cardId,
+      chargedAt,
+      settlesAt: event.expectedAt,
+      amountMinor: -event.amountMinor,
+    }));
+}
+
+/**
+ * Peak usage of one card with and without `added`, over the forecast's
+ * horizon. `activity` is what the forecast already expects on the cards.
+ */
+function cardUsageWith(
+  card: CardConstraint,
+  activity: CardActivity | undefined,
+  added: CardCharge[],
+  forecastInput: BuildForecastInput,
+): CardUsageSummary {
+  assertMinorUnits(card.creditLimitMinor, `card ${card.cardId}.creditLimitMinor`);
+  assertMinorUnits(card.committedMinor, `card ${card.cardId}.committedMinor`);
+  const usage = {
+    asOf: forecastInput.asOf,
+    horizonEnd: forecastInput.horizonEnd,
+    committedMinor: card.committedMinor,
+    debtPayments: (activity?.debtPayments ?? []).filter((payment) => payment.cardId === card.cardId),
+  };
+  const expected = (activity?.charges ?? []).filter((charge) => charge.cardId === card.cardId);
+  const baseline = peakCardUsage({ ...usage, charges: expected });
+  const withAdded = peakCardUsage({ ...usage, charges: [...expected, ...added] });
+  return {
+    cardId: card.cardId,
+    creditLimitMinor: card.creditLimitMinor,
+    committedMinor: card.committedMinor,
+    baselinePeakMinor: baseline.peakMinor,
+    baselinePeakDate: baseline.peakDate,
+    peakMinor: withAdded.peakMinor,
+    peakDate: withAdded.peakDate,
+    exceededMinor: Math.max(0, withAdded.peakMinor - card.creditLimitMinor),
+  };
+}
+
 /** A goal-backed reserve that a simulation may breach, with a warning. */
 export interface SoftReserve {
   id: string;
@@ -177,6 +241,11 @@ export interface PaymentOption {
   card?: CardConstraint;
   /** Number of installments; 1 (or omitted) means a single settlement. */
   installments?: number;
+  /**
+   * When the purchase is made, which is when a card charge takes up the limit.
+   * Defaults to the forecast's `asOf`.
+   */
+  purchaseDate?: DateString;
 }
 
 export type RejectionCode =
@@ -202,6 +271,8 @@ export interface PaymentOptionResult {
   softReserveImpacts: SoftReserveImpact[];
   /** Positive when the option would exceed the card limit. */
   creditLimitExceededMinor?: number;
+  /** How much of the card's limit the option leaves in use at its busiest, when charged to a card. */
+  cardUsage?: CardUsageSummary;
   /** Date the option's last cash settlement lands. */
   lastPaymentDate?: string;
   installments: number;
@@ -223,6 +294,8 @@ export interface ComparePaymentOptionsInput extends SafeToSpendInput {
    * drives the account negative is not a recommendation.
    */
   minimumAllowedBalanceMinor?: number;
+  /** Statement payments and expected charges on the cards; see `CardActivity`. */
+  cardActivity?: CardActivity;
 }
 
 export interface PaymentComparison {
@@ -331,17 +404,25 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
     }
 
     let creditLimitExceededMinor: number | undefined;
+    let cardUsage: CardUsageSummary | undefined;
     if (option.card) {
-      assertMinorUnits(option.card.creditLimitMinor, `option ${option.id}.card.creditLimitMinor`);
-      assertMinorUnits(option.card.committedMinor, `option ${option.id}.card.committedMinor`);
       const cardName = option.card.label ?? option.card.cardId;
-      const projectedUtilization = option.card.committedMinor + option.totalCostMinor;
-      if (projectedUtilization > option.card.creditLimitMinor) {
-        creditLimitExceededMinor = projectedUtilization - option.card.creditLimitMinor;
+      cardUsage = cardUsageWith(
+        option.card,
+        input.cardActivity,
+        cardChargesFor(option, option.purchaseDate ?? input.forecastInput.asOf),
+        input.forecastInput,
+      );
+      if (cardUsage.exceededMinor > 0) {
+        creditLimitExceededMinor = cardUsage.exceededMinor;
         rejections.push("CREDIT_LIMIT_EXCEEDED");
-        reasons.push(`exceeds the limit of card ${cardName} by ${creditLimitExceededMinor}`);
+        reasons.push(
+          `card ${cardName} reaches ${cardUsage.peakMinor} of its ${cardUsage.creditLimitMinor} limit on ${cardUsage.peakDate}, ${creditLimitExceededMinor} over`,
+        );
       } else {
-        reasons.push(`fits the limit of card ${cardName} with ${option.card.creditLimitMinor - projectedUtilization} to spare`);
+        reasons.push(
+          `fits the limit of card ${cardName}: at most ${cardUsage.peakMinor} of ${cardUsage.creditLimitMinor} in use, on ${cardUsage.peakDate}`,
+        );
       }
     }
 
@@ -369,6 +450,7 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
       reasons,
       softReserveImpacts,
       creditLimitExceededMinor,
+      cardUsage,
       lastPaymentDate,
       installments: option.installments ?? 1,
       peakMonthlyOutflowMinor,
@@ -410,6 +492,8 @@ export interface SimulatePurchaseInput extends SafeToSpendInput {
   softReserves?: SoftReserve[];
   minimumAllowedBalanceMinor?: number;
   maxLastPaymentDate?: DateString;
+  /** Statement payments and expected charges on the cards; see `CardActivity`. */
+  cardActivity?: CardActivity;
 }
 
 export interface PurchaseSimulation {
@@ -428,8 +512,10 @@ export interface PurchaseSimulation {
   hardReserveViolated: boolean;
   softReserveImpacts: SoftReserveImpact[];
   creditLimitExceededMinor?: number;
-  /** Card utilization after the purchase, when the option is charged to a card. */
+  /** Peak card utilization with the purchase, when the option is charged to a card. */
   cardUtilizationAfterMinor?: number;
+  /** The card's limit at its busiest, without and with the purchase. */
+  cardUsage?: CardUsageSummary;
   lastPaymentDate?: string;
   installments: number;
   feasible: boolean;
@@ -455,6 +541,7 @@ export function simulatePurchase(input: SimulatePurchaseInput): PurchaseSimulati
     softReserves: input.softReserves,
     minimumAllowedBalanceMinor: input.minimumAllowedBalanceMinor,
     maxLastPaymentDate: input.maxLastPaymentDate,
+    cardActivity: input.cardActivity,
     options: [input.option],
   });
   const after = comparison.options[0]!;
@@ -487,9 +574,8 @@ export function simulatePurchase(input: SimulatePurchaseInput): PurchaseSimulati
     hardReserveViolated: after.hardReserveViolated,
     softReserveImpacts: after.softReserveImpacts,
     creditLimitExceededMinor: after.creditLimitExceededMinor,
-    cardUtilizationAfterMinor: input.option.card
-      ? input.option.card.committedMinor + input.option.totalCostMinor
-      : undefined,
+    cardUtilizationAfterMinor: after.cardUsage?.peakMinor,
+    cardUsage: after.cardUsage,
     lastPaymentDate: after.lastPaymentDate,
     installments: after.installments,
     feasible: after.feasible,
@@ -575,22 +661,11 @@ export interface PlanItemContribution {
   reasons: string[];
 }
 
-export interface CardLoad {
-  cardId: string;
+/** One card the plan charges: its limit at its busiest, without and with every item on it. */
+export interface CardLoad extends CardUsageSummary {
   label: string;
-  creditLimitMinor: number;
-  /** Limit taken today, before this plan. */
-  committedMinor: number;
   /** Added by every item in this plan charged to this card. */
   planChargedMinor: number;
-  /** The most of the limit in use on any day of the horizon without the plan, and when. */
-  baselinePeakMinor: number;
-  baselinePeakDate: DateString;
-  /** The same with every item of the plan charged. */
-  peakMinor: number;
-  peakDate: DateString;
-  /** How far past the limit the peak goes; 0 when it fits. */
-  exceededMinor: number;
 }
 
 /** One settlement of one plan item, landing in one month. */
@@ -739,60 +814,22 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
   // than checked one by one: two 60%-of-limit purchases both pass alone and
   // fail here. And a limit is freed as statements are paid, so what counts is
   // the most in use on any one day, not the sum of everything ever charged.
-  const { asOf, horizonEnd } = input.forecastInput;
-  const activity = input.cardActivity ?? { debtPayments: [], charges: [] };
-  const planCharges = new Map<string, { load: CardLoad; charges: CardCharge[] }>();
+  const byCard = new Map<string, { card: CardConstraint; planChargedMinor: number; charges: CardCharge[] }>();
   for (const item of input.items) {
     const card = item.option.card;
     if (!card) continue;
-    const entry = planCharges.get(card.cardId) ?? {
-      load: {
-        cardId: card.cardId,
-        label: card.label ?? card.cardId,
-        creditLimitMinor: card.creditLimitMinor,
-        committedMinor: card.committedMinor,
-        planChargedMinor: 0,
-        baselinePeakMinor: 0,
-        baselinePeakDate: asOf,
-        peakMinor: 0,
-        peakDate: asOf,
-        exceededMinor: 0,
-      },
-      charges: [],
-    };
-    entry.load.planChargedMinor += item.option.totalCostMinor;
-    // The issuer blocks the whole purchase on the day it is made and frees
-    // each instalment when the statement billing it is paid.
-    for (const event of item.option.cashEvents) {
-      if (event.amountMinor >= 0) continue;
-      entry.charges.push({
-        cardId: card.cardId,
-        chargedAt: item.purchaseDate ?? asOf,
-        settlesAt: event.expectedAt,
-        amountMinor: -event.amountMinor,
-      });
-    }
-    planCharges.set(card.cardId, entry);
+    const entry = byCard.get(card.cardId) ?? { card, planChargedMinor: 0, charges: [] };
+    entry.planChargedMinor += item.option.totalCostMinor;
+    entry.charges.push(
+      ...cardChargesFor(item.option, item.purchaseDate ?? item.option.purchaseDate ?? input.forecastInput.asOf),
+    );
+    byCard.set(card.cardId, entry);
   }
-  const cards = [...planCharges.values()].map(({ load, charges }): CardLoad => {
-    const usage = {
-      asOf,
-      horizonEnd,
-      committedMinor: load.committedMinor,
-      debtPayments: activity.debtPayments.filter((payment) => payment.cardId === load.cardId),
-    };
-    const expected = activity.charges.filter((charge) => charge.cardId === load.cardId);
-    const baseline = peakCardUsage({ ...usage, charges: expected });
-    const withPlan = peakCardUsage({ ...usage, charges: [...expected, ...charges] });
-    return {
-      ...load,
-      baselinePeakMinor: baseline.peakMinor,
-      baselinePeakDate: baseline.peakDate,
-      peakMinor: withPlan.peakMinor,
-      peakDate: withPlan.peakDate,
-      exceededMinor: Math.max(0, withPlan.peakMinor - load.creditLimitMinor),
-    };
-  });
+  const cards = [...byCard.values()].map(({ card, planChargedMinor, charges }): CardLoad => ({
+    ...cardUsageWith(card, input.cardActivity, charges, input.forecastInput),
+    label: card.label ?? card.cardId,
+    planChargedMinor,
+  }));
   for (const load of cards) {
     if (load.exceededMinor > 0) {
       rejections.push("CREDIT_LIMIT_EXCEEDED");
@@ -943,6 +980,8 @@ export interface RecommendPurchasePlanInput {
   /** The plan's target date; an item without its own deadline inherits it. */
   targetDate?: DateString;
   items: RecommendationCandidateItem[];
+  /** Statement payments and expected charges on the cards; see `CardActivity`. */
+  cardActivity?: CardActivity;
 }
 
 export interface RecommendedChoice {
@@ -1102,7 +1141,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
   const effectiveFloorMinor = alreadyShort ? baseline.minimumBalanceMinor : floorMinor;
 
   const chosenEvents: ForecastEvent[] = [];
-  const cardChargedMinor = new Map<string, number>();
+  // What the items already chosen charge to each card, so a later item is
+  // checked against the limit they leave.
+  const chosenCardCharges: CardCharge[] = [];
   const choices: RecommendedChoice[] = [];
   const blockedItems: BlockedItem[] = [];
   const blockers: string[] = [];
@@ -1126,8 +1167,15 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       );
       const card = option.card;
       const breaksCard = card
-        ? card.committedMinor + (cardChargedMinor.get(card.cardId) ?? 0) + option.totalCostMinor >
-          card.creditLimitMinor
+        ? cardUsageWith(
+            card,
+            input.cardActivity,
+            [
+              ...chosenCardCharges,
+              ...cardChargesFor(option, item.purchaseDate ?? option.purchaseDate ?? input.forecastInput.asOf),
+            ],
+            input.forecastInput,
+          ).exceededMinor > 0
         : false;
       const breaksFloor =
         result.minimumBalanceMinor < effectiveFloorMinor ||
@@ -1245,13 +1293,9 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       takenRejections.push(alreadyShort ? "NEGATIVE_BALANCE" : "HARD_RESERVE_VIOLATED");
     }
     chosenEvents.push(...taken.option.cashEvents);
-    if (taken.option.card) {
-      const card = taken.option.card;
-      cardChargedMinor.set(
-        card.cardId,
-        (cardChargedMinor.get(card.cardId) ?? 0) + taken.option.totalCostMinor,
-      );
-    }
+    chosenCardCharges.push(
+      ...cardChargesFor(taken.option, item.purchaseDate ?? taken.option.purchaseDate ?? input.forecastInput.asOf),
+    );
 
     const runnersUp = Math.max(0, acceptable.length - 1);
     const { lastPaymentDate } = summarizeOption(taken.option);
@@ -1294,6 +1338,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     softReserves: input.softReserves,
     minimumAllowedBalanceMinor: input.minimumAllowedBalanceMinor,
     targetDate: input.targetDate,
+    cardActivity: input.cardActivity,
     items: ordered.map((item) => ({
       itemId: item.itemId,
       label: item.label,
