@@ -19,6 +19,7 @@ function input(overrides: Partial<BudgetConsumptionInput> = {}): BudgetConsumpti
     budgets: [{ id: "market", categoryIds: [GROCERIES], plannedByMonth: { "2026-10": 85_000 } }],
     spending: [{ categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null }],
     commitments: [],
+    projectedParcels: [],
     cards: [],
     ...overrides,
   };
@@ -80,6 +81,40 @@ describe("projectBudgetConsumption", () => {
 
     expect(result.estimates[0]!.committedMinor).toBe(10_000);
     expect(total(result.events.base)).toBe(-23_652);
+  });
+
+  it("subtracts parcels of past purchases in the month their statement books them", () => {
+    const card = { id: "card-x", closingDay: 25, dueDay: 5 };
+    const result = projectBudgetConsumption(
+      input({
+        horizonEnd: "2026-11-30",
+        cards: [card],
+        projectedParcels: [
+          // Due 05/11: billed on October's statement, which closes on the 25th.
+          { categoryId: GROCERIES, cardId: card.id, dueAt: "2026-11-05", amountMinor: 4_000 },
+          // Due 05/12: November's statement.
+          { categoryId: GROCERIES, cardId: card.id, dueAt: "2026-12-05", amountMinor: 4_000 },
+          { categoryId: "cat-other", cardId: card.id, dueAt: "2026-12-05", amountMinor: 99_000 },
+        ],
+      }),
+    );
+    const committed = Object.fromEntries(result.estimates.map((estimate) => [estimate.month, estimate.committedMinor]));
+
+    expect(committed).toEqual({ "2026-10": 4_000, "2026-11": 4_000 });
+    expect(result.estimates[0]!.budgetRemainingMinor).toBe(85_000 - 51_348 - 4_000);
+  });
+
+  it("dates a parcel whose statement already closed today, so it is not lost", () => {
+    const card = { id: "card-x", closingDay: 10, dueDay: 20 };
+    const result = projectBudgetConsumption(
+      input({
+        cards: [card],
+        // October's statement closed on the 10th, before today; not posted yet.
+        projectedParcels: [{ categoryId: GROCERIES, cardId: card.id, dueAt: "2026-10-20", amountMinor: 4_000 }],
+      }),
+    );
+
+    expect(result.estimates[0]!.committedMinor).toBe(4_000);
   });
 
   it("projects nothing for a budget already spent past its limit", () => {

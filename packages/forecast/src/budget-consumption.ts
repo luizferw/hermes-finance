@@ -6,7 +6,7 @@ import {
   type DateString,
   type ForecastEvent,
 } from "./forecast";
-import { addStatementMonths, nominalCycleFor } from "./projections";
+import { addStatementMonths, nominalCycleFor, statementMonthForDueDate } from "./projections";
 
 /**
  * Which estimate of variable consumption the forecast carries.
@@ -54,6 +54,21 @@ export interface ConsumptionCommitment {
   amountMinor: number;
 }
 
+/**
+ * A card installment the forecast already carries on a future statement, for a
+ * purchase whose parcels the ledger books one by one (as Open Finance does).
+ * Each such parcel lands in the ledger, and so in the budget, in the month of
+ * its statement — so it is spending already committed for that month.
+ */
+export interface ConsumptionParcel {
+  categoryId: string;
+  cardId: string;
+  /** The statement's due date the parcel is billed on. */
+  dueAt: DateString;
+  /** Positive magnitude. */
+  amountMinor: number;
+}
+
 export interface ConsumptionCard {
   id: string;
   closingDay: number;
@@ -72,6 +87,8 @@ export interface BudgetConsumptionInput {
   budgets: ConsumptionBudget[];
   spending: ConsumptionSpend[];
   commitments: ConsumptionCommitment[];
+  /** Projected parcels of purchases already made; see `ConsumptionParcel`. */
+  projectedParcels: ConsumptionParcel[];
   /** Active cards. Spending on a card not listed here is treated as cash. */
   cards: ConsumptionCard[];
 }
@@ -181,6 +198,11 @@ function validate(input: BudgetConsumptionInput): void {
     assertMinorUnits(spend.amountMinor, "spend.amountMinor");
     if (spend.amountMinor < 0) throw new Error("spend.amountMinor must be a positive magnitude");
   }
+  for (const parcel of input.projectedParcels) {
+    assertValidDate(parcel.dueAt, "parcel.dueAt");
+    assertMinorUnits(parcel.amountMinor, "parcel.amountMinor");
+    if (parcel.amountMinor < 0) throw new Error("parcel.amountMinor must be a positive magnitude");
+  }
   for (const commitment of input.commitments) {
     assertValidDate(commitment.date, "commitment.date");
     assertMinorUnits(commitment.amountMinor, "commitment.amountMinor");
@@ -201,11 +223,16 @@ function validate(input: BudgetConsumptionInput): void {
  *
  *   remaining = max(0, planned − spent − committed)
  *
- * `spent` is what the ledger already holds, card purchases included at their
- * purchase date. `committed` is what the forecast already projects in the same
- * categories — subtracting it is what stops a bill in a budgeted category from
- * being counted once as a bill and again as budget (R3). Installments of older
- * purchases are not in it: their expense belongs to the month they were bought.
+ * `spent` is what the ledger already holds in the categories, measured the way
+ * Kosh's budget progress measures it. `committed` is what the forecast already
+ * projects in them — bills, recurring rules, and the parcels of past purchases
+ * waiting on future statements. Subtracting it is what stops a bill or a parcel
+ * in a budgeted category from being counted once as itself and again as
+ * budget (R3).
+ *
+ * Parcels count in the month of their statement because that is where the
+ * ledger books them when Open Finance delivers one transaction per parcel, so
+ * the history the base scenario reads already carries them there too.
  *
  * The base scenario replaces `planned` with the categories' median monthly
  * spending over the last complete months, because real history outranks a
@@ -242,6 +269,21 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
   }
 
   const cardById = new Map(input.cards.map((card) => [card.id, card]));
+
+  // A parcel is booked when its statement closes. One whose statement already
+  // closed but has not posted yet is still due this month, so it is dated today.
+  const commitmentsWithParcels: ConsumptionCommitment[] = [...input.commitments];
+  for (const parcel of input.projectedParcels) {
+    const card = cardById.get(parcel.cardId);
+    if (!card) continue;
+    const statementMonth = statementMonthForDueDate(parcel.dueAt, card.closingDay, card.dueDay);
+    const closesAt = `${statementMonth}-${String(Math.min(card.closingDay, Number(lastDay(statementMonth).slice(8)))).padStart(2, "0")}`;
+    commitmentsWithParcels.push({
+      categoryId: parcel.categoryId,
+      date: closesAt < input.asOf ? input.asOf : closesAt,
+      amountMinor: parcel.amountMinor,
+    });
+  }
   const currentMonth = monthOf(input.asOf);
   const historyMonthsList = Array.from({ length: BUDGET_HISTORY_MONTHS }, (_unused, index) =>
     addStatementMonths(currentMonth, index - BUDGET_HISTORY_MONTHS),
@@ -259,7 +301,7 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
     if (blocked.has(budget.id)) continue;
     const categories = new Set(budget.categoryIds);
     const spending = input.spending.filter((spend) => categories.has(spend.categoryId));
-    const commitments = input.commitments.filter(
+    const commitments = commitmentsWithParcels.filter(
       (commitment) => categories.has(commitment.categoryId) && commitment.date >= input.asOf,
     );
 

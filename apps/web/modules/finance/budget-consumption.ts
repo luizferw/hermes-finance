@@ -1,6 +1,15 @@
 import "server-only";
 import { and, asc, eq, gte, inArray, isNull, lt, lte, min } from "drizzle-orm";
-import { budgetPeriods, budgets, db, transactions } from "@kosh/db";
+import { alias } from "drizzle-orm/pg-core";
+import {
+  budgetPeriods,
+  budgets,
+  creditCardPurchases,
+  db,
+  installmentPlans,
+  installments,
+  transactions,
+} from "@kosh/db";
 import { monthRange } from "@kosh/domain";
 import {
   addStatementMonths,
@@ -80,6 +89,13 @@ export async function loadBudgetConsumption(input: {
       .where(and(eq(transactions.userId, userId), isNull(transactions.deletedAt))),
   ]);
 
+  const projectedParcels = await loadProjectedParcels(
+    input.cards.map((card) => card.id),
+    categoryIds,
+    asOf,
+    // A parcel due the month after the horizon may still be billed inside it.
+    monthRange(`${addStatementMonths(through.slice(0, 7), 1)}-01`).end,
+  );
   const cardIdByAccountId = new Map(input.cards.map((card) => [card.accountId, card.id]));
   const result = projectBudgetConsumption({
     asOf,
@@ -99,8 +115,57 @@ export async function loadBudgetConsumption(input: {
       cardId: cardIdByAccountId.get(row.accountId) ?? null,
     })),
     commitments: input.commitments,
+    projectedParcels,
     cards: input.cards.map(({ id, closingDay, dueDay }) => ({ id, closingDay, dueDay })),
   });
 
   return { ...result, budgetNames: new Map(budgetRows.map((budget) => [budget.id, budget.name])) };
+}
+
+/**
+ * Parcels still projected on future statements, in budgeted categories, for
+ * purchases whose parcels the ledger books one by one.
+ *
+ * Open Finance delivers one transaction per parcel (docs/OPEN-FINANCE.md), so
+ * each of these will land in the ledger — and in the budget — when its
+ * statement is billed, while the forecast already carries its cash on that
+ * statement. Left out of `committed`, it would be counted again by the
+ * estimate. A purchase entered by hand is one full-value transaction already
+ * in `spent`; its parcels never reach the ledger, so it is excluded: the
+ * purchase row is not itself one of the plan's parcels.
+ */
+async function loadProjectedParcels(cardIds: string[], categoryIds: string[], from: string, to: string) {
+  if (cardIds.length === 0) return [];
+  const linked = alias(installments, "linked");
+  const rows = await db
+    .select({
+      cardId: creditCardPurchases.creditCardId,
+      dueAt: installments.expectedAt,
+      amountMinor: installments.amountMinor,
+      purchaseCategoryId: creditCardPurchases.categoryId,
+      transactionCategoryId: transactions.categoryId,
+    })
+    .from(installments)
+    .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
+    .innerJoin(creditCardPurchases, eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId))
+    .innerJoin(transactions, eq(transactions.id, creditCardPurchases.transactionId))
+    // Only plans whose purchase row is itself one of the parcels.
+    .innerJoin(
+      linked,
+      and(eq(linked.installmentPlanId, installmentPlans.id), eq(linked.transactionId, transactions.id)),
+    )
+    .where(
+      and(
+        inArray(creditCardPurchases.creditCardId, cardIds),
+        eq(installments.status, "projected"),
+        gte(installments.expectedAt, from),
+        lte(installments.expectedAt, to),
+      ),
+    );
+  const budgeted = new Set(categoryIds);
+  return rows.flatMap((row) => {
+    const categoryId = row.purchaseCategoryId ?? row.transactionCategoryId;
+    if (!categoryId || !budgeted.has(categoryId)) return [];
+    return [{ categoryId, cardId: row.cardId, dueAt: row.dueAt, amountMinor: row.amountMinor }];
+  });
 }

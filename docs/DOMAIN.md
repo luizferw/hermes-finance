@@ -53,8 +53,10 @@ Por budget e por mês, sempre na data econômica (R4):
 
 $$restante = max(0, planejado - gasto - comprometido)$$
 
-- **gasto**: despesas já lançadas nas categorias, em qualquer conta, cartão incluído na data da compra;
-- **comprometido**: o que a projeção já carrega nessas categorias e ainda vai acontecer no mês (bills, recorrências, eventos persistidos com categoria). Descontar isso impede que uma conta numa categoria orçada conte como conta e de novo como budget (R3). Parcelas de compras antigas não entram: a despesa delas pertence ao mês da compra.
+- **gasto**: despesas já lançadas nas categorias, em qualquer conta, medidas como o progresso de budget do Kosh mede;
+- **comprometido**: o que a projeção já carrega nessas categorias e ainda vai acontecer no mês — bills, recorrências, eventos persistidos com categoria e as parcelas projetadas de compras já feitas. Descontar isso impede que uma conta ou parcela numa categoria orçada conte como ela mesma e de novo como budget (R3).
+
+Parcelas contam no mês da fatura em que são lançadas, não no mês da compra. É assim que o ledger as registra quando a Pluggy entrega uma transação por parcela (OPEN-FINANCE.md), e portanto é assim que o histórico já as contém. Contar a compra parcelada pelo valor cheio no mês da compra inflaria o caixa do mês, porque ela sai aos poucos. Uma compra lançada à mão é uma transação de valor cheio, já está em **gasto**, e suas parcelas não viram comprometido.
 
 Dois cenários:
 
