@@ -27,7 +27,8 @@ export type Scope =
   | "rules:read"
   | "rules:write"
   | "automations:read"
-  | "automations:write";
+  | "automations:write"
+  | "settings:write";
 
 /** Scopes used by the in-app chat, which remains read-only. */
 export const MCP_READ_SCOPES = [
@@ -47,6 +48,7 @@ export const MCP_SCOPES = [
   "rules:write",
   "automations:read",
   "automations:write",
+  "settings:write",
 ] as const satisfies readonly Scope[];
 
 /* ── Structured assistant response blocks ───────────────────────────────── */

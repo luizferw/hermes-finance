@@ -1,5 +1,5 @@
 import "server-only";
-import { z, type ZodType } from "zod";
+import { z } from "zod";
 import {
   addMonthsClamped,
   formatMoney,
@@ -74,100 +74,32 @@ import {
 } from "@/modules/rules/core";
 import { previewRuleDefinition } from "@/modules/rules/engine";
 import type { CreateRuleInput } from "@/modules/rules/validators";
+import {
+  currencyCodeInput,
+  currencyWarningBlocks,
+  formatMajor,
+  isoDateSchema,
+  monthIsoFor,
+  monthLabel,
+  read,
+  resolveAccount,
+  resolveCategory,
+  resolveNamedAccount,
+  write,
+} from "./tools/shared";
+import { financeReadsTools } from "./tools/finance-reads";
+import { financeWritesTools } from "./tools/finance-writes";
+import { ledgerReadsTools } from "./tools/ledger-reads";
+import { ledgerWritesTools } from "./tools/ledger-writes";
 import type {
   ReadTool,
-  ReadToolResult,
   WriteTool,
   Tool,
   ToolContext,
-  PreparedWrite,
   ExecStatus,
   ResponseBlock,
   Scope,
 } from "./types";
-
-/* ── definition helpers (infer arg type from the zod schema) ────────────── */
-
-function read<S extends ZodType>(t: {
-  name: string;
-  title: string;
-  description: string;
-  requiredScope: Scope;
-  input: S;
-  execute: (ctx: ToolContext, args: z.infer<S>) => Promise<ReadToolResult>;
-}): ReadTool<z.infer<S>> {
-  return { kind: "read", risk: "read", ...t };
-}
-
-function write<S extends ZodType>(t: {
-  name: string;
-  title: string;
-  description: string;
-  risk: "write" | "sensitive";
-  requiredScope: Scope;
-  input: S;
-  prepare: (ctx: ToolContext, args: z.infer<S>) => Promise<PreparedWrite>;
-  execute: WriteTool<z.infer<S>>["execute"];
-}): WriteTool<z.infer<S>> {
-  return { kind: "write", ...t };
-}
-
-/* ── shared resolution (names → owned ids; never trust model ids blindly) ─ */
-
-async function resolveAccount(userId: string, hint?: string) {
-  const accounts = (await listAccounts(userId)).filter((a) => !a.isArchived);
-  if (!hint) return accounts[0] ?? null;
-  const h = hint.toLowerCase();
-  return (
-    accounts.find((a) => a.name.toLowerCase() === h) ??
-    accounts.find((a) => a.name.toLowerCase().includes(h)) ??
-    accounts[0] ??
-    null
-  );
-}
-
-async function resolveCategory(userId: string, hint?: string | null) {
-  if (!hint) return null;
-  const cats = await listCategories(userId);
-  const h = hint.toLowerCase();
-  return (
-    cats.find((c) => c.name.toLowerCase() === h) ??
-    cats.find((c) => c.name.toLowerCase().includes(h)) ??
-    null
-  );
-}
-
-function monthIsoFor(period?: "this_month" | "last_month") {
-  return period === "last_month" ? addMonthsClamped(todayIso(), -1) : todayIso();
-}
-
-function monthLabel(iso: string) {
-  return new Intl.DateTimeFormat("en-IN", { month: "long", year: "numeric" }).format(
-    new Date(`${iso.slice(0, 7)}-01T00:00:00`),
-  );
-}
-
-function currencyWarning(
-  defaultCurrency: string,
-  currencies: string[],
-): ResponseBlock | undefined {
-  const otherCurrencies = [...new Set(currencies)].filter(
-    (currency) => currency !== defaultCurrency,
-  );
-  return otherCurrencies.length
-    ? {
-        type: "currencyWarning",
-        defaultCurrency,
-        otherCurrencies,
-        text: `Totals use ${defaultCurrency}. Other currencies are shown separately and are not added to it.`,
-      }
-    : undefined;
-}
-
-function currencyWarningBlocks(defaultCurrency: string, currencies: string[]) {
-  const warning = currencyWarning(defaultCurrency, currencies);
-  return warning ? [warning] : undefined;
-}
 
 const periodSchema = z.enum(["this_month", "last_month"]).optional();
 
@@ -175,7 +107,6 @@ const periodSchema = z.enum(["this_month", "last_month"]).optional();
    in modules/finance/simulation.ts — the model supplies the option, the
    engine supplies every number in the response) ─────────────────────────── */
 
-const isoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const purchaseOptionInput = z.object({
   id: z.string().min(1).max(100),
@@ -212,27 +143,6 @@ const planRecommendationItemInput = z.object({
    plan's own currency, exactly as the UI forms do) ─────────────────────── */
 
 const planStatusInput = z.enum(["active", "completed", "archived"]);
-const currencyCodeInput = z.string().regex(/^[A-Za-z]{3}$/, "Use a 3-letter ISO 4217 code");
-
-/**
- * Account by name, with no fallback. `resolveAccount` defaults to the first
- * account when nothing matches, which is right for "add an expense" but wrong
- * here: an item's account decides whether it settles on a card's cycles, so a
- * typo must fail loudly instead of quietly projecting onto another account.
- */
-async function resolveNamedAccount(userId: string, name: string) {
-  const accounts = (await listAccounts(userId)).filter((a) => !a.isArchived);
-  const h = name.toLowerCase();
-  const account =
-    accounts.find((a) => a.name.toLowerCase() === h) ??
-    accounts.find((a) => a.name.toLowerCase().includes(h));
-  if (!account) throw new Error(`No account matching "${name}".`);
-  return account;
-}
-
-function formatMajor(amount: number, currency: string) {
-  return formatMoney(majorToMinor(amount, currency), currency);
-}
 
 /* ── rule construction (narrow, typed; values resolved to owned ids) ──────── */
 
@@ -2000,7 +1910,16 @@ const writeTools: WriteTool[] = [
 
 /* ── the registry ───────────────────────────────────────────────────────── */
 
-export const TOOLS: Tool[] = [...readTools, ...writeTools];
+// Each domain keeps its tools in `./tools/<domain>.ts`; this list is the only
+// place they are joined, so a tool defined there and not added here is dead.
+export const TOOLS: Tool[] = [
+  ...readTools,
+  ...financeReadsTools,
+  ...ledgerReadsTools,
+  ...writeTools,
+  ...financeWritesTools,
+  ...ledgerWritesTools,
+];
 export const MCP_TOOLS: Tool[] = TOOLS;
 export const TOOL_BY_NAME = new Map<string, Tool>(TOOLS.map((t) => [t.name, t]));
 
