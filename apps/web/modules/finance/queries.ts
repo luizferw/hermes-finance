@@ -21,18 +21,23 @@ import { addDays, monthRange, todayIso } from "@kosh/domain";
 import { getUserSettings } from "@/modules/settings/queries";
 import {
   allocateCardDebt,
+  BUDGET_ESTIMATE_SOURCE,
   buildForecast,
   projectRecurrences,
   projectStatements,
   nominalCycleFor,
   statementMonthForDueDate,
   type BillingCycle,
+  type BudgetConsumptionBlocker,
+  type BudgetMonthEstimate,
   type Confidence,
+  type ConsumptionCommitment,
   type CycleCharge,
   type Forecast,
   type ForecastEvent,
   type RecurrenceInterval,
   type RecurrenceRule,
+  type VariableSpendingScenario,
 } from "@hermes-finance/forecast";
 import {
   calculateSafeToSpend,
@@ -41,6 +46,7 @@ import {
   type PlanItemOption,
   type PurchasePlanSimulation,
 } from "@hermes-finance/planning";
+import { loadBudgetConsumption, type BudgetConsumption } from "./budget-consumption";
 import { loadCardContext, toEnginePaymentOption } from "./simulation";
 
 const CONFIDENCE: Record<string, Confidence> = {
@@ -189,6 +195,36 @@ export interface UserForecast {
   position: FinancePosition;
   /** Empty whenever every card's balance fits on statements still ahead. */
   cardDebtUnplaced: CardDebtUnplaced[];
+  /** Which variable-spending estimate `forecast` carries. */
+  scenario: VariableSpendingScenario;
+  /** Every projected commitment, before any budget estimate joins them. */
+  commitmentEvents: ForecastEvent[];
+  /** The budget estimates for both scenarios, with how each was reached. */
+  budgetConsumption: BudgetConsumption;
+}
+
+/**
+ * The scenario the user-facing numbers default to: the categories' usual
+ * spending, with the conservative one shown beside it wherever it matters.
+ */
+export const DEFAULT_VARIABLE_SPENDING: VariableSpendingScenario = "base";
+
+/**
+ * The same forecast under another variable-spending scenario, without reading
+ * the database again: the commitments are identical, only the estimate changes.
+ */
+export function forecastForScenario(detailed: UserForecast, scenario: VariableSpendingScenario): Forecast {
+  if (scenario === detailed.scenario) return detailed.forecast;
+  const { forecast } = detailed;
+  return buildForecast({
+    asOf: forecast.asOf,
+    horizonEnd: forecast.horizonEnd,
+    balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
+    events: [
+      ...detailed.commitmentEvents,
+      ...(scenario === "none" ? [] : detailed.budgetConsumption.events[scenario]),
+    ],
+  });
 }
 
 /**
@@ -199,10 +235,21 @@ export interface UserForecast {
  * statement settlement produced by `projectStatements`. Feeding both would
  * count the same money twice.
  */
-export async function buildUserForecastDetailed(userId: string, horizonDays = 30): Promise<UserForecast> {
+export async function buildUserForecastDetailed(
+  userId: string,
+  horizonDays = 30,
+  options: { variableSpending?: VariableSpendingScenario } = {},
+): Promise<UserForecast> {
   const startedAt = performance.now();
+  const scenario = options.variableSpending ?? DEFAULT_VARIABLE_SPENDING;
   const asOf = todayIso();
   const horizonEnd = addDays(asOf, horizonDays);
+  // A budget's remaining amount is a whole-month figure, so what is already
+  // committed in its categories has to be known to the end of the last month
+  // the horizon touches, even past the horizon itself.
+  const commitmentsEnd = monthRange(horizonEnd).end;
+  const commitmentRange = { from: asOf, to: commitmentsEnd };
+  const commitments: ConsumptionCommitment[] = [];
   const settings = await getUserSettings(userId);
   const position = await getFinancePosition(userId);
   const range = { from: asOf, to: horizonEnd };
@@ -215,11 +262,14 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     where: and(
       eq(projectedEvents.userId, userId),
       gte(projectedEvents.expectedAt, asOf),
-      lte(projectedEvents.expectedAt, horizonEnd),
+      lte(projectedEvents.expectedAt, commitmentsEnd),
     ),
     orderBy: [asc(projectedEvents.expectedAt), asc(projectedEvents.id)],
   });
   for (const event of persisted) {
+    if (event.categoryId && event.amountMinor < 0 && !event.resolvedByTransactionId) {
+      commitments.push({ categoryId: event.categoryId, date: event.expectedAt, amountMinor: -event.amountMinor });
+    }
     labels.set(event.logicalKey, event.eventType);
     events.push({
       id: event.id,
@@ -288,6 +338,15 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
   // card's statement settles. Projecting it here would take the cash weeks
   // early and out of the wrong pocket, so these bills are held back and folded
   // into their billing cycle in step 4 instead.
+  // Every bill is incurred on its due date wherever it is paid from, so for a
+  // budget a card bill counts in the month it is charged, not when it settles.
+  for (const bill of activeBills) {
+    if (!bill.categoryId) continue;
+    for (const occurrence of projectRecurrences([ruleForBill(bill)], commitmentRange)) {
+      commitments.push({ categoryId: bill.categoryId, date: occurrence.expectedAt, amountMinor: -occurrence.amountMinor });
+    }
+  }
+
   const cardBills = activeBills.filter(
     (bill) => bill.accountId !== null && cardByAccountId.has(bill.accountId),
   );
@@ -326,6 +385,12 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
       recurring.map((rule) => [`recurring:rule:${rule.id}`, rule.name]),
     ),
   );
+  recurring.forEach((rule, index) => {
+    if (!rule.categoryId || rule.amountMinor >= 0) return;
+    for (const occurrence of projectRecurrences([recurringRules[index]!], commitmentRange)) {
+      commitments.push({ categoryId: rule.categoryId, date: occurrence.expectedAt, amountMinor: -occurrence.amountMinor });
+    }
+  });
 
   // 4. Credit-card statements: one cash settlement per billing cycle.
   if (cards.length > 0) {
@@ -502,6 +567,29 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     events.push(...statementEvents);
   }
 
+  // 5. Variable spending the budgets still expect (see `projectBudgetConsumption`).
+  // Both scenarios are estimated from one read so a caller can compare them
+  // through `forecastForScenario` without building the forecast twice.
+  const budgetConsumption = await loadBudgetConsumption({
+    userId,
+    asOf,
+    horizonEnd,
+    currencyCode: settings.currencyCode,
+    cards: cards.map((card) => ({
+      id: card.id,
+      accountId: card.accountId,
+      closingDay: card.defaultClosingDay,
+      dueDay: card.defaultDueDay,
+    })),
+    commitments,
+  });
+  for (const event of [...budgetConsumption.events.base, ...budgetConsumption.events.conservative]) {
+    const budgetId = event.logicalKey.split(":")[1]!;
+    labels.set(event.logicalKey, `Estimated spending · ${budgetConsumption.budgetNames.get(budgetId) ?? "budget"}`);
+  }
+  const commitmentEvents = [...events];
+  if (scenario !== "none") events.push(...budgetConsumption.events[scenario]);
+
   // Each source already excludes what has settled: a persisted event carries
   // its own `resolvedByTransactionId`, a paid billing cycle is filtered out
   // above, and Kosh rolls a bill's `nextDueDate` forward once it is paid. So
@@ -531,7 +619,7 @@ export async function buildUserForecastDetailed(userId: string, horizonDays = 30
     `ms=${Math.round(performance.now() - startedAt)}`,
   );
 
-  return { forecast, labels, position, cardDebtUnplaced };
+  return { forecast, labels, position, cardDebtUnplaced, scenario, commitmentEvents, budgetConsumption };
 }
 
 function tagLabels(
@@ -639,9 +727,28 @@ export interface SpendingRoomView {
   hardReserveMinor: number;
   /** Everything the horizon expects to pay out, as a positive magnitude. */
   committedMinor: number;
+  /**
+   * How much of that the budgets' variable-spending estimate accounts for —
+   * already inside `committedMinor`, broken out because it is an assumption,
+   * not a commitment.
+   */
+  estimatedVariableMinor: number;
+  /** The scenario the headline is computed under. */
+  scenario: VariableSpendingScenario;
+  /**
+   * The headline under every scenario, so the budgets' effect is visible:
+   * `none` is the room if nothing beyond commitments were spent.
+   */
+  safeToSpendByScenario: Record<VariableSpendingScenario, number>;
   staleAccountNames: string[];
   forecast: Forecast;
   position: FinancePosition;
+}
+
+const VARIABLE_SPENDING_SCENARIOS: VariableSpendingScenario[] = ["none", "base", "conservative"];
+
+function outflowMinor(events: ForecastEvent[]): number {
+  return events.filter((event) => event.amountMinor < 0).reduce((total, event) => total + -event.amountMinor, 0);
 }
 
 /**
@@ -658,20 +765,19 @@ export interface SpendingRoomView {
  * it. Every route is reported, not just the winner, because which card to reach
  * for is the decision this number exists to inform.
  */
-export async function getSafeToSpend(userId: string, horizonDays = 60): Promise<SpendingRoomView> {
-  const [{ forecast, position }, hardReserveMinor, cards] = await Promise.all([
-    buildUserForecastDetailed(userId, horizonDays),
+export async function getSafeToSpend(
+  userId: string,
+  horizonDays = 60,
+  scenario: VariableSpendingScenario = DEFAULT_VARIABLE_SPENDING,
+): Promise<SpendingRoomView> {
+  const [detailed, hardReserveMinor, cards] = await Promise.all([
+    buildUserForecastDetailed(userId, horizonDays, { variableSpending: scenario }),
     getHardReserveMinor(userId),
     listCreditCards(userId),
   ]);
+  const { forecast, position } = detailed;
 
   const asOf = forecast.asOf;
-  const forecastInput = {
-    asOf,
-    horizonEnd: forecast.horizonEnd,
-    balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: asOf }],
-    events: forecast.events,
-  };
 
   const routes: { cardId: string | null; label: string; settlementDate: string }[] = [
     { cardId: null, label: "À vista", settlementDate: asOf },
@@ -684,18 +790,34 @@ export async function getSafeToSpend(userId: string, horizonDays = 60): Promise<
     })),
   ];
 
-  let floorMinor = 0;
-  let hardReserveViolated = false;
-  const options = routes.map((route) => {
-    const room = calculateSpendingRoom({ forecastInput, hardReserveMinor, settlementDate: route.settlementDate });
-    floorMinor = room.floorMinor;
-    hardReserveViolated = room.hardReserveViolated;
-    return { ...route, amountMinor: room.spendingRoomMinor };
-  });
+  const roomUnder = (projected: Forecast) => {
+    const forecastInput = {
+      asOf,
+      horizonEnd: projected.horizonEnd,
+      balances: [{ accountId: "consolidated", amountMinor: projected.openingBalanceMinor, observedAt: asOf }],
+      events: projected.events,
+    };
+    let floorMinor = 0;
+    let hardReserveViolated = false;
+    const options = routes.map((route) => {
+      const room = calculateSpendingRoom({ forecastInput, hardReserveMinor, settlementDate: route.settlementDate });
+      floorMinor = room.floorMinor;
+      hardReserveViolated = room.hardReserveViolated;
+      return { ...route, amountMinor: room.spendingRoomMinor };
+    });
+    const bestOption = options.reduce((best, option) => (option.amountMinor > best.amountMinor ? option : best));
+    return { options, bestOption, floorMinor, hardReserveViolated };
+  };
 
-  const bestOption = options.reduce((best, option) =>
-    option.amountMinor > best.amountMinor ? option : best,
-  );
+  const { options, bestOption, floorMinor, hardReserveViolated } = roomUnder(forecast);
+  const safeToSpendByScenario = Object.fromEntries(
+    VARIABLE_SPENDING_SCENARIOS.map((candidate) => [
+      candidate,
+      candidate === scenario
+        ? bestOption.amountMinor
+        : roomUnder(forecastForScenario(detailed, candidate)).bestOption.amountMinor,
+    ]),
+  ) as Record<VariableSpendingScenario, number>;
 
   return {
     safeToSpendMinor: bestOption.amountMinor,
@@ -706,9 +828,12 @@ export async function getSafeToSpend(userId: string, horizonDays = 60): Promise<
     floorMinor,
     hardReserveViolated,
     hardReserveMinor,
-    committedMinor: forecast.events
-      .filter((event) => event.amountMinor < 0)
-      .reduce((total, event) => total + -event.amountMinor, 0),
+    committedMinor: outflowMinor(forecast.events),
+    estimatedVariableMinor: outflowMinor(
+      forecast.events.filter((event) => event.sourceType === BUDGET_ESTIMATE_SOURCE),
+    ),
+    scenario,
+    safeToSpendByScenario,
     staleAccountNames: position.staleAccountNames,
     forecast,
     position,
@@ -739,15 +864,41 @@ export async function getSafeToSpendUntilNextIncome(userId: string, maxHorizonDa
   };
 }
 
-export interface MonthOutlook {
-  /** `YYYY-MM`. */
-  month: string;
+export interface MonthBalance {
   /** Projected balance on the last day of the month the horizon covers. */
   closingBalanceMinor: number;
   /** The month's worst day — the one that decides whether it is survivable. */
   lowMinor: number;
   lowDate: string;
+}
+
+export interface MonthOutlook extends MonthBalance {
+  /** `YYYY-MM`. */
+  month: string;
   isCurrentMonth: boolean;
+  /** The headline figures are the base scenario; this is the conservative one. */
+  conservative: MonthBalance;
+  /** Variable spending the budgets still expect in the month, per scenario. */
+  estimatedVariableMinor: { base: number; conservative: number };
+}
+
+function monthBalances(forecast: Forecast): Map<string, MonthBalance> {
+  const byMonth = new Map<string, MonthBalance>();
+  for (const day of forecast.days) {
+    const month = day.date.slice(0, 7);
+    const entry = byMonth.get(month);
+    if (!entry) {
+      byMonth.set(month, { closingBalanceMinor: day.closingBalanceMinor, lowMinor: day.closingBalanceMinor, lowDate: day.date });
+      continue;
+    }
+    // Days arrive in order, so the last one seen is the month's closing day.
+    entry.closingBalanceMinor = day.closingBalanceMinor;
+    if (day.closingBalanceMinor < entry.lowMinor) {
+      entry.lowMinor = day.closingBalanceMinor;
+      entry.lowDate = day.date;
+    }
+  }
+  return byMonth;
 }
 
 /** Last calendar day of the month `offset` months after `isoMonth`'s month. */
@@ -768,37 +919,63 @@ function endOfMonth(isoDay: string, offset: number): string {
  * statement falls on.
  */
 export async function getMonthlyOutlook(userId: string, months = 4): Promise<MonthOutlook[]> {
+  return (await getBudgetForecast(userId, months)).outlook;
+}
+
+export interface BudgetForecastEstimate extends BudgetMonthEstimate {
+  budgetName: string;
+}
+
+export interface BudgetForecast {
+  outlook: MonthOutlook[];
+  /** Per budget and month, how each scenario's estimate was reached. */
+  estimates: BudgetForecastEstimate[];
+  /** Budgets left out of the estimate, and why. */
+  blockers: Array<BudgetConsumptionBlocker & { budgetName: string }>;
+}
+
+/**
+ * The monthly outlook together with the budget estimates behind it, from one
+ * forecast build, so the two can never disagree.
+ */
+export async function getBudgetForecast(userId: string, months = 4): Promise<BudgetForecast> {
   const today = todayIso();
   const horizonEnd = endOfMonth(today, months);
   const horizonDays = Math.max(
     1,
     Math.round((Date.parse(`${horizonEnd}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000),
   );
-  const { forecast } = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays, { variableSpending: "base" });
+  const base = monthBalances(detailed.forecast);
+  const conservative = monthBalances(forecastForScenario(detailed, "conservative"));
 
-  const byMonth = new Map<string, MonthOutlook>();
-  for (const day of forecast.days) {
-    const month = day.date.slice(0, 7);
-    const entry = byMonth.get(month);
-    if (!entry) {
-      byMonth.set(month, {
-        month,
-        closingBalanceMinor: day.closingBalanceMinor,
-        lowMinor: day.closingBalanceMinor,
-        lowDate: day.date,
-        isCurrentMonth: month === today.slice(0, 7),
-      });
-      continue;
-    }
-    // Days arrive in order, so the last one seen is the month's closing day.
-    entry.closingBalanceMinor = day.closingBalanceMinor;
-    if (day.closingBalanceMinor < entry.lowMinor) {
-      entry.lowMinor = day.closingBalanceMinor;
-      entry.lowDate = day.date;
-    }
+  const estimated = new Map<string, { base: number; conservative: number }>();
+  for (const estimate of detailed.budgetConsumption.estimates) {
+    const entry = estimated.get(estimate.month) ?? { base: 0, conservative: 0 };
+    entry.base += estimate.baseRemainingMinor;
+    entry.conservative += estimate.conservativeRemainingMinor;
+    estimated.set(estimate.month, entry);
   }
 
-  return [...byMonth.values()].slice(0, months);
+  const outlook = [...base.entries()].slice(0, months).map(([month, balance]) => ({
+    month,
+    ...balance,
+    isCurrentMonth: month === today.slice(0, 7),
+    conservative: conservative.get(month)!,
+    estimatedVariableMinor: estimated.get(month) ?? { base: 0, conservative: 0 },
+  }));
+  const shown = new Set(outlook.map((entry) => entry.month));
+  const { budgetNames } = detailed.budgetConsumption;
+  return {
+    outlook,
+    estimates: detailed.budgetConsumption.estimates
+      .filter((estimate) => shown.has(estimate.month))
+      .map((estimate) => ({ ...estimate, budgetName: budgetNames.get(estimate.budgetId) ?? estimate.budgetId })),
+    blockers: detailed.budgetConsumption.blockers.map((blocker) => ({
+      ...blocker,
+      budgetName: budgetNames.get(blocker.budgetId) ?? blocker.budgetId,
+    })),
+  };
 }
 
 export interface UpcomingCommitment {
@@ -817,7 +994,8 @@ export interface UpcomingCommitment {
 export async function getUpcomingCommitments(userId: string, horizonDays = 30): Promise<UpcomingCommitment[]> {
   const { forecast, labels } = await buildUserForecastDetailed(userId, horizonDays);
   return forecast.events
-    .filter((event) => event.amountMinor < 0)
+    // An estimate of variable spending is an assumption, not something owed.
+    .filter((event) => event.amountMinor < 0 && event.sourceType !== BUDGET_ESTIMATE_SOURCE)
     .map((event) => ({
       logicalKey: event.logicalKey,
       label: labels.get(event.logicalKey) ?? event.sourceType,

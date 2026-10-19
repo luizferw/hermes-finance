@@ -23,6 +23,8 @@ O Forecast seleciona somente o evento de maior confiança para uma mesma `logica
 | Recorrência / bill | `recurring:<ruleId>:<data>` |
 | Fatura de cartão | `statement:<cardId>:<statementMonth>` |
 | Simulação de compra | `simulation:<optionId>:<n>` |
+| Gasto variável estimado (à vista) | `budget:<budgetId>:<mês>:cash:<data>` |
+| Gasto variável estimado (cartão) | `budget:<budgetId>:<mês>:card:<cardId>:<statementMonth>` |
 
 ## Saldo mínimo
 
@@ -42,6 +44,30 @@ Duas propriedades são verificadas por testes de invariante sobre 200 cenários 
 2. **Máximo** — gastar `safeToSpend + 1` sempre viola $R$.
 
 Vale também: nunca é negativo, nunca excede o vale, e nunca cresce quando a reserva cresce.
+
+## Budgets na projeção
+
+Budget é intenção, não previsão (PRD §8): ele nunca entra na projeção como ele mesmo. O que entra é uma estimativa do gasto variável que as categorias do budget ainda vão ter, calculada por `projectBudgetConsumption` e emitida como fonte própria (`sourceType = budget_estimate`), com confiança MEDIUM ou LOW.
+
+Por budget e por mês, sempre na data econômica (R4):
+
+$$restante = max(0, planejado - gasto - comprometido)$$
+
+- **gasto**: despesas já lançadas nas categorias, em qualquer conta, cartão incluído na data da compra;
+- **comprometido**: o que a projeção já carrega nessas categorias e ainda vai acontecer no mês (bills, recorrências, eventos persistidos com categoria). Descontar isso impede que uma conta numa categoria orçada conte como conta e de novo como budget (R3). Parcelas de compras antigas não entram: a despesa delas pertence ao mês da compra.
+
+Dois cenários:
+
+| Cenário | Base do "quanto ainda sai" | Confiança |
+| --- | --- | --- |
+| `base` (padrão) | Mediana dos 3 últimos meses completos das categorias no lugar do planejado (R1: histórico vence estimativa manual). Sem 3 meses cobertos pelo ledger, usa o budget. | MEDIUM com histórico; LOW sem |
+| `conservative` | `max(base, restante do budget)` — nunca mais otimista que o histórico | LOW, salvo quando o histórico vence |
+
+`none` é a projeção só com compromissos; `forecastForScenario` troca de cenário sem reler o banco.
+
+O dinheiro sai conforme o histórico de pagamento das categorias: a parte à vista é espalhada pelos dias restantes do mês; a parte de cada cartão sai no vencimento da fatura aberta no dia do gasto, como **evento separado**. Juntá-la ao total da fatura rotularia um palpite com a confiança da fatura (R7).
+
+Fora da v1: itens de purchase plan não têm categoria e não consomem budget (planejar o mesmo gasto nos dois conta duas vezes); gasto em categoria sem budget continua fora da projeção; uma categoria em dois budgets bloqueia os dois (`CATEGORY_IN_MULTIPLE_BUDGETS`) em vez de contar duas vezes.
 
 ## Cartão de crédito
 

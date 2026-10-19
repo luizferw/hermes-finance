@@ -232,6 +232,9 @@ export default async function OverviewPage() {
                 hardReserveMinor={safeToSpend.hardReserveMinor}
                 bestRoute={safeToSpend.bestOption}
                 routes={safeToSpend.options}
+                estimatedVariableMinor={safeToSpend.estimatedVariableMinor}
+                withoutEstimateMinor={safeToSpend.safeToSpendByScenario.none}
+                conservativeMinor={safeToSpend.safeToSpendByScenario.conservative}
                 currency={currency}
               />
             </div>
