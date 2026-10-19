@@ -16,10 +16,10 @@ import { cn } from "@/lib/utils";
  * separate "earned minus spent" narrative, which would drift from the headline
  * the moment the two disagreed.
  *
- * The headline already sets aside what the budgets expect to be spent within
- * the horizon. That reservation is an estimate, so the breakdown names it
- * and shows the figure without it and under the conservative scenario — the
- * reader can see how much of the answer rests on the assumption.
+ * The headline already sets aside what the budgets still allow within the
+ * horizon. That reservation is an estimate, so the breakdown names it and
+ * shows the figure without it — the reader can see how much of the answer
+ * rests on the assumption.
  */
 export interface SpendingRoute {
   label: string;
@@ -37,7 +37,6 @@ export function SafeToSpendCard({
   routes,
   estimatedVariableMinor,
   withoutEstimateMinor,
-  conservativeMinor,
   currency,
 }: {
   safeMinor: number;
@@ -50,7 +49,6 @@ export function SafeToSpendCard({
   /** Budgeted variable spending the forecast sets aside; 0 without budgets. */
   estimatedVariableMinor: number;
   withoutEstimateMinor: number;
-  conservativeMinor: number;
   currency: string;
 }) {
   // A negative figure is the informative case, not an error state: next month
@@ -114,7 +112,6 @@ export function SafeToSpendCard({
                 value={formatMoney(estimatedVariableMinor, currency)}
               />
               <Row label="Room if nothing else were spent" value={formatMoney(withoutEstimateMinor, currency)} />
-              <Row label="Room if budgets run to their limit" value={formatMoney(conservativeMinor, currency)} />
             </>
           )}
         </dl>

@@ -14,8 +14,6 @@ function input(overrides: Partial<BudgetConsumptionInput> = {}): BudgetConsumpti
   return {
     asOf: AS_OF,
     horizonEnd: "2026-10-31",
-    // The ledger starts this month: no complete month of history yet.
-    historyStart: "2026-10-01",
     budgets: [{ id: "market", categoryIds: [GROCERIES], plannedByMonth: { "2026-10": 85_000 } }],
     spending: [{ categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null }],
     commitments: [],
@@ -42,29 +40,26 @@ describe("projectBudgetConsumption", () => {
       month: "2026-10",
       plannedMinor: 85_000,
       spentMinor: 51_348,
-      budgetRemainingMinor: 33_652,
-      baseBasis: "budget",
-      baseRemainingMinor: 33_652,
-      conservativeRemainingMinor: 33_652,
-      baseConfidence: "LOW",
+      remainingMinor: 33_652,
     });
-    expect(total(result.events.base)).toBe(-33_652);
-    expect(total(result.events.conservative)).toBe(-33_652);
+    expect(total(result.events)).toBe(-33_652);
+    // A budget is a manual estimate.
+    expect(result.events.every((event) => event.confidence === "LOW")).toBe(true);
   });
 
   it("spreads the cash share over the days left in the month, in whole minor units", () => {
     const { events } = projectBudgetConsumption(input());
-    const dates = events.base.map((event) => event.expectedAt);
+    const dates = events.map((event) => event.expectedAt);
 
     // 19th through 31st: thirteen days, nothing before today.
     expect(dates).toHaveLength(13);
     expect(dates[0]).toBe(AS_OF);
     expect(dates.at(-1)).toBe("2026-10-31");
-    expect(events.base.every((event) => Number.isInteger(event.amountMinor) && event.amountMinor < 0)).toBe(true);
-    expect(events.base.every((event) => event.sourceType === BUDGET_ESTIMATE_SOURCE)).toBe(true);
+    expect(events.every((event) => Number.isInteger(event.amountMinor) && event.amountMinor < 0)).toBe(true);
+    expect(events.every((event) => event.sourceType === BUDGET_ESTIMATE_SOURCE)).toBe(true);
     // 33 652 / 13 = 2 588 rem 8: the leftover lands on the earliest days.
-    expect(events.base[0]!.amountMinor).toBe(-2_589);
-    expect(events.base.at(-1)!.amountMinor).toBe(-2_588);
+    expect(events[0]!.amountMinor).toBe(-2_589);
+    expect(events.at(-1)!.amountMinor).toBe(-2_588);
   });
 
   it("subtracts what the forecast already projects in the category", () => {
@@ -80,7 +75,7 @@ describe("projectBudgetConsumption", () => {
     );
 
     expect(result.estimates[0]!.committedMinor).toBe(10_000);
-    expect(total(result.events.base)).toBe(-23_652);
+    expect(total(result.events)).toBe(-23_652);
   });
 
   it("subtracts parcels of past purchases in the month their statement books them", () => {
@@ -101,7 +96,7 @@ describe("projectBudgetConsumption", () => {
     const committed = Object.fromEntries(result.estimates.map((estimate) => [estimate.month, estimate.committedMinor]));
 
     expect(committed).toEqual({ "2026-10": 4_000, "2026-11": 4_000 });
-    expect(result.estimates[0]!.budgetRemainingMinor).toBe(85_000 - 51_348 - 4_000);
+    expect(result.estimates[0]!.remainingMinor).toBe(85_000 - 51_348 - 4_000);
   });
 
   it("dates a parcel whose statement already closed today, so it is not lost", () => {
@@ -122,68 +117,8 @@ describe("projectBudgetConsumption", () => {
       input({ spending: [{ categoryId: GROCERIES, date: "2026-10-05", amountMinor: 90_000, cardId: null }] }),
     );
 
-    expect(result.estimates[0]!.budgetRemainingMinor).toBe(0);
-    expect(result.events.base).toEqual([]);
-    expect(result.events.conservative).toEqual([]);
-  });
-
-  it("bases the estimate on history once three complete months exist", () => {
-    const result = projectBudgetConsumption(
-      input({
-        historyStart: "2026-01-01",
-        spending: [
-          monthly("2026-07", 60_000),
-          monthly("2026-08", 90_000),
-          monthly("2026-09", 70_000),
-          { categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null },
-        ],
-      }),
-    );
-    const [estimate] = result.estimates;
-
-    expect(estimate).toMatchObject({
-      historicalMonthlyMinor: 70_000,
-      historyMonths: 3,
-      baseBasis: "history",
-      baseRemainingMinor: 18_652,
-      baseConfidence: "MEDIUM",
-      // The budget leaves more room than history uses; conservative keeps it.
-      conservativeRemainingMinor: 33_652,
-      conservativeConfidence: "LOW",
-    });
-    expect(total(result.events.base)).toBe(-18_652);
-    expect(total(result.events.conservative)).toBe(-33_652);
-  });
-
-  it("never lets the conservative scenario be more optimistic than history", () => {
-    const result = projectBudgetConsumption(
-      input({
-        historyStart: "2026-01-01",
-        spending: [
-          monthly("2026-07", 100_000),
-          monthly("2026-08", 120_000),
-          monthly("2026-09", 110_000),
-          { categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null },
-        ],
-      }),
-    );
-
-    expect(result.estimates[0]).toMatchObject({
-      baseRemainingMinor: 58_652,
-      conservativeRemainingMinor: 58_652,
-      conservativeConfidence: "MEDIUM",
-    });
-  });
-
-  it("does not count a month the ledger only partly covers as history", () => {
-    const result = projectBudgetConsumption(
-      input({
-        historyStart: "2026-07-15",
-        spending: [monthly("2026-08", 10_000), monthly("2026-09", 10_000)],
-      }),
-    );
-
-    expect(result.estimates[0]).toMatchObject({ historyMonths: 2, historicalMonthlyMinor: null, baseBasis: "budget" });
+    expect(result.estimates[0]!.remainingMinor).toBe(0);
+    expect(result.events).toEqual([]);
   });
 
   it("sends the card share to the statement it would be billed on, as its own event", () => {
@@ -192,15 +127,15 @@ describe("projectBudgetConsumption", () => {
       input({
         cards: [card],
         spending: [
-          // Three parts card to one part cash in the history window.
+          // Three parts card to one part cash over the recent months.
           monthly("2026-08", 30_000, card.id),
           monthly("2026-09", 10_000, null),
           { categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null },
         ],
       }),
     );
-    const cardEvents = result.events.base.filter((event) => event.logicalKey.includes(":card:"));
-    const cashEvents = result.events.base.filter((event) => event.logicalKey.includes(":cash:"));
+    const cardEvents = result.events.filter((event) => event.logicalKey.includes(":card:"));
+    const cashEvents = result.events.filter((event) => event.logicalKey.includes(":cash:"));
 
     expect(result.estimates[0]!.routes).toEqual([
       { cardId: null, shareBasisPoints: 2_500 },
@@ -229,7 +164,7 @@ describe("projectBudgetConsumption", () => {
       }),
     );
     const november = result.estimates.find((estimate) => estimate.month === "2026-11")!;
-    const novemberEvents = result.events.base.filter((event) => event.logicalKey.includes(":2026-11:"));
+    const novemberEvents = result.events.filter((event) => event.logicalKey.includes(":2026-11:"));
 
     expect(november).toMatchObject({ plannedMinor: 85_000, spentMinor: 0, committedMinor: 5_000 });
     expect(total(novemberEvents)).toBe(-80_000);
@@ -255,7 +190,22 @@ describe("projectBudgetConsumption", () => {
     expect(result.estimates.map((estimate) => estimate.budgetId)).toEqual(["fun"]);
   });
 
-  it("skips a budget with neither a planned amount nor history", () => {
+  it("never lets history raise the ceiling the budget sets", () => {
+    const result = projectBudgetConsumption(
+      input({
+        spending: [
+          monthly("2026-07", 200_000),
+          monthly("2026-08", 200_000),
+          monthly("2026-09", 200_000),
+          { categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null },
+        ],
+      }),
+    );
+
+    expect(result.estimates[0]!.remainingMinor).toBe(33_652);
+  });
+
+  it("skips a budget with no planned amount", () => {
     const result = projectBudgetConsumption(
       input({ budgets: [{ id: "empty", categoryIds: [GROCERIES], plannedByMonth: {} }] }),
     );
@@ -275,12 +225,12 @@ describe("projectBudgetConsumption", () => {
       asOf: AS_OF,
       horizonEnd: "2026-11-30",
       balances: [{ accountId: "bank", amountMinor: 500_000, observedAt: AS_OF }],
-      events: events.base,
+      events: events,
     });
 
-    expect(new Set(events.base.map((event) => event.logicalKey)).size).toBe(events.base.length);
-    expect(withEstimate.events).toHaveLength(events.base.length);
-    expect(commitmentsOnly.minimumBalanceMinor - withEstimate.minimumBalanceMinor).toBe(-total(events.base));
+    expect(new Set(events.map((event) => event.logicalKey)).size).toBe(events.length);
+    expect(withEstimate.events).toHaveLength(events.length);
+    expect(commitmentsOnly.minimumBalanceMinor - withEstimate.minimumBalanceMinor).toBe(-total(events));
   });
 
   it("rejects fractional or negative magnitudes", () => {

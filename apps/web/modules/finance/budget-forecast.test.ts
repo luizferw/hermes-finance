@@ -32,8 +32,7 @@ import {
  *
  * The fixture is the acceptance case: a R$850 grocery budget with R$513,48
  * already spent leaves R$336,52 — less the R$100 bill in the same category
- * that the forecast already projects. The ledger starts this month, so there
- * is no history and the budget is the basis.
+ * that the forecast already projects.
  *
  * Card installments pin the parcel rule. Open Finance books one transaction
  * per parcel, so each parcel counts in the month it is billed — like Kosh's
@@ -247,8 +246,7 @@ describe("budgets in the forecast", () => {
       plannedMinor: PLANNED_MINOR,
       spentMinor: SPENT_TOTAL_MINOR,
       committedMinor: BILL_MINOR,
-      budgetRemainingMinor: REMAINING_MINOR,
-      baseBasis: "budget",
+      remainingMinor: REMAINING_MINOR,
     });
     // The by-hand purchase's later parcels never reach the ledger: not committed.
     const next = estimates.find((estimate) => estimate.month !== currentMonth)!;
@@ -270,13 +268,12 @@ describe("budgets in the forecast", () => {
     expect(commitments.some((commitment) => commitment.sourceType === "bill")).toBe(true);
   });
 
-  it("reports safe-to-spend under every scenario, the estimate only ever lowering it", async () => {
+  it("reports safe-to-spend with and without the budgets, the reservation only ever lowering it", async () => {
     const result = await getSafeToSpend(userId, 70);
 
-    expect(result.scenario).toBe("base");
-    expect(result.safeToSpendMinor).toBe(result.safeToSpendByScenario.base);
+    expect(result.scenario).toBe("budget");
+    expect(result.safeToSpendMinor).toBe(result.safeToSpendByScenario.budget);
     expect(result.estimatedVariableMinor).toBeGreaterThan(0);
-    expect(result.safeToSpendByScenario.none).toBeGreaterThan(result.safeToSpendByScenario.base);
-    expect(result.safeToSpendByScenario.base).toBeGreaterThanOrEqual(result.safeToSpendByScenario.conservative);
+    expect(result.safeToSpendByScenario.none).toBeGreaterThan(result.safeToSpendByScenario.budget);
   });
 });

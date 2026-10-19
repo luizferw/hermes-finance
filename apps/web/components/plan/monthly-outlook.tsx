@@ -14,9 +14,8 @@ import { cn } from "@/lib/utils";
  * A negative figure is stated, not softened. It is the number that says how much
  * is already booked against you.
  *
- * The headline assumes the budgeted categories spend what they usually do. When
- * a budget would let them spend more, the conservative line underneath says
- * where the month lands if they run to the limit.
+ * The figures assume the budgeted categories spend what their budgets still
+ * allow; the line underneath says how much of that is in them.
  */
 export function MonthlyOutlook({
   months,
@@ -58,16 +57,9 @@ export function MonthlyOutlook({
               low {formatMoney(month.lowMinor, currency, { locale })} ·{" "}
               {dayLabel(month.lowDate, locale)}
             </p>
-            {month.estimatedVariableMinor.base > 0 && (
+            {month.estimatedVariableMinor > 0 && (
               <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                incl. {formatMoney(month.estimatedVariableMinor.base, currency, { locale })} budgeted spending
-              </p>
-            )}
-            {month.estimatedVariableMinor.conservative > month.estimatedVariableMinor.base && (
-              <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                at budget limit {formatMoney(month.conservative.closingBalanceMinor, currency, { locale })} · low{" "}
-                {formatMoney(month.conservative.lowMinor, currency, { locale })} ·{" "}
-                {dayLabel(month.conservative.lowDate, locale)}
+                incl. {formatMoney(month.estimatedVariableMinor, currency, { locale })} budgeted spending
               </p>
             )}
           </div>

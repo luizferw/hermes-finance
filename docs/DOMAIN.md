@@ -47,27 +47,22 @@ Vale também: nunca é negativo, nunca excede o vale, e nunca cresce quando a re
 
 ## Budgets na projeção
 
-Budget é intenção, não previsão (PRD §8): ele nunca entra na projeção como ele mesmo. O que entra é uma estimativa do gasto variável que as categorias do budget ainda vão ter, calculada por `projectBudgetConsumption` e emitida como fonte própria (`sourceType = budget_estimate`), com confiança MEDIUM ou LOW.
+Budget é intenção, não previsão (PRD §8): ele nunca entra na projeção como ele mesmo. O que entra é o que ainda resta dele no mês, calculado por `projectBudgetConsumption` e emitido como fonte própria (`sourceType = budget_estimate`), com confiança LOW — é uma estimativa manual (R1).
 
-Por budget e por mês, sempre na data econômica (R4):
+Por budget e por mês:
 
 $$restante = max(0, planejado - gasto - comprometido)$$
 
 - **gasto**: despesas já lançadas nas categorias, em qualquer conta, medidas como o progresso de budget do Kosh mede;
 - **comprometido**: o que a projeção já carrega nessas categorias e ainda vai acontecer no mês — bills, recorrências, eventos persistidos com categoria e as parcelas projetadas de compras já feitas. Descontar isso impede que uma conta ou parcela numa categoria orçada conte como ela mesma e de novo como budget (R3).
 
-Parcelas contam no mês da fatura em que são lançadas, não no mês da compra. É assim que o ledger as registra quando a Pluggy entrega uma transação por parcela (OPEN-FINANCE.md), e portanto é assim que o histórico já as contém. Contar a compra parcelada pelo valor cheio no mês da compra inflaria o caixa do mês, porque ela sai aos poucos. Uma compra lançada à mão é uma transação de valor cheio, já está em **gasto**, e suas parcelas não viram comprometido.
+**O teto é o budget.** O histórico de gasto não aumenta a reserva, mesmo quando é maior que o planejado (decisão de 19/10/2026). Ele só decide a divisão entre cartão e à vista, isto é, quando o dinheiro sai.
 
-Dois cenários:
+Parcelas contam no mês da fatura em que são lançadas, não no mês da compra. É assim que o ledger as registra quando a Pluggy entrega uma transação por parcela (OPEN-FINANCE.md). Uma compra lançada à mão é uma transação de valor cheio, já está em **gasto**, e suas parcelas não viram comprometido.
 
-| Cenário | Base do "quanto ainda sai" | Confiança |
-| --- | --- | --- |
-| `base` (padrão) | Mediana dos 3 últimos meses completos das categorias no lugar do planejado (R1: histórico vence estimativa manual). Sem 3 meses cobertos pelo ledger, usa o budget. | MEDIUM com histórico; LOW sem |
-| `conservative` | `max(base, restante do budget)` — nunca mais otimista que o histórico | LOW, salvo quando o histórico vence |
+`none` é a projeção só com compromissos; `forecastForScenario` mostra o custo da reserva sem reler o banco.
 
-`none` é a projeção só com compromissos; `forecastForScenario` troca de cenário sem reler o banco.
-
-O dinheiro sai conforme o histórico de pagamento das categorias: a parte à vista é espalhada pelos dias restantes do mês; a parte de cada cartão sai no vencimento da fatura aberta no dia do gasto, como **evento separado**. Juntá-la ao total da fatura rotularia um palpite com a confiança da fatura (R7).
+O dinheiro sai conforme a divisão de pagamento das categorias nos últimos 3 meses: a parte à vista é espalhada pelos dias restantes do mês; a parte de cada cartão sai no vencimento da fatura aberta no dia do gasto, como **evento separado**. Juntá-la ao total da fatura rotularia um palpite com a confiança da fatura (R7).
 
 Fora da v1: itens de purchase plan não têm categoria e não consomem budget (planejar o mesmo gasto nos dois conta duas vezes); gasto em categoria sem budget continua fora da projeção; uma categoria em dois budgets bloqueia os dois (`CATEGORY_IN_MULTIPLE_BUDGETS`) em vez de contar duas vezes.
 

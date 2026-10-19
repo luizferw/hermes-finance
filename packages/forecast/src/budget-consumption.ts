@@ -9,18 +9,18 @@ import {
 import { addStatementMonths, nominalCycleFor, statementMonthForDueDate } from "./projections";
 
 /**
- * Which estimate of variable consumption the forecast carries.
- *
- * `none` is the commitments-only trajectory; `base` expects the categories to
- * spend what they usually do; `conservative` expects the larger of that and
- * whatever is still left in the budget.
+ * Whether the forecast carries the variable spending budgets still allow.
+ * `none` is the commitments-only trajectory.
  */
-export type VariableSpendingScenario = "none" | "base" | "conservative";
+export type VariableSpendingScenario = "none" | "budget";
 
 export const BUDGET_ESTIMATE_SOURCE = "budget_estimate";
 
-/** Complete months of history the base scenario needs before trusting it. */
-export const BUDGET_HISTORY_MONTHS = 3;
+/** A budget is a manual estimate, the lowest rung of R1's precedence. */
+const ESTIMATE_CONFIDENCE: Confidence = "LOW";
+
+/** Recent months whose payment mix decides which route an estimate is paid by. */
+export const ROUTE_HISTORY_MONTHS = 3;
 
 export interface ConsumptionBudget {
   id: string;
@@ -78,12 +78,6 @@ export interface ConsumptionCard {
 export interface BudgetConsumptionInput {
   asOf: DateString;
   horizonEnd: DateString;
-  /**
-   * First day the ledger has data for. A month that starts before it is
-   * absence of data, not a month of zero spending, and must not drag the
-   * historical median down. Null when the ledger is empty.
-   */
-  historyStart: DateString | null;
   budgets: ConsumptionBudget[];
   spending: ConsumptionSpend[];
   commitments: ConsumptionCommitment[];
@@ -103,21 +97,11 @@ export interface BudgetMonthEstimate {
   budgetId: string;
   /** `YYYY-MM`. */
   month: string;
-  /** Null when the budget has no planned amount for this month or any before it. */
-  plannedMinor: number | null;
+  plannedMinor: number;
   spentMinor: number;
   committedMinor: number;
-  /** `max(0, planned − spent − committed)`; null without a planned amount. */
-  budgetRemainingMinor: number | null;
-  /** Median monthly spending of the categories; null without enough history. */
-  historicalMonthlyMinor: number | null;
-  historyMonths: number;
-  /** What the base scenario rests on: the categories' history, or the budget as fallback. */
-  baseBasis: "history" | "budget";
-  baseRemainingMinor: number;
-  conservativeRemainingMinor: number;
-  baseConfidence: Confidence;
-  conservativeConfidence: Confidence;
+  /** `max(0, planned − spent − committed)`: what the forecast sets aside. */
+  remainingMinor: number;
   routes: ConsumptionRoute[];
 }
 
@@ -129,7 +113,7 @@ export interface BudgetConsumptionBlocker {
 
 export interface BudgetConsumptionResult {
   estimates: BudgetMonthEstimate[];
-  events: Record<Exclude<VariableSpendingScenario, "none">, ForecastEvent[]>;
+  events: ForecastEvent[];
   blockers: BudgetConsumptionBlocker[];
 }
 
@@ -145,12 +129,6 @@ function lastDay(month: string): DateString {
   const [year, monthNumber] = month.split("-").map(Number);
   const day = new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
   return `${month}-${String(day).padStart(2, "0")}`;
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle]! : Math.floor((sorted[middle - 1]! + sorted[middle]!) / 2);
 }
 
 function plannedFor(budget: ConsumptionBudget, month: string): number | null {
@@ -186,7 +164,6 @@ function splitByWeights(amountMinor: number, weights: number[]): number[] {
 function validate(input: BudgetConsumptionInput): void {
   assertValidDate(input.asOf, "asOf");
   assertValidDate(input.horizonEnd, "horizonEnd");
-  if (input.historyStart !== null) assertValidDate(input.historyStart, "historyStart");
   for (const budget of input.budgets) {
     for (const [month, planned] of Object.entries(budget.plannedByMonth)) {
       if (!/^\d{4}-\d{2}$/.test(month)) throw new Error(`budget ${budget.id} planned month must be YYYY-MM`);
@@ -211,15 +188,16 @@ function validate(input: BudgetConsumptionInput): void {
 }
 
 /**
- * Estimates the variable spending budgeted categories still have ahead, and
- * dates it as cash.
+ * Estimates the variable spending budgeted categories may still have ahead,
+ * and dates it as cash.
  *
  * A budget is what the user intends to spend, not something expected to happen
- * (PRD §8), so it never enters the forecast as itself. What enters is an
- * estimate derived from it, carried as its own low-confidence source so the
- * projection keeps saying how much of it is assumption (R7, §61).
+ * (PRD §8), so it never enters the forecast as itself. What enters is what is
+ * left of it, carried as its own source at LOW confidence — a manual estimate
+ * (R1) — so the projection keeps saying how much of it is assumption (R7, §61).
+ * The budget is the ceiling: history never raises it.
  *
- * Per budget and month, on the economic calendar (R4):
+ * Per budget and month:
  *
  *   remaining = max(0, planned − spent − committed)
  *
@@ -228,27 +206,19 @@ function validate(input: BudgetConsumptionInput): void {
  * projects in them — bills, recurring rules, and the parcels of past purchases
  * waiting on future statements. Subtracting it is what stops a bill or a parcel
  * in a budgeted category from being counted once as itself and again as
- * budget (R3).
+ * budget (R3). Parcels count in the month of their statement because that is
+ * where the ledger books them when Open Finance delivers one transaction per
+ * parcel.
  *
- * Parcels count in the month of their statement because that is where the
- * ledger books them when Open Finance delivers one transaction per parcel, so
- * the history the base scenario reads already carries them there too.
- *
- * The base scenario replaces `planned` with the categories' median monthly
- * spending over the last complete months, because real history outranks a
- * manual estimate (R1); without enough history it falls back to the budget.
- * The conservative scenario takes the larger of the two, so it is never the
- * more optimistic one.
- *
- * Cash dating follows how the categories were paid in that same history: the
- * cash share is spread across the days left in the month, and each card's
+ * Cash dating follows how the categories were paid over the last few months:
+ * the cash share is spread across the days left in the month, and each card's
  * share leaves on the due date of the statement open on the day it would be
  * spent. Card shares stay separate events rather than joining the statement's
  * total, which would relabel a guess with the statement's confidence.
  */
 export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetConsumptionResult {
   validate(input);
-  const result: BudgetConsumptionResult = { estimates: [], events: { base: [], conservative: [] }, blockers: [] };
+  const result: BudgetConsumptionResult = { estimates: [], events: [], blockers: [] };
   if (input.horizonEnd < input.asOf) return result;
 
   // A category in two budgets has no single remaining amount: either budget's
@@ -285,12 +255,8 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
     });
   }
   const currentMonth = monthOf(input.asOf);
-  const historyMonthsList = Array.from({ length: BUDGET_HISTORY_MONTHS }, (_unused, index) =>
-    addStatementMonths(currentMonth, index - BUDGET_HISTORY_MONTHS),
-  );
-  // Only a month the ledger covers from its first day counts as history.
-  const coveredMonths = historyMonthsList.filter(
-    (month) => input.historyStart !== null && input.historyStart <= firstDay(month),
+  const routeMonths = Array.from({ length: ROUTE_HISTORY_MONTHS }, (_unused, index) =>
+    addStatementMonths(currentMonth, index - ROUTE_HISTORY_MONTHS),
   );
   const months: string[] = [];
   for (let month = currentMonth; month <= monthOf(input.horizonEnd); month = addStatementMonths(month, 1)) {
@@ -310,19 +276,14 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
       const month = monthOf(spend.date);
       spentByMonth.set(month, (spentByMonth.get(month) ?? 0) + spend.amountMinor);
     }
-    const historyValues = coveredMonths.map((month) => spentByMonth.get(month) ?? 0);
-    const historical = coveredMonths.length === BUDGET_HISTORY_MONTHS ? median(historyValues) : null;
-
-    // Route mix over the whole history window, covered or not: a partial month
-    // still says which card the categories are paid with.
     const routeWeights = new Map<string | null, number>([[null, 0]]);
     for (const spend of spending) {
-      if (!historyMonthsList.includes(monthOf(spend.date))) continue;
+      if (!routeMonths.includes(monthOf(spend.date))) continue;
       const route = spend.cardId !== null && cardById.has(spend.cardId) ? spend.cardId : null;
       routeWeights.set(route, (routeWeights.get(route) ?? 0) + spend.amountMinor);
     }
     const routeIds = [null, ...[...routeWeights.keys()].filter((id): id is string => id !== null).sort()];
-    // With no history at all every weight is zero and the whole share goes to
+    // With no recent spending every weight is zero and the whole share goes to
     // cash, the route that leaves soonest.
     const shares = splitByWeights(10_000, routeIds.map((id) => routeWeights.get(id) ?? 0));
     const routes = routeIds
@@ -331,24 +292,13 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
 
     for (const month of months) {
       const planned = plannedFor(budget, month);
-      if (planned === null && historical === null) continue;
+      if (planned === null) continue;
 
       const spentMinor = spentByMonth.get(month) ?? 0;
       const committedMinor = commitments
         .filter((commitment) => monthOf(commitment.date) === month)
         .reduce((sum, commitment) => sum + commitment.amountMinor, 0);
-      const budgetRemainingMinor = planned === null ? null : Math.max(0, planned - spentMinor - committedMinor);
-      const historyRemainingMinor =
-        historical === null ? null : Math.max(0, historical - spentMinor - committedMinor);
-
-      const baseBasis = historyRemainingMinor !== null ? "history" : "budget";
-      const baseRemainingMinor = historyRemainingMinor ?? budgetRemainingMinor ?? 0;
-      const conservativeRemainingMinor = Math.max(baseRemainingMinor, budgetRemainingMinor ?? 0);
-      const baseConfidence: Confidence = baseBasis === "history" ? "MEDIUM" : "LOW";
-      // The conservative figure keeps history's confidence only when history is
-      // what it came from; a budget cap is a manual estimate.
-      const conservativeConfidence: Confidence =
-        baseBasis === "history" && baseRemainingMinor >= (budgetRemainingMinor ?? 0) ? "MEDIUM" : "LOW";
+      const remainingMinor = Math.max(0, planned - spentMinor - committedMinor);
 
       result.estimates.push({
         budgetId: budget.id,
@@ -356,25 +306,14 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
         plannedMinor: planned,
         spentMinor,
         committedMinor,
-        budgetRemainingMinor,
-        historicalMonthlyMinor: historical,
-        historyMonths: coveredMonths.length,
-        baseBasis,
-        baseRemainingMinor,
-        conservativeRemainingMinor,
-        baseConfidence,
-        conservativeConfidence,
+        remainingMinor,
         routes,
       });
 
       const from = month === currentMonth ? input.asOf : firstDay(month);
       const days: DateString[] = [];
       for (let day = from; day <= lastDay(month); day = addDaysIso(day, 1)) days.push(day);
-
-      result.events.base.push(...datedEvents(budget.id, month, baseRemainingMinor, baseConfidence, routes, days, cardById));
-      result.events.conservative.push(
-        ...datedEvents(budget.id, month, conservativeRemainingMinor, conservativeConfidence, routes, days, cardById),
-      );
+      result.events.push(...datedEvents(budget.id, month, remainingMinor, routes, days, cardById));
     }
   }
 
@@ -385,7 +324,6 @@ function datedEvents(
   budgetId: string,
   month: string,
   amountMinor: number,
-  confidence: Confidence,
   routes: ConsumptionRoute[],
   days: DateString[],
   cardById: Map<string, ConsumptionCard>,
@@ -414,7 +352,7 @@ function datedEvents(
           expectedAt: day,
           amountMinor: -perDay[dayIndex]!,
           sourceType: BUDGET_ESTIMATE_SOURCE,
-          confidence,
+          confidence: ESTIMATE_CONFIDENCE,
         });
       });
       return;
@@ -437,7 +375,7 @@ function datedEvents(
         expectedAt: entry.dueAt,
         amountMinor: -entry.amountMinor,
         sourceType: BUDGET_ESTIMATE_SOURCE,
-        confidence,
+        confidence: ESTIMATE_CONFIDENCE,
       });
     }
   });

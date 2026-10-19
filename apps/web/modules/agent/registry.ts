@@ -365,11 +365,11 @@ const readTools: ReadTool[] = [
     name: "get_safe_to_spend",
     title: "Safe to spend",
     description:
-      "Deterministic safe-to-spend from the consolidated daily cash forecast and configured hard reserves. By default the forecast sets aside the variable spending budgeted categories usually still have ahead (scenario 'base'); 'conservative' assumes they run to the budget limit, 'none' counts commitments only. The result carries the figure under every scenario.",
+      "Deterministic safe-to-spend from the consolidated daily cash forecast and configured hard reserves. By default the forecast sets aside what each budget still allows this month and next (scenario 'budget'; the budget is the ceiling); 'none' counts commitments only. The result carries the figure under both.",
     requiredScope: "finance:read",
     input: z.object({
       horizonDays: z.number().int().min(1).max(365).default(30),
-      scenario: z.enum(["none", "base", "conservative"]).optional(),
+      scenario: z.enum(["none", "budget"]).optional(),
     }),
     async execute(ctx, args) {
       const result = await getSafeToSpend(ctx.userId, args.horizonDays, args.scenario);
@@ -942,11 +942,11 @@ const readTools: ReadTool[] = [
     name: "get_projection",
     title: "Cash projection",
     description:
-      "Deterministic daily cash forecast over the horizon (default 30 days): the minimum balance and the date it occurs, plus every projected event (bills, recurring rules, card statements). Card purchases don't appear directly — only their statement settlement does. Balances include the variable spending budgets still expect (scenario 'base' by default; 'conservative' or 'none' on request); those estimates are summarized per budget in budgetEstimates instead of being listed day by day.",
+      "Deterministic daily cash forecast over the horizon (default 30 days): the minimum balance and the date it occurs, plus every projected event (bills, recurring rules, card statements). Card purchases don't appear directly — only their statement settlement does. Balances include what each budget still allows (scenario 'budget' by default; 'none' on request); those estimates are summarized per budget in budgetEstimates instead of being listed day by day.",
     requiredScope: "finance:read",
     input: z.object({
       horizonDays: z.number().int().min(1).max(365).default(30),
-      scenario: z.enum(["none", "base", "conservative"]).optional(),
+      scenario: z.enum(["none", "budget"]).optional(),
     }),
     async execute(ctx, args) {
       const { forecast, scenario, budgetConsumption } = await buildUserForecastDetailed(
@@ -974,9 +974,7 @@ const readTools: ReadTool[] = [
               : budgetConsumption.estimates.map((estimate) => ({
                   budget: budgetConsumption.budgetNames.get(estimate.budgetId) ?? estimate.budgetId,
                   month: estimate.month,
-                  remainingMinor:
-                    scenario === "base" ? estimate.baseRemainingMinor : estimate.conservativeRemainingMinor,
-                  confidence: scenario === "base" ? estimate.baseConfidence : estimate.conservativeConfidence,
+                  remainingMinor: estimate.remainingMinor,
                 })),
         },
       };
@@ -987,7 +985,7 @@ const readTools: ReadTool[] = [
     name: "get_budget_forecast",
     title: "Budgets in the forecast",
     description:
-      "How budgets feed the cash forecast, per month (default this month and next): projected closing balance and lowest balance with its date under the base scenario (categories spend what they usually do) and the conservative one (they run to the budget limit), plus, per budget, planned, already spent, already committed by bills/recurring rules, and the remaining amount each scenario projects, with its confidence and basis. Budgets left out are listed in blockers with the reason.",
+      "How budgets feed the cash forecast, per month (default this month and next): projected closing balance and lowest balance with its date, and the budgeted spending already inside those figures; plus, per budget, planned, already spent, already committed by bills, recurring rules and card parcels, and the remaining amount the forecast sets aside (the budget is the ceiling; LOW confidence). Budgets left out are listed in blockers with the reason.",
     requiredScope: "finance:read",
     input: z.object({ months: z.number().int().min(1).max(6).default(2) }),
     async execute(ctx, args) {
@@ -1002,17 +1000,7 @@ const readTools: ReadTool[] = [
             plannedMinor: estimate.plannedMinor,
             spentMinor: estimate.spentMinor,
             committedMinor: estimate.committedMinor,
-            budgetRemainingMinor: estimate.budgetRemainingMinor,
-            historicalMonthlyMinor: estimate.historicalMonthlyMinor,
-            base: {
-              remainingMinor: estimate.baseRemainingMinor,
-              basis: estimate.baseBasis,
-              confidence: estimate.baseConfidence,
-            },
-            conservative: {
-              remainingMinor: estimate.conservativeRemainingMinor,
-              confidence: estimate.conservativeConfidence,
-            },
+            remainingMinor: estimate.remainingMinor,
           })),
           blockers: result.blockers.map((blocker) => ({ budget: blocker.budgetName, code: blocker.code })),
         },

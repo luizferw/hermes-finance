@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, eq, gte, inArray, isNull, lt, lte, min } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNull, lt, lte } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
   budgetPeriods,
@@ -13,8 +13,8 @@ import {
 import { monthRange } from "@kosh/domain";
 import {
   addStatementMonths,
-  BUDGET_HISTORY_MONTHS,
   projectBudgetConsumption,
+  ROUTE_HISTORY_MONTHS,
   type BudgetConsumptionResult,
   type ConsumptionCard,
   type ConsumptionCommitment,
@@ -30,7 +30,7 @@ export interface BudgetConsumption extends BudgetConsumptionResult {
 
 const EMPTY: BudgetConsumption = {
   estimates: [],
-  events: { base: [], conservative: [] },
+  events: [],
   blockers: [],
   budgetNames: new Map(),
 };
@@ -66,28 +66,23 @@ export async function loadBudgetConsumption(input: {
   const categoryIds = [...new Set(budgetRows.flatMap((budget) => budget.budgetCategories.map((bc) => bc.categoryId)))];
   if (categoryIds.length === 0) return EMPTY;
 
-  const historyFrom = `${addStatementMonths(asOf.slice(0, 7), -BUDGET_HISTORY_MONTHS)}-01`;
+  // Recent months are read only for which card or account paid them.
+  const historyFrom = `${addStatementMonths(asOf.slice(0, 7), -ROUTE_HISTORY_MONTHS)}-01`;
   const through = monthRange(horizonEnd).end;
-  const [spendRows, [first]] = await Promise.all([
-    db.query.transactions.findMany({
-      where: and(
-        eq(transactions.userId, userId),
-        isNull(transactions.deletedAt),
-        eq(transactions.type, "expense"),
-        inArray(transactions.status, [...SPENT_STATUSES]),
-        eq(transactions.currencyCode, currencyCode),
-        inArray(transactions.categoryId, categoryIds),
-        lt(transactions.amountMinor, 0),
-        gte(transactions.date, historyFrom),
-        lte(transactions.date, through),
-      ),
-      columns: { categoryId: true, date: true, amountMinor: true, accountId: true },
-    }),
-    db
-      .select({ value: min(transactions.date) })
-      .from(transactions)
-      .where(and(eq(transactions.userId, userId), isNull(transactions.deletedAt))),
-  ]);
+  const spendRows = await db.query.transactions.findMany({
+    where: and(
+      eq(transactions.userId, userId),
+      isNull(transactions.deletedAt),
+      eq(transactions.type, "expense"),
+      inArray(transactions.status, [...SPENT_STATUSES]),
+      eq(transactions.currencyCode, currencyCode),
+      inArray(transactions.categoryId, categoryIds),
+      lt(transactions.amountMinor, 0),
+      gte(transactions.date, historyFrom),
+      lte(transactions.date, through),
+    ),
+    columns: { categoryId: true, date: true, amountMinor: true, accountId: true },
+  });
 
   const projectedParcels = await loadProjectedParcels(
     input.cards.map((card) => card.id),
@@ -100,7 +95,6 @@ export async function loadBudgetConsumption(input: {
   const result = projectBudgetConsumption({
     asOf,
     horizonEnd,
-    historyStart: first?.value ?? null,
     budgets: budgetRows.map((budget) => ({
       id: budget.id,
       categoryIds: budget.budgetCategories.map((bc) => bc.categoryId),

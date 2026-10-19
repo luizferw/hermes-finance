@@ -199,15 +199,15 @@ export interface UserForecast {
   scenario: VariableSpendingScenario;
   /** Every projected commitment, before any budget estimate joins them. */
   commitmentEvents: ForecastEvent[];
-  /** The budget estimates for both scenarios, with how each was reached. */
+  /** What each budget still allows, and the estimate events it became. */
   budgetConsumption: BudgetConsumption;
 }
 
 /**
- * The scenario the user-facing numbers default to: the categories' usual
- * spending, with the conservative one shown beside it wherever it matters.
+ * User-facing numbers set aside what the budgets still allow; `none` is kept
+ * for showing what that reservation costs.
  */
-export const DEFAULT_VARIABLE_SPENDING: VariableSpendingScenario = "base";
+export const DEFAULT_VARIABLE_SPENDING: VariableSpendingScenario = "budget";
 
 /**
  * The same forecast under another variable-spending scenario, without reading
@@ -222,7 +222,7 @@ export function forecastForScenario(detailed: UserForecast, scenario: VariableSp
     balances: [{ accountId: "consolidated", amountMinor: forecast.openingBalanceMinor, observedAt: forecast.asOf }],
     events: [
       ...detailed.commitmentEvents,
-      ...(scenario === "none" ? [] : detailed.budgetConsumption.events[scenario]),
+      ...(scenario === "none" ? [] : detailed.budgetConsumption.events),
     ],
   });
 }
@@ -567,9 +567,9 @@ export async function buildUserForecastDetailed(
     events.push(...statementEvents);
   }
 
-  // 5. Variable spending the budgets still expect (see `projectBudgetConsumption`).
-  // Both scenarios are estimated from one read so a caller can compare them
-  // through `forecastForScenario` without building the forecast twice.
+  // 5. Variable spending the budgets still allow (see `projectBudgetConsumption`).
+  // Kept apart from the commitments so `forecastForScenario` can show the
+  // forecast without it, without building the forecast twice.
   const budgetConsumption = await loadBudgetConsumption({
     userId,
     asOf,
@@ -583,12 +583,12 @@ export async function buildUserForecastDetailed(
     })),
     commitments,
   });
-  for (const event of [...budgetConsumption.events.base, ...budgetConsumption.events.conservative]) {
+  for (const event of budgetConsumption.events) {
     const budgetId = event.logicalKey.split(":")[1]!;
     labels.set(event.logicalKey, `Estimated spending · ${budgetConsumption.budgetNames.get(budgetId) ?? "budget"}`);
   }
   const commitmentEvents = [...events];
-  if (scenario !== "none") events.push(...budgetConsumption.events[scenario]);
+  if (scenario !== "none") events.push(...budgetConsumption.events);
 
   // Each source already excludes what has settled: a persisted event carries
   // its own `resolvedByTransactionId`, a paid billing cycle is filtered out
@@ -736,8 +736,8 @@ export interface SpendingRoomView {
   /** The scenario the headline is computed under. */
   scenario: VariableSpendingScenario;
   /**
-   * The headline under every scenario, so the budgets' effect is visible:
-   * `none` is the room if nothing beyond commitments were spent.
+   * The headline with and without the budgets' reservation, so its effect is
+   * visible: `none` is the room if nothing beyond commitments were spent.
    */
   safeToSpendByScenario: Record<VariableSpendingScenario, number>;
   staleAccountNames: string[];
@@ -745,7 +745,7 @@ export interface SpendingRoomView {
   position: FinancePosition;
 }
 
-const VARIABLE_SPENDING_SCENARIOS: VariableSpendingScenario[] = ["none", "base", "conservative"];
+const VARIABLE_SPENDING_SCENARIOS: VariableSpendingScenario[] = ["none", "budget"];
 
 function outflowMinor(events: ForecastEvent[]): number {
   return events.filter((event) => event.amountMinor < 0).reduce((total, event) => total + -event.amountMinor, 0);
@@ -876,10 +876,8 @@ export interface MonthOutlook extends MonthBalance {
   /** `YYYY-MM`. */
   month: string;
   isCurrentMonth: boolean;
-  /** The headline figures are the base scenario; this is the conservative one. */
-  conservative: MonthBalance;
-  /** Variable spending the budgets still expect in the month, per scenario. */
-  estimatedVariableMinor: { base: number; conservative: number };
+  /** Variable spending the budgets still allow in the month, already in the figures. */
+  estimatedVariableMinor: number;
 }
 
 function monthBalances(forecast: Forecast): Map<string, MonthBalance> {
@@ -945,24 +943,18 @@ export async function getBudgetForecast(userId: string, months = 4): Promise<Bud
     1,
     Math.round((Date.parse(`${horizonEnd}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000),
   );
-  const detailed = await buildUserForecastDetailed(userId, horizonDays, { variableSpending: "base" });
-  const base = monthBalances(detailed.forecast);
-  const conservative = monthBalances(forecastForScenario(detailed, "conservative"));
+  const detailed = await buildUserForecastDetailed(userId, horizonDays, { variableSpending: "budget" });
 
-  const estimated = new Map<string, { base: number; conservative: number }>();
+  const estimated = new Map<string, number>();
   for (const estimate of detailed.budgetConsumption.estimates) {
-    const entry = estimated.get(estimate.month) ?? { base: 0, conservative: 0 };
-    entry.base += estimate.baseRemainingMinor;
-    entry.conservative += estimate.conservativeRemainingMinor;
-    estimated.set(estimate.month, entry);
+    estimated.set(estimate.month, (estimated.get(estimate.month) ?? 0) + estimate.remainingMinor);
   }
 
-  const outlook = [...base.entries()].slice(0, months).map(([month, balance]) => ({
+  const outlook = [...monthBalances(detailed.forecast).entries()].slice(0, months).map(([month, balance]) => ({
     month,
     ...balance,
     isCurrentMonth: month === today.slice(0, 7),
-    conservative: conservative.get(month)!,
-    estimatedVariableMinor: estimated.get(month) ?? { base: 0, conservative: 0 },
+    estimatedVariableMinor: estimated.get(month) ?? 0,
   }));
   const shown = new Set(outlook.map((entry) => entry.month));
   const { budgetNames } = detailed.budgetConsumption;
