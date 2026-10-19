@@ -40,12 +40,11 @@ function revalidateImports() {
 }
 
 /** Step 1: upload — parse the CSV, store raw rows, suggest a mapping. */
-export async function uploadImport(input: UploadImportInput) {
-  const user = await requireUser();
+export async function uploadImportCore(userId: string, input: UploadImportInput) {
   const data = uploadImportSchema.parse(input);
 
   const account = await db.query.accounts.findFirst({
-    where: and(eq(accounts.id, data.accountId), eq(accounts.userId, user.id)),
+    where: and(eq(accounts.id, data.accountId), eq(accounts.userId, userId)),
   });
   if (!account) throw new ApiError(404, "not_found", "Account not found.");
 
@@ -61,7 +60,7 @@ export async function uploadImport(input: UploadImportInput) {
     const [created] = await trx
       .insert(importFiles)
       .values({
-        userId: user.id,
+        userId,
         accountId: data.accountId,
         fileName: data.fileName,
         status: "uploaded",
@@ -81,14 +80,12 @@ export async function uploadImport(input: UploadImportInput) {
   });
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "import.uploaded",
     entityType: "import_file",
     entityId: file.id,
     data: { fileName: data.fileName, rows: parsed.rows.length },
   });
-  revalidateImports();
-
   return {
     importFileId: file.id,
     headers: parsed.headers,
@@ -99,14 +96,13 @@ export async function uploadImport(input: UploadImportInput) {
 }
 
 /** Step 2: mapping — parse every row, detect duplicates, ready the preview. */
-export async function applyImportMapping(input: ApplyMappingInput) {
-  const user = await requireUser();
+export async function applyImportMappingCore(userId: string, input: ApplyMappingInput) {
   const data = applyMappingSchema.parse(input);
 
   const file = await db.query.importFiles.findFirst({
     where: and(
       eq(importFiles.id, data.importFileId),
-      eq(importFiles.userId, user.id),
+      eq(importFiles.userId, userId),
     ),
     with: { rows: true },
   });
@@ -125,7 +121,7 @@ export async function applyImportMapping(input: ApplyMappingInput) {
   const existing = await db.query.transactions.findMany({
     where: and(
       eq(transactions.accountId, file.accountId),
-      eq(transactions.userId, user.id),
+      eq(transactions.userId, userId),
     ),
     columns: {
       id: true,
@@ -220,7 +216,7 @@ export async function applyImportMapping(input: ApplyMappingInput) {
 
     if (data.saveAsTemplate) {
       await trx.insert(importMappings).values({
-        userId: user.id,
+        userId,
         name: data.saveAsTemplate,
         mapping: data.mapping,
         dateFormat: data.dateFormat,
@@ -228,7 +224,6 @@ export async function applyImportMapping(input: ApplyMappingInput) {
     }
   });
 
-  revalidateImports();
   return {
     total: file.rows.length,
     ready: file.rows.length - duplicates - errors,
@@ -238,14 +233,13 @@ export async function applyImportMapping(input: ApplyMappingInput) {
 }
 
 /** Step 3: commit — create `imported` transactions and run rules. */
-export async function commitImport(input: CommitImportInput) {
-  const user = await requireUser();
+export async function commitImportCore(userId: string, input: CommitImportInput) {
   const data = commitImportSchema.parse(input);
 
   const file = await db.query.importFiles.findFirst({
     where: and(
       eq(importFiles.id, data.importFileId),
-      eq(importFiles.userId, user.id),
+      eq(importFiles.userId, userId),
     ),
     with: { rows: true },
   });
@@ -271,7 +265,7 @@ export async function commitImport(input: CommitImportInput) {
       .where(
         and(
           eq(importFiles.id, file.id),
-          eq(importFiles.userId, user.id),
+          eq(importFiles.userId, userId),
           eq(importFiles.status, "previewed"),
         ),
       )
@@ -303,7 +297,7 @@ export async function commitImport(input: CommitImportInput) {
       const [tx] = await trx
         .insert(transactions)
         .values({
-          userId: user.id,
+          userId,
           accountId,
           type: amountMinor >= 0 ? "income" : "expense",
           status: "imported",
@@ -344,47 +338,79 @@ export async function commitImport(input: CommitImportInput) {
   // Run automation rules marked run-on-import against the new transactions.
   let rulesApplied = 0;
   if (createdIds.length > 0) {
-    rulesApplied = await runRulesOnTransactions(user.id, createdIds, "import");
+    rulesApplied = await runRulesOnTransactions(userId, createdIds, "import");
   }
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "import.committed",
     entityType: "import_file",
     entityId: file.id,
     data: { created: createdIds.length, rulesApplied },
   });
-  revalidateImports();
-  revalidatePath("/overview");
   return { created: createdIds.length, rulesApplied };
 }
 
-/** Abandon an un-committed import. */
-export async function deleteImport(importFileId: string) {
+export async function uploadImport(input: UploadImportInput) {
   const user = await requireUser();
+  const result = await uploadImportCore(user.id, input);
+  revalidateImports();
+  return result;
+}
+
+export async function applyImportMapping(input: ApplyMappingInput) {
+  const user = await requireUser();
+  const result = await applyImportMappingCore(user.id, input);
+  revalidateImports();
+  return result;
+}
+
+export async function commitImport(input: CommitImportInput) {
+  const user = await requireUser();
+  const result = await commitImportCore(user.id, input);
+  revalidateImports();
+  revalidatePath("/overview");
+  return result;
+}
+
+/** Abandon an un-committed import. */
+export async function deleteImportCore(userId: string, importFileId: string) {
   const file = await db.query.importFiles.findFirst({
-    where: and(eq(importFiles.id, importFileId), eq(importFiles.userId, user.id)),
+    where: and(eq(importFiles.id, importFileId), eq(importFiles.userId, userId)),
   });
   if (!file) throw new ApiError(404, "not_found", "Import not found.");
   if (file.status === "committed") {
     throw new ApiError(409, "committed_immutable", "Committed imports are part of the ledger history.");
   }
-  await db.delete(importFiles).where(eq(importFiles.id, importFileId));
+  await db
+    .delete(importFiles)
+    .where(and(eq(importFiles.id, importFileId), eq(importFiles.userId, userId)));
+  return { fileName: file.fileName };
+}
+
+export async function deleteImport(importFileId: string) {
+  const user = await requireUser();
+  await deleteImportCore(user.id, importFileId);
   revalidateImports();
 }
 
 /** Bulk: rows currently flagged duplicate that the user wants anyway. */
-export async function includeDuplicateRows(input: { rowIds: string[] }) {
-  const user = await requireUser();
+export async function includeDuplicateRowsCore(userId: string, input: { rowIds: string[] }) {
   const rows = await db.query.importRows.findMany({
     where: inArray(importRows.id, input.rowIds),
     with: { importFile: true },
   });
-  const owned = rows.filter((r) => r.importFile?.userId === user.id);
-  if (owned.length === 0) return;
+  const owned = rows.filter((r) => r.importFile?.userId === userId);
+  if (owned.length === 0) return { included: 0 };
   await db
     .update(importRows)
     .set({ status: "pending" })
     .where(inArray(importRows.id, owned.map((r) => r.id)));
-  revalidateImports();
+  return { included: owned.length };
+}
+
+export async function includeDuplicateRows(input: { rowIds: string[] }) {
+  const user = await requireUser();
+  const result = await includeDuplicateRowsCore(user.id, input);
+  if (result.included > 0) revalidateImports();
 }

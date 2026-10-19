@@ -19,6 +19,11 @@ const MINOR_UNIT_EXPONENTS: Record<string, number> = {
   BHD: 3,
 };
 
+/** Every currency whose exponent is known, keyed by ISO code. Any other code uses 2. */
+export function knownMinorUnitExponents(): Readonly<Record<string, number>> {
+  return { ...MINOR_UNIT_EXPONENTS };
+}
+
 export function minorUnitExponent(currencyCode: string): number {
   return MINOR_UNIT_EXPONENTS[currencyCode.toUpperCase()] ?? 2;
 }

@@ -267,10 +267,12 @@ export async function approveTransactions(input: { ids: string[] }) {
 }
 
 /** Inbox reject: excluded from the ledger but kept for provenance. */
-export async function rejectTransactions(input: { ids: string[] }) {
-  const user = await requireUser();
+export async function rejectTransactionsCore(
+  userId: string,
+  input: { ids: string[] },
+) {
   const { ids } = bulkIdsSchema.parse(input);
-  const rows = await ownedTransactions(user.id, ids);
+  const rows = await ownedTransactions(userId, ids);
   if (rows.length === 0) return { rejected: 0 };
 
   await db
@@ -280,20 +282,28 @@ export async function rejectTransactions(input: { ids: string[] }) {
 
   await recomputeAccountBalances(affectedAccounts(rows));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "transaction.rejected",
     entityType: "transaction",
     data: { count: rows.length, ids: rows.map((r) => r.id) },
   });
-  revalidateLedger();
   return { rejected: rows.length };
 }
 
-/** Restore a rejected transaction back into the inbox. */
-export async function restoreTransactions(input: { ids: string[] }) {
+export async function rejectTransactions(input: { ids: string[] }) {
   const user = await requireUser();
+  const result = await rejectTransactionsCore(user.id, input);
+  if (result.rejected > 0) revalidateLedger();
+  return result;
+}
+
+/** Restore a rejected transaction back into the inbox. */
+export async function restoreTransactionsCore(
+  userId: string,
+  input: { ids: string[] },
+) {
   const { ids } = bulkIdsSchema.parse(input);
-  const rows = await ownedTransactions(user.id, ids);
+  const rows = await ownedTransactions(userId, ids);
   const eligible = rows.filter((r) => r.status === "rejected");
   if (eligible.length === 0) return { restored: 0 };
 
@@ -303,8 +313,14 @@ export async function restoreTransactions(input: { ids: string[] }) {
     .where(inArray(transactions.id, eligible.map((r) => r.id)));
 
   await recomputeAccountBalances(affectedAccounts(eligible));
-  revalidateLedger();
   return { restored: eligible.length };
+}
+
+export async function restoreTransactions(input: { ids: string[] }) {
+  const user = await requireUser();
+  const result = await restoreTransactionsCore(user.id, input);
+  if (result.restored > 0) revalidateLedger();
+  return result;
 }
 
 export async function bulkCategorizeCore(
@@ -348,9 +364,8 @@ export async function bulkCategorize(input: { ids: string[]; categoryId: string 
 }
 
 /** Soft delete. */
-export async function deleteTransaction(id: string) {
-  const user = await requireUser();
-  const [existing] = await ownedTransactions(user.id, [id]);
+export async function deleteTransactionCore(userId: string, id: string) {
+  const [existing] = await ownedTransactions(userId, [id]);
   if (!existing) throw new ApiError(404, "not_found", "Transaction not found.");
 
   await db
@@ -360,11 +375,17 @@ export async function deleteTransaction(id: string) {
 
   await recomputeAccountBalances(affectedAccounts([existing]));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "transaction.deleted",
     entityType: "transaction",
     entityId: id,
     data: { description: existing.description },
   });
+  return existing;
+}
+
+export async function deleteTransaction(id: string) {
+  const user = await requireUser();
+  await deleteTransactionCore(user.id, id);
   revalidateLedger();
 }

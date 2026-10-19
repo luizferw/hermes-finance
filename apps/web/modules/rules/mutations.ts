@@ -27,7 +27,7 @@ import {
   previewRuleDefinition,
   type RulePreviewResult,
 } from "./engine";
-import { updateRuleCore } from "./core";
+import { deleteRuleCore, updateRuleCore } from "./core";
 
 /** Rule actions carry ids of other user-owned records; validate ownership. */
 async function assertRuleActionsOwned(
@@ -138,17 +138,6 @@ export async function setRuleActive(ruleId: string, isActive: boolean) {
 
 export async function deleteRule(ruleId: string) {
   const user = await requireUser();
-  const existing = await db.query.automationRules.findFirst({
-    where: and(eq(automationRules.id, ruleId), eq(automationRules.userId, user.id)),
-  });
-  if (!existing) throw new ApiError(404, "not_found", "Rule not found.");
-  await db.delete(automationRules).where(eq(automationRules.id, ruleId));
-  await logAudit({
-    userId: user.id,
-    action: "rule.deleted",
-    entityType: "automation_rule",
-    entityId: ruleId,
-    data: { name: existing.name },
-  });
+  await deleteRuleCore(user.id, ruleId);
   revalidatePath("/automations");
 }

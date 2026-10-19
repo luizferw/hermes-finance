@@ -894,7 +894,7 @@ export interface MonthOutlook extends MonthBalance {
   estimatedVariableMinor: number;
 }
 
-function monthBalances(forecast: Forecast): Map<string, MonthBalance> {
+export function monthBalances(forecast: Forecast): Map<string, MonthBalance> {
   const byMonth = new Map<string, MonthBalance>();
   for (const day of forecast.days) {
     const month = day.date.slice(0, 7);
@@ -1492,7 +1492,15 @@ export async function listCardPurchases(userId: string, cardId: string) {
     orderBy: [desc(creditCardPurchases.purchaseDate)],
     with: {
       transaction: { columns: { id: true, description: true, deletedAt: true } },
-      installmentPlans: { columns: { id: true, totalInstallments: true } },
+      installmentPlans: {
+        columns: { id: true, totalInstallments: true, firstInstallmentNumber: true },
+        with: {
+          installments: {
+            columns: { id: true, number: true, amountMinor: true, expectedAt: true, status: true, billingCycleId: true },
+            orderBy: [asc(installments.number)],
+          },
+        },
+      },
     },
   });
 }

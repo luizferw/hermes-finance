@@ -18,21 +18,26 @@ const updateSettingsSchema = z.object({
 
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
-export async function updateUserSettings(input: UpdateSettingsInput) {
-  const user = await requireUser();
+/** Session-free upsert of the user's display settings. */
+export async function updateUserSettingsCore(userId: string, input: UpdateSettingsInput) {
   const data = updateSettingsSchema.parse(input);
 
   await db
     .insert(userSettings)
-    .values({ userId: user.id, ...data })
+    .values({ userId, ...data })
     .onConflictDoUpdate({ target: [userSettings.userId], set: data });
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "settings.changed",
     entityType: "user_settings",
-    entityId: user.id,
+    entityId: userId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateUserSettings(input: UpdateSettingsInput) {
+  const user = await requireUser();
+  await updateUserSettingsCore(user.id, input);
   revalidatePath("/settings");
 }

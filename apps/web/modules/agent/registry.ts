@@ -11,12 +11,10 @@ import {
   getMonthSummary,
   getMonthSummaryFor,
   getSpendingByCategory,
-  getRecentCashflow,
 } from "@/modules/reports/queries";
 import {
   listTransactions,
   getTransaction,
-  getInboxItems,
 } from "@/modules/transactions/queries";
 import { getUpcomingBills, listBills } from "@/modules/bills/queries";
 import { listRecurring } from "@/modules/recurring/queries";
@@ -24,33 +22,24 @@ import { listGoals } from "@/modules/goals/queries";
 import { listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { getPatternsView } from "@/modules/patterns/queries";
 import {
-  buildUserForecastDetailed,
-  getCardStatement,
   getBudgetForecast,
   getConfidenceBreakdown,
   getFinancePosition,
   getPurchaseItem,
   getPurchasePlan,
-  getSafeToSpend,
   getUpcomingCommitments as getProjectedCommitments,
-  listCreditCards,
-  listPurchasePlans,
 } from "@/modules/finance/queries";
 import {
   compareUserPaymentOptions,
   recommendUserPurchasePlan,
   simulateUserPurchase,
 } from "@/modules/finance/simulation";
-import { listConnections } from "@/modules/open-finance/queries";
-import { BUDGET_ESTIMATE_SOURCE } from "@hermes-finance/forecast";
 import { listCategories } from "@/modules/taxonomy/queries";
 import {
-  createTransactionCore,
   updateTransactionCore,
   approveTransactionsCore,
   bulkCategorizeCore,
 } from "@/modules/transactions/mutations";
-import { createGoalCore } from "@/modules/goals/mutations";
 import {
   createPurchaseItemCore,
   createPurchasePlanCore,
@@ -67,7 +56,6 @@ import type {
   UpdatePurchasePlanInput,
 } from "@/modules/finance/validators";
 import {
-  createRuleCore,
   listRulesCore,
   setRuleActiveCore,
   runRuleCore,
@@ -80,7 +68,6 @@ import {
   formatMajor,
   isoDateSchema,
   monthIsoFor,
-  monthLabel,
   read,
   resolveAccount,
   resolveCategory,
@@ -88,7 +75,7 @@ import {
   write,
 } from "./tools/shared";
 import { financeReadsTools } from "./tools/finance-reads";
-import { financeWritesTools } from "./tools/finance-writes";
+import { financeWritesReadTools, financeWritesTools } from "./tools/finance-writes";
 import { ledgerReadsTools } from "./tools/ledger-reads";
 import { ledgerWritesTools } from "./tools/ledger-writes";
 import type {
@@ -97,7 +84,6 @@ import type {
   Tool,
   ToolContext,
   ExecStatus,
-  ResponseBlock,
   Scope,
 } from "./types";
 
@@ -272,130 +258,6 @@ const readTools: ReadTool[] = [
   }),
 
   read({
-    name: "get_safe_to_spend",
-    title: "Safe to spend",
-    description:
-      "Deterministic safe-to-spend from the consolidated daily cash forecast and configured hard reserves. By default the forecast sets aside what each budget still allows this month and next (scenario 'budget'; the budget is the ceiling); 'none' counts commitments only. The result carries the figure under both.",
-    requiredScope: "finance:read",
-    input: z.object({
-      horizonDays: z.number().int().min(1).max(365).default(30),
-      scenario: z.enum(["none", "budget"]).optional(),
-    }),
-    async execute(ctx, args) {
-      const result = await getSafeToSpend(ctx.userId, args.horizonDays, args.scenario);
-      return {
-        forModel: {
-          safeToSpendMinor: result.safeToSpendMinor,
-          scenario: result.scenario,
-          safeToSpendByScenario: result.safeToSpendByScenario,
-          estimatedVariableMinor: result.estimatedVariableMinor,
-          minimumBalanceMinor: result.minimumBalanceMinor,
-          minimumBalanceDate: result.minimumBalanceDate,
-          hardReserveViolated: result.hardReserveViolated,
-          // Read straight off the result — deriving it from
-          // (minimumBalance - safeToSpend) breaks the moment safeToSpend is
-          // clamped to 0, since the subtraction no longer inverts cleanly.
-          hardReserveMinor: result.hardReserveMinor,
-          horizonEnd: result.forecast.horizonEnd,
-          currency: ctx.currency,
-          // A balance older than the freshness policy still gets used, but the
-          // model must say so — silently answering "you can spend R$X" from a
-          // stale number is exactly what §62 exists to prevent.
-          staleAccountNames: result.staleAccountNames,
-        },
-        block: {
-          type: "safeToSpend",
-          title: "Safe to spend",
-          period: `${result.forecast.asOf} to ${result.forecast.horizonEnd}`,
-          safeMinor: result.safeToSpendMinor,
-          incomeMinor: result.forecast.events.filter((event) => event.amountMinor > 0).reduce((total, event) => total + event.amountMinor, 0),
-          expenseMinor: result.committedMinor,
-          committedMinor: result.committedMinor,
-          currency: ctx.currency,
-          note:
-            result.staleAccountNames.length > 0
-              ? `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}. Uses a balance that is a few days old for ${result.staleAccountNames.join(", ")}.`
-              : `Minimum projected balance ${formatMoney(result.minimumBalanceMinor, ctx.currency)} on ${result.minimumBalanceDate}.`,
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "search_transactions",
-    title: "Search transactions",
-    description:
-      "Find transactions by text, date range, amount range, type, or status. Amounts are in major units (e.g. 5000 = ₹5,000).",
-    requiredScope: "finance:read",
-    input: z.object({
-      text: z.string().max(200).optional().describe("merchant/description contains"),
-      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      minAmount: z.number().positive().optional(),
-      maxAmount: z.number().positive().optional(),
-      type: z.enum(["income", "expense", "transfer"]).optional(),
-      status: z.enum(["pending", "imported", "reviewed", "posted"]).optional(),
-      limit: z.number().int().min(1).max(50).default(10),
-    }),
-    async execute(ctx, args) {
-      const { items, total } = await listTransactions(ctx.userId, {
-        q: args.text,
-        from: args.from,
-        to: args.to,
-        minAmount: args.minAmount,
-        maxAmount: args.maxAmount,
-        type: args.type,
-        status: args.status,
-        page: 1,
-        pageSize: args.limit,
-      } as Parameters<typeof listTransactions>[1]);
-      const rows = items.map((t) => ({
-        id: t.id,
-        date: t.date,
-        description: t.description,
-        amountMinor: t.amountMinor,
-        currency: t.currencyCode,
-        category: t.category?.name ?? null,
-      }));
-      return {
-        forModel: { count: total, transactions: rows },
-        block: {
-          type: "transactions",
-          title: "Transactions",
-          rows,
-          moreCount: Math.max(0, total - rows.length),
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_transaction",
-    title: "Get transaction",
-    description: "Full detail for one transaction by id.",
-    requiredScope: "finance:read",
-    input: z.object({ id: z.string().uuid() }),
-    async execute(ctx, args) {
-      const tx = await getTransaction(ctx.userId, args.id);
-      if (!tx) return { forModel: { error: "not_found" } };
-      return {
-        forModel: {
-          id: tx.id,
-          date: tx.date,
-          description: tx.description,
-          merchant: tx.merchant,
-          amountMinor: tx.amountMinor,
-          currency: tx.currencyCode,
-          type: tx.type,
-          status: tx.status,
-          category: tx.category?.name ?? null,
-          account: tx.account?.name ?? null,
-        },
-      };
-    },
-  }),
-
-  read({
     name: "get_spending_breakdown",
     title: "Spending breakdown",
     description: "Spending grouped by category for this month or last month.",
@@ -453,53 +315,6 @@ const readTools: ReadTool[] = [
   }),
 
   read({
-    name: "get_cash_flow",
-    title: "Cash flow",
-    description: "Daily inflow/outflow over the last N days (default 30).",
-    requiredScope: "finance:read",
-    input: z.object({ days: z.number().int().min(7).max(90).default(30) }),
-    async execute(ctx, args) {
-      const points = await getRecentCashflow(ctx.userId, args.days);
-      const inflow = points.reduce((s, p) => s + p.inflowMinor, 0);
-      const outflow = points.reduce((s, p) => s + p.outflowMinor, 0);
-      return {
-        forModel: { days: args.days, inflowMinor: inflow, outflowMinor: outflow, netMinor: inflow - outflow, currency: ctx.currency },
-        block: {
-          type: "cashflow",
-          title: "Recorded cashflow",
-          range: `Last ${args.days} days`,
-          currency: ctx.currency,
-          inflowMinor: inflow,
-          outflowMinor: outflow,
-          netMinor: inflow - outflow,
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_accounts",
-    title: "Accounts",
-    description: "All active accounts with current balances.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const accounts = (await listAccounts(ctx.userId)).filter((a) => !a.isArchived).slice(0, 50);
-      const rows = accounts.map((a) => ({
-        id: a.id,
-        name: a.name,
-        balanceMinor: a.currentBalanceMinor,
-        currency: a.currencyCode,
-      }));
-      return {
-        forModel: { accounts: rows },
-        block: { type: "accounts", title: "Accounts", rows },
-        blocks: currencyWarningBlocks(ctx.currency, rows.map((row) => row.currency)),
-      };
-    },
-  }),
-
-  read({
     name: "get_upcoming_commitments",
     title: "Upcoming commitments",
     description: "Bills due (and overdue) within the next N days (default 30).",
@@ -519,95 +334,6 @@ const readTools: ReadTool[] = [
       return {
         forModel: { commitments: rows, currency: ctx.currency },
         block: { type: "commitments", title: "Coming up", currency: ctx.currency, rows },
-        blocks: currencyWarningBlocks(ctx.currency, rows.map((row) => row.currency)),
-      };
-    },
-  }),
-
-  read({
-    name: "get_recurring_transactions",
-    title: "Recurring",
-    description: "Active recurring commitments / subscriptions.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const all = (await listRecurring(ctx.userId)).filter((r) => r.isActive).slice(0, 20);
-      const rows = all.map((r) => ({
-        id: r.id,
-        name: r.name,
-        amountMinor: Math.abs(r.amountMinor),
-        currency: r.currencyCode,
-        interval: r.interval,
-        nextDate: r.nextRunDate,
-      }));
-      return {
-        forModel: { recurring: rows, currency: ctx.currency },
-        block: { type: "recurring", title: "Recurring transactions", rows },
-        blocks: currencyWarningBlocks(ctx.currency, rows.map((row) => row.currency)),
-      };
-    },
-  }),
-
-  read({
-    name: "get_goals",
-    title: "Goals",
-    description: "Savings goals with target, current, and projection inputs.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const goals = (await listGoals(ctx.userId)).slice(0, 20);
-      const rows = goals.map((g) => ({
-        id: g.id,
-        name: g.name,
-        currentMinor: g.currentAmountMinor,
-        targetMinor: g.targetAmountMinor,
-        ratio: g.targetAmountMinor > 0
-          ? Math.min(1, g.currentAmountMinor / g.targetAmountMinor)
-          : 0,
-        currency: g.currencyCode,
-        targetDate: g.targetDate,
-      }));
-      return {
-        forModel: {
-          goals: rows,
-        },
-        block: { type: "goals", title: "Savings goals", rows },
-        blocks: currencyWarningBlocks(ctx.currency, rows.map((row) => row.currency)),
-      };
-    },
-  }),
-
-  read({
-    name: "get_budgets",
-    title: "Budget progress",
-    description:
-      "Current-month budgets with planned, spent, and remaining amounts. Amounts stay in each budget's own currency.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const budgets = (await listBudgetsWithProgress(ctx.userId)).slice(0, 20);
-      const rows = budgets.map((budget) => ({
-        id: budget.id,
-        name: budget.name,
-        plannedMinor: budget.plannedMinor,
-        spentMinor: budget.spentMinor,
-        remainingMinor: budget.remainingMinor,
-        ratio: budget.ratio,
-        isOver: budget.isOver,
-        currency: budget.hasPeriod ? budget.currencyCode : ctx.currency,
-      }));
-      return {
-        forModel: {
-          period: monthLabel(todayIso()),
-          budgets: rows,
-          missingPeriods: budgets.filter((budget) => !budget.hasPeriod).length,
-        },
-        block: {
-          type: "budgets",
-          title: "Budget status",
-          period: monthLabel(todayIso()),
-          rows,
-        },
         blocks: currencyWarningBlocks(ctx.currency, rows.map((row) => row.currency)),
       };
     },
@@ -696,29 +422,6 @@ const readTools: ReadTool[] = [
   }),
 
   read({
-    name: "get_review_inbox",
-    title: "Review inbox",
-    description: "Transactions awaiting review (pending/imported), with duplicate hints.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const items = await getInboxItems(ctx.userId);
-      const rows = items.slice(0, 15).map((t) => ({
-        id: t.id,
-        date: t.date,
-        description: t.description,
-        amountMinor: t.amountMinor,
-        currency: t.currencyCode,
-        category: t.category?.name ?? null,
-      }));
-      return {
-        forModel: { count: items.length, items: rows },
-        block: { type: "transactions", title: "Awaiting review", rows, moreCount: Math.max(0, items.length - rows.length), href: "/inbox" },
-      };
-    },
-  }),
-
-  read({
     name: "get_available_categories",
     title: "Available categories",
     description: "Category names + ids, so writes can reference a valid category.",
@@ -742,32 +445,6 @@ const readTools: ReadTool[] = [
         forModel: {
           accounts: accounts.map((a) => ({ id: a.id, name: a.name, currency: a.currencyCode })),
         },
-      };
-    },
-  }),
-
-  read({
-    name: "list_rules",
-    title: "List rules",
-    description: "List the user's automation rules with their status and last run.",
-    requiredScope: "rules:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const rules = (await listRulesCore(ctx.userId)).slice(0, 50);
-      const lines = rules.map((r) => ({
-        id: r.id,
-        name: r.name,
-        isActive: r.isActive,
-        priority: r.priority,
-        conditionCount: r.conditions.length,
-        actionCount: r.actions.length,
-        lastRun: r.runs[0]
-          ? { matched: r.runs[0].matchedCount, applied: r.runs[0].appliedCount, at: r.runs[0].startedAt.toISOString() }
-          : null,
-      }));
-      return {
-        forModel: { rules: lines.map((l) => ({ id: l.id, name: l.name, active: l.isActive })) },
-        block: { type: "ruleList", title: "Your rules", rules: lines },
       };
     },
   }),
@@ -849,49 +526,6 @@ const readTools: ReadTool[] = [
   }),
 
   read({
-    name: "get_projection",
-    title: "Cash projection",
-    description:
-      "Deterministic daily cash forecast over the horizon (default 30 days): the minimum balance and the date it occurs, plus every projected event (bills, recurring rules, card statements). Card purchases don't appear directly — only their statement settlement does. Balances include what each budget still allows (scenario 'budget' by default; 'none' on request); those estimates are summarized per budget in budgetEstimates instead of being listed day by day.",
-    requiredScope: "finance:read",
-    input: z.object({
-      horizonDays: z.number().int().min(1).max(365).default(30),
-      scenario: z.enum(["none", "budget"]).optional(),
-    }),
-    async execute(ctx, args) {
-      const { forecast, scenario, budgetConsumption } = await buildUserForecastDetailed(
-        ctx.userId,
-        args.horizonDays,
-        args.scenario ? { variableSpending: args.scenario } : {},
-      );
-      // One estimate per budget per day would swamp the payload; the balances
-      // already include them, and the totals are reported per budget below.
-      const isEstimate = (event: { sourceType: string }) => event.sourceType === BUDGET_ESTIMATE_SOURCE;
-      return {
-        forModel: {
-          asOf: forecast.asOf,
-          horizonEnd: forecast.horizonEnd,
-          currency: ctx.currency,
-          scenario,
-          openingBalanceMinor: forecast.openingBalanceMinor,
-          minimumBalanceMinor: forecast.minimumBalanceMinor,
-          minimumBalanceDate: forecast.minimumBalanceDate,
-          days: forecast.days.map((day) => ({ ...day, events: day.events.filter((event) => !isEstimate(event)) })),
-          events: forecast.events.filter((event) => !isEstimate(event)),
-          budgetEstimates:
-            scenario === "none"
-              ? []
-              : budgetConsumption.estimates.map((estimate) => ({
-                  budget: budgetConsumption.budgetNames.get(estimate.budgetId) ?? estimate.budgetId,
-                  month: estimate.month,
-                  remainingMinor: estimate.remainingMinor,
-                })),
-        },
-      };
-    },
-  }),
-
-  read({
     name: "get_budget_forecast",
     title: "Budgets in the forecast",
     description:
@@ -934,114 +568,6 @@ const readTools: ReadTool[] = [
   }),
 
   read({
-    name: "get_credit_cards",
-    title: "Credit cards",
-    description: "Active credit cards with credit limit, committed (outstanding) amount, available limit, and utilization.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const cards = await listCreditCards(ctx.userId);
-      return {
-        forModel: {
-          cards: cards.map((card) => ({
-            id: card.id,
-            name: card.name,
-            issuer: card.issuer,
-            currency: card.currencyCode,
-            creditLimitMinor: card.creditLimitMinor,
-            committedMinor: card.committedMinor,
-            availableLimitMinor: card.availableLimitMinor,
-            utilizationPercent: card.utilizationPercent,
-            defaultClosingDay: card.defaultClosingDay,
-            defaultDueDay: card.defaultDueDay,
-          })),
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_open_finance_status",
-    title: "Open Finance status",
-    description:
-      "Bank connections synced through Open Finance: institution, connection state, how old the provider's data is, consent expiry, and the result of the last sync. Use this to answer why a balance looks out of date instead of guessing.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const connections = await listConnections(ctx.userId);
-      return {
-        forModel: {
-          connections: connections.map((connection) => ({
-            id: connection.id,
-            institution: connection.connectorName,
-            label: connection.label,
-            status: connection.status,
-            // The age of the provider's data, which is the freshness the user
-            // actually experiences (PRD R8) — not the time of our last attempt.
-            dataAgeDays: connection.dataAgeDays,
-            consentExpired: connection.consentExpired,
-            lastSyncStatus: connection.lastSyncStatus,
-            lastSyncError: connection.lastSyncError,
-            lastRun: connection.lastRun
-              ? {
-                  status: connection.lastRun.status,
-                  seen: connection.lastRun.recordsSeen,
-                  created: connection.lastRun.recordsCreated,
-                  duplicates: connection.lastRun.duplicates,
-                  needsReview: connection.lastRun.needsReview,
-                  skipped: connection.lastRun.skipped,
-                }
-              : null,
-            accounts: connection.links.map((link) => ({
-              providerName: link.providerName,
-              linkedAccount: link.accountName,
-              linkMode: link.linkMode,
-              decision: link.linkDecisionNote,
-            })),
-          })),
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_card_statement",
-    title: "Card statement",
-    description: "Billing cycles for one credit card, with charged/confirmed totals and reconciliation state.",
-    requiredScope: "finance:read",
-    input: z.object({ cardId: z.string().uuid() }),
-    async execute(ctx, args) {
-      const statement = await getCardStatement(ctx.userId, args.cardId);
-      if (!statement) return { forModel: { error: "not_found" } };
-      return {
-        forModel: {
-          card: {
-            id: statement.card.id,
-            name: statement.card.name,
-            issuer: statement.card.issuer,
-            currency: statement.card.currencyCode,
-            creditLimitMinor: statement.card.creditLimitMinor,
-          },
-          cycles: statement.cycles.map((cycle) => ({
-            id: cycle.id,
-            statementMonth: cycle.statementMonth,
-            closesAt: cycle.closesAt,
-            dueAt: cycle.dueAt,
-            status: cycle.status,
-            chargesMinor: cycle.chargesMinor,
-            creditsMinor: cycle.creditsMinor,
-            totalMinor: cycle.totalMinor,
-            isReconciled: cycle.isReconciled,
-            // "derived" means inferred from the card's closing day, not a
-            // reconciled statement. The model must not present it as confirmed.
-            source: cycle.source,
-          })),
-        },
-      };
-    },
-  }),
-
-  read({
     name: "get_confidence_breakdown",
     title: "Forecast confidence breakdown",
     description:
@@ -1056,119 +582,6 @@ const readTools: ReadTool[] = [
           totalMinor: breakdown.totalMinor,
           byConfidence: breakdown.byConfidence,
           sharePercent: breakdown.sharePercent,
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_purchase_plans",
-    title: "Purchase plans",
-    description: "All purchase plans with their items and payment options. Items with isActive=false were set aside by the user and count toward neither totals nor projections.",
-    requiredScope: "finance:read",
-    input: z.object({}),
-    async execute(ctx) {
-      const plans = await listPurchasePlans(ctx.userId);
-      return {
-        forModel: {
-          currency: ctx.currency,
-          plans: plans.map((plan) => ({
-            id: plan.id,
-            name: plan.name,
-            description: plan.description,
-            targetDate: plan.targetDate,
-            budgetMinor: plan.budgetMinor,
-            currency: plan.currencyCode,
-            status: plan.status,
-            items: plan.items.map((item) => ({
-              id: item.id,
-              name: item.name,
-              priority: item.priority,
-              estimatedPriceMinor: item.estimatedPriceMinor,
-              actualPriceMinor: item.actualPriceMinor,
-              earliestPurchaseDate: item.earliestPurchaseDate,
-              deadline: item.deadline,
-              status: item.status,
-              isActive: item.isActive,
-              purchaseDate: item.purchaseDate,
-              accountId: item.accountId,
-              installments: item.installments,
-              paymentOptions: item.paymentOptions.map((option) => ({
-                id: option.id,
-                method: option.paymentMethod,
-                cardId: option.cardId,
-                cashPriceMinor: option.cashPriceMinor,
-                installments: option.installments,
-                installmentAmountMinor: option.installmentAmountMinor,
-                totalCostMinor: option.totalCostMinor,
-                firstPaymentDate: option.firstPaymentDate,
-              })),
-            })),
-          })),
-        },
-      };
-    },
-  }),
-
-  read({
-    name: "get_purchase_plan",
-    title: "Purchase plan",
-    description: "Full detail of one purchase plan by id, including items, payment options, and any stored simulations. Items with isActive=false were set aside by the user and count toward neither totals nor projections.",
-    requiredScope: "finance:read",
-    input: z.object({ id: z.string().uuid() }),
-    async execute(ctx, args) {
-      const plan = await getPurchasePlan(ctx.userId, args.id);
-      if (!plan) return { forModel: { error: "not_found" } };
-      return {
-        forModel: {
-          currency: ctx.currency,
-          plan: {
-            id: plan.id,
-            name: plan.name,
-            description: plan.description,
-            targetDate: plan.targetDate,
-            budgetMinor: plan.budgetMinor,
-            currency: plan.currencyCode,
-            status: plan.status,
-            items: plan.items.map((item) => ({
-              id: item.id,
-              name: item.name,
-              priority: item.priority,
-              estimatedPriceMinor: item.estimatedPriceMinor,
-              actualPriceMinor: item.actualPriceMinor,
-              earliestPurchaseDate: item.earliestPurchaseDate,
-              deadline: item.deadline,
-              status: item.status,
-              isActive: item.isActive,
-              purchaseDate: item.purchaseDate,
-              accountId: item.accountId,
-              installments: item.installments,
-              paymentOptions: item.paymentOptions.map((option) => ({
-                id: option.id,
-                method: option.paymentMethod,
-                cardId: option.cardId,
-                cashPriceMinor: option.cashPriceMinor,
-                installments: option.installments,
-                installmentAmountMinor: option.installmentAmountMinor,
-                totalCostMinor: option.totalCostMinor,
-                firstPaymentDate: option.firstPaymentDate,
-              })),
-              simulations: item.simulations.map((sim) => ({
-                id: sim.id,
-                paymentOptionId: sim.paymentOptionId,
-                forecastVersion: sim.forecastVersion,
-                currentBalanceMinor: sim.currentBalanceMinor,
-                minimumBalanceMinor: sim.minimumBalanceMinor,
-                safeToSpendBeforeMinor: sim.safeToSpendBeforeMinor,
-                safeToSpendAfterMinor: sim.safeToSpendAfterMinor,
-                reserveViolations: sim.reserveViolations,
-                totalCostMinor: sim.totalCostMinor,
-                lastInstallmentDate: sim.lastInstallmentDate,
-                recommendationScore: sim.recommendationScore,
-                createdAt: sim.createdAt,
-              })),
-            })),
-          },
         },
       };
     },
@@ -1326,60 +739,6 @@ const readTools: ReadTool[] = [
 
 const writeTools: WriteTool[] = [
   write({
-    name: "create_transaction",
-    title: "Add transaction",
-    description:
-      "Add an expense or income. Reference the account by name (e.g. 'HDFC') and an optional category by name. Amount in major units.",
-    risk: "write",
-    requiredScope: "transactions:write",
-    input: z.object({
-      description: z.string().min(1).max(300),
-      amount: z.number().positive(),
-      type: z.enum(["income", "expense"]).default("expense"),
-      account: z.string().optional().describe("account name; defaults to the primary account"),
-      category: z.string().optional().describe("category name"),
-      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      merchant: z.string().max(150).optional(),
-    }),
-    async prepare(ctx, args) {
-      const account = await resolveAccount(ctx.userId, args.account);
-      if (!account) throw new Error("No account found to add this to.");
-      const category = await resolveCategory(ctx.userId, args.category);
-      const date = args.date ?? todayIso();
-      const payload = {
-        accountId: account.id,
-        type: args.type,
-        amount: args.amount,
-        description: args.description,
-        merchant: args.merchant,
-        categoryId: category?.id ?? null,
-        date,
-      };
-      return {
-        payload,
-        title: "Add transaction?",
-        summary: args.description,
-        fields: [
-          { label: "Amount", value: `${formatMoney(Math.round(args.amount * 100), account.currencyCode)} ${args.type}` },
-          { label: "Account", value: account.name },
-          { label: "Category", value: category?.name ?? "Uncategorised" },
-          { label: "Date", value: date },
-        ],
-        undoable: true,
-      };
-    },
-    async execute(ctx, payload) {
-      const tx = await createTransactionCore(ctx.userId, payload as never);
-      return {
-        status: "completed" as ExecStatus,
-        title: "Transaction added",
-        detail: `${tx.description} · ${formatMoney(tx.amountMinor, tx.currencyCode)}`,
-        block: { type: "result", status: "completed", title: "Transaction added", detail: tx.description } as ResponseBlock,
-      };
-    },
-  }),
-
-  write({
     name: "categorise_transaction",
     title: "Categorise transaction",
     description: "Set the category of one transaction (by id) using a category name.",
@@ -1438,44 +797,6 @@ const writeTools: WriteTool[] = [
   }),
 
   write({
-    name: "create_goal",
-    title: "Create goal",
-    description: "Create a savings goal with a target amount and optional target date.",
-    risk: "write",
-    requiredScope: "goals:write",
-    input: z.object({
-      name: z.string().min(1).max(120),
-      targetAmount: z.number().positive(),
-      currentAmount: z.number().min(0).default(0),
-      targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-    }),
-    async prepare(ctx, args) {
-      const payload = {
-        name: args.name,
-        targetAmount: args.targetAmount,
-        currentAmount: args.currentAmount,
-        currencyCode: ctx.currency,
-        targetDate: args.targetDate ?? null,
-        accountId: null,
-      };
-      return {
-        payload,
-        title: "Create goal?",
-        summary: args.name,
-        fields: [
-          { label: "Target", value: formatMoney(Math.round(args.targetAmount * 100), ctx.currency) },
-          ...(args.targetDate ? [{ label: "By", value: args.targetDate }] : []),
-        ],
-        undoable: true,
-      };
-    },
-    async execute(ctx, payload) {
-      const goal = await createGoalCore(ctx.userId, payload as never);
-      return { status: "completed" as ExecStatus, title: "Goal created", detail: goal.name };
-    },
-  }),
-
-  write({
     name: "bulk_categorise_matching_transactions",
     title: "Bulk categorise",
     description:
@@ -1513,46 +834,6 @@ const writeTools: WriteTool[] = [
       const p = payload as { ids: string[]; categoryId: string };
       const r = await bulkCategorizeCore(ctx.userId, p);
       return { status: "completed" as ExecStatus, title: `Recategorised ${r.updated}` };
-    },
-  }),
-
-  write({
-    name: "create_rule",
-    title: "Create rule",
-    description:
-      "Save and activate a deterministic rule. Conditions and actions use the same shape as propose_rule. Always call propose_rule first and show the user the dry run; this requires explicit confirmation.",
-    risk: "sensitive",
-    requiredScope: "rules:write",
-    input: ruleInput,
-    async prepare(ctx, args) {
-      const { definition, conditionLabels, actionLabels } = await resolveRule(ctx, args);
-      const preview = await previewRuleDefinition(ctx.userId, {
-        matchAll: definition.matchAll,
-        conditions: definition.conditions,
-        actions: definition.actions.map((a) => ({ type: a.type, value: a.value ?? null })),
-      });
-      return {
-        payload: definition,
-        title: "Create this rule?",
-        summary: `${definition.name} — ${conditionLabels.map((c) => c.label).join(args.matchAll ? " AND " : " OR ")} → ${actionLabels.map((a) => a.label).join(", ")}.`,
-        fields: [
-          { label: "When", value: conditionLabels.map((c) => c.label).join(args.matchAll ? " AND " : " OR ") },
-          { label: "Then", value: actionLabels.map((a) => a.label).join(", ") },
-          { label: "Matches now", value: `${preview.matchedCount} of ${preview.scannedCount}` },
-        ],
-        affectedCount: preview.matchedCount,
-        warning: preview.matchedCount > 50 ? "This rule matches a large number of transactions." : undefined,
-        undoable: true,
-      };
-    },
-    async execute(ctx, payload) {
-      const rule = await createRuleCore(ctx.userId, payload as CreateRuleInput);
-      return {
-        status: "completed" as ExecStatus,
-        title: "Rule created",
-        detail: rule.name,
-        block: { type: "result", status: "completed", title: "Rule created", detail: rule.name } as ResponseBlock,
-      };
     },
   }),
 
@@ -1916,6 +1197,7 @@ export const TOOLS: Tool[] = [
   ...readTools,
   ...financeReadsTools,
   ...ledgerReadsTools,
+  ...financeWritesReadTools,
   ...writeTools,
   ...financeWritesTools,
   ...ledgerWritesTools,

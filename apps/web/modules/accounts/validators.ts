@@ -28,9 +28,28 @@ export const createAccountSchema = z.object({
   notes: z.string().max(2000).optional(),
 });
 
-export const updateAccountSchema = createAccountSchema
-  .partial()
-  .extend({ isArchived: z.boolean().optional() });
+// Spelled out rather than `createAccountSchema.partial()`: zod keeps a field's
+// default under `.partial()`, so an update that omitted `includeInNetWorth`
+// silently switched it back on, and one without `currencyCode` converted the
+// limit as INR.
+export const updateAccountSchema = z.object({
+  name: z.string().min(1, "Name is required").max(120).optional(),
+  type: accountTypeSchema.optional(),
+  currencyCode: z
+    .string()
+    .length(3)
+    .transform((s) => s.toUpperCase())
+    .optional(),
+  institution: z.string().max(120).optional(),
+  accountNumberMask: z.string().max(20).optional(),
+  upiId: z.string().max(120).optional(),
+  openingBalance: z.coerce.number().optional(),
+  openingBalanceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  limit: z.coerce.number().optional(),
+  includeInNetWorth: z.boolean().optional(),
+  notes: z.string().max(2000).optional(),
+  isArchived: z.boolean().optional(),
+});
 
 export type CreateAccountInput = z.infer<typeof createAccountSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountSchema>;

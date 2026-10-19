@@ -14,8 +14,11 @@ import {
   type UpdateAccountInput,
 } from "./validators";
 
-export async function createAccount(input: CreateAccountInput) {
-  const user = await requireUser();
+/**
+ * Session-free create, keyed on an explicit `userId`, shared by the server
+ * action below and the agent/MCP path.
+ */
+export async function createAccountCore(userId: string, input: CreateAccountInput) {
   const data = createAccountSchema.parse(input);
   const openingBalanceMinor = majorToMinor(data.openingBalance, data.currencyCode);
   const openingDate = data.openingBalanceDate ?? todayIso();
@@ -24,7 +27,7 @@ export async function createAccount(input: CreateAccountInput) {
     const [created] = await trx
       .insert(accounts)
       .values({
-        userId: user.id,
+        userId,
         name: data.name,
         type: data.type,
         currencyCode: data.currencyCode,
@@ -51,22 +54,31 @@ export async function createAccount(input: CreateAccountInput) {
   });
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "account.created",
     entityType: "account",
     entityId: account.id,
     data: { name: data.name, type: data.type },
   });
+  return account;
+}
+
+export async function createAccount(input: CreateAccountInput) {
+  const user = await requireUser();
+  const account = await createAccountCore(user.id, input);
   revalidatePath("/accounts");
   return account;
 }
 
-export async function updateAccount(accountId: string, input: UpdateAccountInput) {
-  const user = await requireUser();
+export async function updateAccountCore(
+  userId: string,
+  accountId: string,
+  input: UpdateAccountInput,
+) {
   const data = updateAccountSchema.parse(input);
 
   const existing = await db.query.accounts.findFirst({
-    where: and(eq(accounts.id, accountId), eq(accounts.userId, user.id)),
+    where: and(eq(accounts.id, accountId), eq(accounts.userId, userId)),
   });
   if (!existing) throw new ApiError(404, "not_found", "Account not found.");
 
@@ -87,12 +99,17 @@ export async function updateAccount(accountId: string, input: UpdateAccountInput
     .where(eq(accounts.id, accountId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "account.updated",
     entityType: "account",
     entityId: accountId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateAccount(accountId: string, input: UpdateAccountInput) {
+  const user = await requireUser();
+  await updateAccountCore(user.id, accountId, input);
   revalidatePath("/accounts");
   revalidatePath(`/accounts/${accountId}`);
 }

@@ -32,6 +32,12 @@ export interface GoalTrajectory {
   daysLeft: number | null;
   /** Contribution per month needed to land on the target date. */
   monthlyNeededMinor: number | null;
+  /**
+   * How far below the pace line the goal sits, `(pace − ratio) × target`,
+   * rounded, never negative; 0 unless `status` is `behind`. The same figure
+   * the /plan trajectory prints as "behind pace".
+   */
+  behindMinor: number;
   status: GoalStatus;
   accountName: string | null;
 }
@@ -110,6 +116,10 @@ export async function getFutureView(userId: string): Promise<FutureView> {
       targetDate: g.targetDate,
       daysLeft,
       monthlyNeededMinor,
+      behindMinor:
+        status === "behind" && pace !== null
+          ? Math.max(0, Math.round((pace - Math.min(1, ratio)) * g.targetAmountMinor))
+          : 0,
       status,
       accountName: g.account?.name ?? null,
     };

@@ -15,7 +15,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { db, transactions } from "@kosh/db";
-import { majorToMinor } from "@kosh/domain";
+import { knownMinorUnitExponents } from "@kosh/domain";
 import type { ListTransactionsInput } from "./validators";
 
 function baseWhere(userId: string): SQL {
@@ -58,6 +58,28 @@ export type TransactionWithRelations = Awaited<
   ReturnType<typeof listTransactions>
 >["items"][number];
 
+/**
+ * A major-unit amount in each row's own minor units. The filter is typed in
+ * major units, so R$ 100 must compare as 10 000 against a BRL row but 100
+ * against a JPY one; converting once as INR got every non-2-decimal currency
+ * wrong.
+ */
+function minorThreshold(amountMajor: number): SQL {
+  const byExponent = new Map<number, string[]>();
+  for (const [code, exponent] of Object.entries(knownMinorUnitExponents())) {
+    if (exponent === 2) continue;
+    byExponent.set(exponent, [...(byExponent.get(exponent) ?? []), code]);
+  }
+  const branches = [...byExponent].map(
+    ([exponent, codes]) =>
+      sql`WHEN ${transactions.currencyCode} IN (${sql.join(
+        codes.map((code) => sql`${code}`),
+        sql`, `,
+      )}) THEN ${Math.round(amountMajor * 10 ** exponent)}::bigint`,
+  );
+  return sql`(CASE ${sql.join(branches, sql` `)} ELSE ${Math.round(amountMajor * 100)}::bigint END)`;
+}
+
 export async function listTransactions(
   userId: string,
   input: ListTransactionsInput,
@@ -89,20 +111,10 @@ export async function listTransactions(
   if (input.from) conditions.push(gte(transactions.date, input.from));
   if (input.to) conditions.push(lte(transactions.date, input.to));
   if (input.minAmount !== undefined) {
-    conditions.push(
-      gte(
-        sql`ABS(${transactions.amountMinor})`,
-        majorToMinor(input.minAmount, "INR"),
-      ),
-    );
+    conditions.push(gte(sql`ABS(${transactions.amountMinor})`, minorThreshold(input.minAmount)));
   }
   if (input.maxAmount !== undefined) {
-    conditions.push(
-      lte(
-        sql`ABS(${transactions.amountMinor})`,
-        majorToMinor(input.maxAmount, "INR"),
-      ),
-    );
+    conditions.push(lte(sql`ABS(${transactions.amountMinor})`, minorThreshold(input.maxAmount)));
   }
 
   const where = and(...conditions);

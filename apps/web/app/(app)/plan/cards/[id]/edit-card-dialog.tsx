@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { minorToMajor } from "@kosh/domain";
 import { toast } from "sonner";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { PencilEdit02Icon } from "@hugeicons/core-free-icons";
@@ -61,7 +62,7 @@ export function EditCardDialog({
       name: card.name,
       issuer: card.issuer ?? "",
       currencyCode: card.currencyCode,
-      creditLimit: card.creditLimitMinor / 100,
+      creditLimit: minorToMajor(card.creditLimitMinor, card.currencyCode),
       defaultClosingDay: card.defaultClosingDay,
       defaultDueDay: card.defaultDueDay,
       paymentAccountId: card.paymentAccountId,

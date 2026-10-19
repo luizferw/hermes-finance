@@ -18,19 +18,18 @@ import {
   type UpdateRecurringInput,
 } from "./validators";
 
-export async function createRecurring(input: CreateRecurringInput) {
-  const user = await requireUser();
+export async function createRecurringCore(userId: string, input: CreateRecurringInput) {
   const data = createRecurringSchema.parse(input);
   const transferAccountId =
     data.type === "transfer" ? data.transferAccountId ?? null : null;
-  await assertAccountsOwned(user.id, [data.accountId, transferAccountId]);
-  await assertCategoriesOwned(user.id, [data.categoryId]);
+  await assertAccountsOwned(userId, [data.accountId, transferAccountId]);
+  await assertCategoriesOwned(userId, [data.categoryId]);
   const magnitude = majorToMinor(data.amount, data.currencyCode);
 
   const [recurring] = await db
     .insert(recurringTransactions)
     .values({
-      userId: user.id,
+      userId,
       name: data.name,
       type: data.type,
       accountId: data.accountId,
@@ -45,14 +44,20 @@ export async function createRecurring(input: CreateRecurringInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "recurring.created",
     entityType: "recurring_transaction",
     entityId: recurring!.id,
     data: { name: data.name, interval: data.interval },
   });
-  revalidatePath("/plan/recurring");
   return recurring!;
+}
+
+export async function createRecurring(input: CreateRecurringInput) {
+  const user = await requireUser();
+  const recurring = await createRecurringCore(user.id, input);
+  revalidatePath("/plan/recurring");
+  return recurring;
 }
 
 /**
@@ -62,13 +67,12 @@ export async function createRecurring(input: CreateRecurringInput) {
  * from `type`, and `transferAccountId` is required for a transfer, nulled
  * otherwise.
  */
-export async function updateRecurring(id: string, input: UpdateRecurringInput) {
-  const user = await requireUser();
+export async function updateRecurringCore(userId: string, id: string, input: UpdateRecurringInput) {
   const data = updateRecurringSchema.parse(input);
   const existing = await db.query.recurringTransactions.findFirst({
     where: and(
       eq(recurringTransactions.id, id),
-      eq(recurringTransactions.userId, user.id),
+      eq(recurringTransactions.userId, userId),
     ),
   });
   if (!existing) throw new ApiError(404, "not_found", "Recurring transaction not found.");
@@ -84,8 +88,8 @@ export async function updateRecurring(id: string, input: UpdateRecurringInput) {
     throw new ApiError(400, "invalid_input", "Pick a destination account.");
   }
   const accountId = data.accountId ?? existing.accountId;
-  await assertAccountsOwned(user.id, [accountId, transferAccountId]);
-  if (data.categoryId !== undefined) await assertCategoriesOwned(user.id, [data.categoryId]);
+  await assertAccountsOwned(userId, [accountId, transferAccountId]);
+  if (data.categoryId !== undefined) await assertCategoriesOwned(userId, [data.categoryId]);
 
   const currency = data.currencyCode ?? existing.currencyCode;
   const magnitude =
@@ -110,21 +114,25 @@ export async function updateRecurring(id: string, input: UpdateRecurringInput) {
     .where(eq(recurringTransactions.id, id));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "recurring.updated",
     entityType: "recurring_transaction",
     entityId: id,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateRecurring(id: string, input: UpdateRecurringInput) {
+  const user = await requireUser();
+  await updateRecurringCore(user.id, id, input);
   revalidatePath("/plan/recurring");
 }
 
-export async function setRecurringActive(id: string, isActive: boolean) {
-  const user = await requireUser();
+export async function setRecurringActiveCore(userId: string, id: string, isActive: boolean) {
   const existing = await db.query.recurringTransactions.findFirst({
     where: and(
       eq(recurringTransactions.id, id),
-      eq(recurringTransactions.userId, user.id),
+      eq(recurringTransactions.userId, userId),
     ),
   });
   if (!existing) throw new ApiError(404, "not_found", "Recurring transaction not found.");
@@ -132,25 +140,34 @@ export async function setRecurringActive(id: string, isActive: boolean) {
     .update(recurringTransactions)
     .set({ isActive })
     .where(eq(recurringTransactions.id, id));
+}
+
+export async function setRecurringActive(id: string, isActive: boolean) {
+  const user = await requireUser();
+  await setRecurringActiveCore(user.id, id, isActive);
   revalidatePath("/plan/recurring");
 }
 
-export async function deleteRecurring(id: string) {
-  const user = await requireUser();
+export async function deleteRecurringCore(userId: string, id: string) {
   const existing = await db.query.recurringTransactions.findFirst({
     where: and(
       eq(recurringTransactions.id, id),
-      eq(recurringTransactions.userId, user.id),
+      eq(recurringTransactions.userId, userId),
     ),
   });
   if (!existing) throw new ApiError(404, "not_found", "Recurring transaction not found.");
   await db.delete(recurringTransactions).where(eq(recurringTransactions.id, id));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "recurring.deleted",
     entityType: "recurring_transaction",
     entityId: id,
     data: { name: existing.name },
   });
+}
+
+export async function deleteRecurring(id: string) {
+  const user = await requireUser();
+  await deleteRecurringCore(user.id, id);
   revalidatePath("/plan/recurring");
 }

@@ -9,6 +9,28 @@ import { verifyMcpToken } from "@/modules/agent/mcp-tokens";
 import { MCP_SCOPES } from "@/modules/agent/types";
 import type { ReadToolResult, Scope, ToolContext, WriteTool } from "@/modules/agent/types";
 import { logAudit } from "@/modules/shared/audit";
+import { ApiError } from "@/modules/shared/api";
+
+/**
+ * What a caller may be told about a failed tool call.
+ *
+ * Input that fails validation, an `ApiError` (not found, conflict…) and a
+ * plain `Error` a tool throws on purpose all carry a message written for the
+ * caller, and hiding it leaves them guessing why a call was refused. Anything
+ * else — a database or driver error, always a subclass — may quote SQL or
+ * schema, so it stays generic and goes to the server log instead.
+ */
+function describeToolError(err: unknown): string {
+  if (err instanceof z.ZodError) {
+    return `Invalid input: ${err.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ")}`;
+  }
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error && err.constructor === Error) return err.message;
+  console.error("[mcp] tool failed", err);
+  return "Tool failed.";
+}
 
 /**
  * Kosh's real MCP server (Streamable HTTP) for external clients. Authenticated
@@ -78,7 +100,7 @@ const baseHandler = createMcpHandler(
                 },
               ],
             };
-          } catch {
+          } catch (err) {
             await logAudit({
               userId,
               action: tool.kind === "read" ? "agent.tool.read" : "agent.tool.write",
@@ -87,7 +109,7 @@ const baseHandler = createMcpHandler(
               data: { source: "mcp", status: "failed" },
             }).catch(() => undefined);
             return {
-              content: [{ type: "text" as const, text: "Tool failed." }],
+              content: [{ type: "text" as const, text: describeToolError(err) }],
               isError: true,
             };
           }

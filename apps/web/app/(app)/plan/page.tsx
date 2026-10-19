@@ -245,10 +245,7 @@ function Trajectory({ goal, index }: { goal: GoalTrajectory; index: number }) {
   const achieved = goal.status === "achieved";
   const behind = goal.status === "behind";
   const pct = Math.round(goal.ratio * 100);
-  const behindMinor =
-    behind && goal.pace !== null
-      ? Math.max(0, Math.round((goal.pace - goal.ratio) * goal.targetMinor))
-      : 0;
+  const { behindMinor } = goal;
 
   return (
     <li>

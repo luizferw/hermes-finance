@@ -50,7 +50,8 @@ function goalOnTrack(g: {
   return progress >= expected * 0.9;
 }
 
-export async function getConfidence(userId: string): Promise<ConfidenceView> {
+/** The composite for today, computed from live data. No IO beyond reads. */
+async function computeTodaysConfidence(userId: string): Promise<ConfidenceResult> {
   const [settings, accounts, flows, month, budgets, bills, goals, inboxCount] =
     await Promise.all([
       getUserSettings(userId),
@@ -89,7 +90,7 @@ export async function getConfidence(userId: string): Promise<ConfidenceView> {
     0,
   );
 
-  const result = computeConfidence({
+  return computeConfidence({
     liquidAssetsMinor,
     avgMonthlySpendMinor,
     incomeThisMonthMinor: month.incomeMinor,
@@ -102,7 +103,56 @@ export async function getConfidence(userId: string): Promise<ConfidenceView> {
     goalsOnTrack: goals.filter(goalOnTrack).length,
     inboxCount,
   });
+}
 
+/**
+ * Trend, week delta and streak from the stored snapshots, with today's reading
+ * taken from `result` rather than from the table. After `getConfidence` writes
+ * the snapshot the two agree; `readConfidence` relies on this to report the
+ * same view without writing.
+ */
+async function withHistory(userId: string, result: ConfidenceResult): Promise<ConfidenceView> {
+  const today = todayIso();
+  // Last 30 days of history for trend, week-delta and streak.
+  const since = new Date();
+  since.setDate(since.getDate() - 30);
+  const sinceIso = since.toISOString().slice(0, 10);
+  const stored = await db.query.confidenceSnapshots.findMany({
+    where: and(
+      eq(confidenceSnapshots.userId, userId),
+      gte(confidenceSnapshots.date, sinceIso),
+    ),
+    columns: { date: true, score: true, onTop: true },
+    orderBy: [asc(confidenceSnapshots.date)],
+  });
+  const history = [
+    ...stored.filter((h) => h.date !== today),
+    { date: today, score: result.score, onTop: result.onTop },
+  ].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const trend = history.map((h) => ({ date: h.date, score: h.score }));
+
+  // Week delta: compare against the latest reading at least 7 days old.
+  const weekAgo = new Date();
+  weekAgo.setDate(weekAgo.getDate() - 7);
+  const weekAgoIso = weekAgo.toISOString().slice(0, 10);
+  const prior = [...history].reverse().find((h) => h.date <= weekAgoIso);
+  const weekDelta = prior ? result.score - prior.score : null;
+
+  // Streak: walk back from today over consecutive on-top days.
+  const onTopDates = new Set(history.filter((h) => h.onTop).map((h) => h.date));
+  let streakDays = 0;
+  const cursor = new Date();
+  while (onTopDates.has(cursor.toISOString().slice(0, 10))) {
+    streakDays++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+
+  return { ...result, weekDelta, streakDays, trend };
+}
+
+export async function getConfidence(userId: string): Promise<ConfidenceView> {
+  const result = await computeTodaysConfidence(userId);
   const today = todayIso();
 
   // snapshot is written on render. Single-user self-hosted app, the
@@ -127,36 +177,18 @@ export async function getConfidence(userId: string): Promise<ConfidenceView> {
       set: { score: result.score, band: result.band, onTop: result.onTop },
     });
 
-  // Last 30 days of history for trend, week-delta and streak.
-  const since = new Date();
-  since.setDate(since.getDate() - 30);
-  const sinceIso = since.toISOString().slice(0, 10);
-  const history = await db.query.confidenceSnapshots.findMany({
-    where: and(
-      eq(confidenceSnapshots.userId, userId),
-      gte(confidenceSnapshots.date, sinceIso),
-    ),
-    columns: { date: true, score: true, onTop: true },
-    orderBy: [asc(confidenceSnapshots.date)],
-  });
+  return withHistory(userId, result);
+}
 
-  const trend = history.map((h) => ({ date: h.date, score: h.score }));
-
-  // Week delta: compare against the latest reading at least 7 days old.
-  const weekAgo = new Date();
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const weekAgoIso = weekAgo.toISOString().slice(0, 10);
-  const prior = [...history].reverse().find((h) => h.date <= weekAgoIso);
-  const weekDelta = prior ? result.score - prior.score : null;
-
-  // Streak: walk back from today over consecutive on-top days.
-  const onTopDates = new Set(history.filter((h) => h.onTop).map((h) => h.date));
-  let streakDays = 0;
-  const cursor = new Date();
-  while (onTopDates.has(cursor.toISOString().slice(0, 10))) {
-    streakDays++;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-
-  return { ...result, weekDelta, streakDays, trend };
+/**
+ * The same view the overview renders, without writing today's snapshot.
+ *
+ * The snapshot table is the history behind the trend and the streak, and a
+ * day only has a row when someone opened the overview. An agent reading the
+ * score must not add rows on days nobody looked, or it would lengthen streaks
+ * and fill trend gaps the user never saw. Today's score is overlaid in memory
+ * instead, so the figures match what the overview would show right now.
+ */
+export async function readConfidence(userId: string): Promise<ConfidenceView> {
+  return withHistory(userId, await computeTodaysConfidence(userId));
 }

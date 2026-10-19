@@ -32,16 +32,15 @@ function revalidateBills() {
   revalidatePath("/overview");
 }
 
-export async function createBill(input: CreateBillInput) {
-  const user = await requireUser();
+export async function createBillCore(userId: string, input: CreateBillInput) {
   const data = createBillSchema.parse(input);
-  await assertAccountsOwned(user.id, [data.accountId]);
-  await assertCategoriesOwned(user.id, [data.categoryId]);
+  await assertAccountsOwned(userId, [data.accountId]);
+  await assertCategoriesOwned(userId, [data.categoryId]);
 
   const [bill] = await db
     .insert(bills)
     .values({
-      userId: user.id,
+      userId,
       name: data.name,
       expectedAmountMinor: majorToMinor(data.expectedAmount, data.currencyCode),
       currencyCode: data.currencyCode,
@@ -56,25 +55,30 @@ export async function createBill(input: CreateBillInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "bill.created",
     entityType: "bill",
     entityId: bill!.id,
     data: { name: data.name },
   });
-  revalidateBills();
   return bill!;
 }
 
-export async function updateBill(billId: string, input: UpdateBillInput) {
+export async function createBill(input: CreateBillInput) {
   const user = await requireUser();
+  const bill = await createBillCore(user.id, input);
+  revalidateBills();
+  return bill;
+}
+
+export async function updateBillCore(userId: string, billId: string, input: UpdateBillInput) {
   const data = updateBillSchema.parse(input);
   const existing = await db.query.bills.findFirst({
-    where: and(eq(bills.id, billId), eq(bills.userId, user.id)),
+    where: and(eq(bills.id, billId), eq(bills.userId, userId)),
   });
   if (!existing) throw new ApiError(404, "not_found", "Bill not found.");
-  if (data.accountId !== undefined) await assertAccountsOwned(user.id, [data.accountId]);
-  if (data.categoryId !== undefined) await assertCategoriesOwned(user.id, [data.categoryId]);
+  if (data.accountId !== undefined) await assertAccountsOwned(userId, [data.accountId]);
+  if (data.categoryId !== undefined) await assertCategoriesOwned(userId, [data.categoryId]);
 
   const currency = data.currencyCode ?? existing.currencyCode;
   await db
@@ -100,12 +104,17 @@ export async function updateBill(billId: string, input: UpdateBillInput) {
     .where(eq(bills.id, billId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "bill.updated",
     entityType: "bill",
     entityId: billId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateBill(billId: string, input: UpdateBillInput) {
+  const user = await requireUser();
+  await updateBillCore(user.id, billId, input);
   revalidateBills();
 }
 
@@ -120,11 +129,10 @@ export async function updateBill(billId: string, input: UpdateBillInput) {
  *    instead of the typed estimate.
  *  - neither — today's plain one-click case, unchanged (fixed bills).
  */
-export async function markBillPaid(input: MarkBillPaidInput) {
-  const user = await requireUser();
+export async function markBillPaidCore(userId: string, input: MarkBillPaidInput) {
   const data = markBillPaidSchema.parse(input);
   const bill = await db.query.bills.findFirst({
-    where: and(eq(bills.id, data.billId), eq(bills.userId, user.id)),
+    where: and(eq(bills.id, data.billId), eq(bills.userId, userId)),
   });
   if (!bill) throw new ApiError(404, "not_found", "Bill not found.");
 
@@ -138,7 +146,7 @@ export async function markBillPaid(input: MarkBillPaidInput) {
     const tx = await db.query.transactions.findFirst({
       where: and(
         eq(transactions.id, data.transactionId),
-        eq(transactions.userId, user.id),
+        eq(transactions.userId, userId),
       ),
     });
     if (!tx) throw new ApiError(404, "not_found", "Transaction not found.");
@@ -168,7 +176,7 @@ export async function markBillPaid(input: MarkBillPaidInput) {
       const [created] = await trx
         .insert(transactions)
         .values({
-          userId: user.id,
+          userId,
           accountId,
           type: "expense",
           date,
@@ -210,7 +218,7 @@ export async function markBillPaid(input: MarkBillPaidInput) {
   });
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "bill.paid",
     entityType: "bill",
     entityId: bill.id,
@@ -219,6 +227,11 @@ export async function markBillPaid(input: MarkBillPaidInput) {
       createdTransaction: createdTransactionId !== null,
     },
   });
+}
+
+export async function markBillPaid(input: MarkBillPaidInput) {
+  const user = await requireUser();
+  await markBillPaidCore(user.id, input);
   revalidateBills();
 }
 
@@ -234,19 +247,23 @@ export async function listBillPaymentCandidates(billId: string, limit = 15) {
   return listUnlinkedExpenseCandidates(user.id, bill.accountId, limit);
 }
 
-export async function deleteBill(billId: string) {
-  const user = await requireUser();
+export async function deleteBillCore(userId: string, billId: string) {
   const existing = await db.query.bills.findFirst({
-    where: and(eq(bills.id, billId), eq(bills.userId, user.id)),
+    where: and(eq(bills.id, billId), eq(bills.userId, userId)),
   });
   if (!existing) throw new ApiError(404, "not_found", "Bill not found.");
   await db.delete(bills).where(eq(bills.id, billId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "bill.deleted",
     entityType: "bill",
     entityId: billId,
     data: { name: existing.name },
   });
+}
+
+export async function deleteBill(billId: string) {
+  const user = await requireUser();
+  await deleteBillCore(user.id, billId);
   revalidateBills();
 }

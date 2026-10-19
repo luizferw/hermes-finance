@@ -119,11 +119,10 @@ async function loadOwnedPurchaseItem(userId: string, itemId: string) {
 // --- balance snapshots -----------------------------------------------------------
 
 /** Records or corrects the observed balance of an account on a given date. */
-export async function upsertBalanceSnapshot(input: UpsertBalanceSnapshotInput) {
-  const user = await requireUser();
+export async function upsertBalanceSnapshotCore(userId: string, input: UpsertBalanceSnapshotInput) {
   const data = upsertBalanceSnapshotSchema.parse(input);
   const account = await db.query.accounts.findFirst({
-    where: and(eq(accounts.id, data.accountId), eq(accounts.userId, user.id)),
+    where: and(eq(accounts.id, data.accountId), eq(accounts.userId, userId)),
   });
   if (!account) throw new ApiError(404, "not_found", "Account not found.");
 
@@ -131,7 +130,7 @@ export async function upsertBalanceSnapshot(input: UpsertBalanceSnapshotInput) {
   const [snapshot] = await db
     .insert(balanceSnapshots)
     .values({
-      userId: user.id,
+      userId,
       accountId: data.accountId,
       amountMinor,
       observedAt: data.observedAt,
@@ -144,26 +143,31 @@ export async function upsertBalanceSnapshot(input: UpsertBalanceSnapshotInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "balance_snapshot.upserted",
     entityType: "balance_snapshot",
     entityId: snapshot!.id,
     data: { changed: ["amount", "observedAt"] },
   });
-  revalidateFinance();
   return snapshot!;
+}
+
+export async function upsertBalanceSnapshot(input: UpsertBalanceSnapshotInput) {
+  const user = await requireUser();
+  const snapshot = await upsertBalanceSnapshotCore(user.id, input);
+  revalidateFinance();
+  return snapshot;
 }
 
 // --- financial reserves ------------------------------------------------------------
 
-export async function createFinancialReserve(input: CreateFinancialReserveInput) {
-  const user = await requireUser();
+export async function createFinancialReserveCore(userId: string, input: CreateFinancialReserveInput) {
   const data = createFinancialReserveSchema.parse(input);
 
   const [reserve] = await db
     .insert(financialReserves)
     .values({
-      userId: user.id,
+      userId,
       name: data.name,
       kind: data.kind,
       amountMinor: majorToMinor(data.amount, data.currencyCode),
@@ -173,20 +177,29 @@ export async function createFinancialReserve(input: CreateFinancialReserveInput)
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "financial_reserve.created",
     entityType: "financial_reserve",
     entityId: reserve!.id,
     data: { name: data.name },
   });
-  revalidateFinance();
   return reserve!;
 }
 
-export async function updateFinancialReserve(reserveId: string, input: UpdateFinancialReserveInput) {
+export async function createFinancialReserve(input: CreateFinancialReserveInput) {
   const user = await requireUser();
+  const reserve = await createFinancialReserveCore(user.id, input);
+  revalidateFinance();
+  return reserve;
+}
+
+export async function updateFinancialReserveCore(
+  userId: string,
+  reserveId: string,
+  input: UpdateFinancialReserveInput,
+) {
   const data = updateFinancialReserveSchema.parse(input);
-  const existing = await loadOwnedReserve(user.id, reserveId);
+  const existing = await loadOwnedReserve(userId, reserveId);
   const currency = data.currencyCode ?? existing.currencyCode;
 
   await db
@@ -201,40 +214,48 @@ export async function updateFinancialReserve(reserveId: string, input: UpdateFin
     .where(eq(financialReserves.id, reserveId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "financial_reserve.updated",
     entityType: "financial_reserve",
     entityId: reserveId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateFinancialReserve(reserveId: string, input: UpdateFinancialReserveInput) {
+  const user = await requireUser();
+  await updateFinancialReserveCore(user.id, reserveId, input);
   revalidateFinance();
 }
 
-export async function deleteFinancialReserve(reserveId: string) {
-  const user = await requireUser();
-  const existing = await loadOwnedReserve(user.id, reserveId);
+export async function deleteFinancialReserveCore(userId: string, reserveId: string) {
+  const existing = await loadOwnedReserve(userId, reserveId);
   await db.delete(financialReserves).where(eq(financialReserves.id, reserveId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "financial_reserve.deleted",
     entityType: "financial_reserve",
     entityId: reserveId,
     data: { name: existing.name },
   });
+}
+
+export async function deleteFinancialReserve(reserveId: string) {
+  const user = await requireUser();
+  await deleteFinancialReserveCore(user.id, reserveId);
   revalidateFinance();
 }
 
 // --- credit cards ------------------------------------------------------------------
 
-export async function createCreditCard(input: CreateCreditCardInput) {
-  const user = await requireUser();
+export async function createCreditCardCore(userId: string, input: CreateCreditCardInput) {
   const data = createCreditCardSchema.parse(input);
-  await assertAccountsOwned(user.id, [data.accountId, data.paymentAccountId]);
+  await assertAccountsOwned(userId, [data.accountId, data.paymentAccountId]);
 
   const [card] = await db
     .insert(creditCards)
     .values({
-      userId: user.id,
+      userId,
       accountId: data.accountId,
       name: data.name,
       issuer: data.issuer,
@@ -248,21 +269,26 @@ export async function createCreditCard(input: CreateCreditCardInput) {
     .returning();
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card.created",
     entityType: "credit_card",
     entityId: card!.id,
     data: { name: data.name },
   });
-  revalidateFinance();
   return card!;
 }
 
-export async function updateCreditCard(cardId: string, input: UpdateCreditCardInput) {
+export async function createCreditCard(input: CreateCreditCardInput) {
   const user = await requireUser();
+  const card = await createCreditCardCore(user.id, input);
+  revalidateFinance();
+  return card;
+}
+
+export async function updateCreditCardCore(userId: string, cardId: string, input: UpdateCreditCardInput) {
   const data = updateCreditCardSchema.parse(input);
-  const existing = await loadOwnedCreditCard(user.id, cardId);
-  if (data.paymentAccountId !== undefined) await assertAccountsOwned(user.id, [data.paymentAccountId]);
+  const existing = await loadOwnedCreditCard(userId, cardId);
+  if (data.paymentAccountId !== undefined) await assertAccountsOwned(userId, [data.paymentAccountId]);
   const currency = data.currencyCode ?? existing.currencyCode;
 
   await db
@@ -281,27 +307,36 @@ export async function updateCreditCard(cardId: string, input: UpdateCreditCardIn
     .where(eq(creditCards.id, cardId));
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card.updated",
     entityType: "credit_card",
     entityId: cardId,
     data: { changed: Object.keys(data) },
   });
+}
+
+export async function updateCreditCard(cardId: string, input: UpdateCreditCardInput) {
+  const user = await requireUser();
+  await updateCreditCardCore(user.id, cardId, input);
   revalidateFinance();
 }
 
 /** Deactivates a card instead of deleting it: its purchases/installments stay auditable. */
-export async function archiveCreditCard(cardId: string) {
-  const user = await requireUser();
-  const existing = await loadOwnedCreditCard(user.id, cardId);
+export async function archiveCreditCardCore(userId: string, cardId: string) {
+  const existing = await loadOwnedCreditCard(userId, cardId);
   await db.update(creditCards).set({ active: false }).where(eq(creditCards.id, cardId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card.archived",
     entityType: "credit_card",
     entityId: cardId,
     data: { name: existing.name },
   });
+}
+
+export async function archiveCreditCard(cardId: string) {
+  const user = await requireUser();
+  await archiveCreditCardCore(user.id, cardId);
   revalidateFinance();
 }
 
@@ -309,20 +344,21 @@ export async function archiveCreditCard(cardId: string) {
  * Puts an archived card back in the list. Archiving is this module's delete,
  * and one the UI cannot walk back is the same trap as no delete at all.
  */
-export async function restoreCreditCard(cardId: string) {
-  const user = await requireUser();
-  const existing = await db.query.creditCards.findFirst({
-    where: and(eq(creditCards.id, cardId), eq(creditCards.userId, user.id)),
-  });
-  if (!existing) throw new ApiError(404, "not_found", "Credit card not found.");
+export async function restoreCreditCardCore(userId: string, cardId: string) {
+  const existing = await loadOwnedCreditCard(userId, cardId);
   await db.update(creditCards).set({ active: true }).where(eq(creditCards.id, cardId));
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card.restored",
     entityType: "credit_card",
     entityId: cardId,
     data: { name: existing.name },
   });
+}
+
+export async function restoreCreditCard(cardId: string) {
+  const user = await requireUser();
+  await restoreCreditCardCore(user.id, cardId);
   revalidateFinance();
 }
 
@@ -514,11 +550,10 @@ async function findOrCreateBillingCycle(
  * (`expandInstallmentTail`), so the parcels always sum to the purchase total
  * exactly.
  */
-export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
-  const user = await requireUser();
+export async function registerCardPurchaseCore(userId: string, input: RegisterCardPurchaseInput) {
   const data = registerCardPurchaseSchema.parse(input);
-  const card = await loadOwnedCreditCard(user.id, data.creditCardId);
-  if (data.categoryId) await assertCategoriesOwned(user.id, [data.categoryId]);
+  const card = await loadOwnedCreditCard(userId, data.creditCardId);
+  if (data.categoryId) await assertCategoriesOwned(userId, [data.categoryId]);
 
   const totalAmountMinor = majorToMinor(data.totalAmount, card.currencyCode);
   const firstCycle = nominalCycleFor(data.purchaseDate, card.defaultClosingDay, card.defaultDueDay);
@@ -544,7 +579,7 @@ export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
     const [purchaseTransaction] = await trx
       .insert(transactions)
       .values({
-        userId: user.id,
+        userId,
         accountId: card.accountId,
         type: "expense",
         status: "posted",
@@ -611,13 +646,19 @@ export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
   });
 
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card_purchase.registered",
     entityType: "credit_card_purchase",
     entityId: result.purchase.id,
     data: { count: data.totalInstallments },
   });
   await recomputeAccountBalances([card.accountId]);
+  return result;
+}
+
+export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
+  const user = await requireUser();
+  const result = await registerCardPurchaseCore(user.id, input);
   revalidateFinance();
   return result;
 }
@@ -636,24 +677,33 @@ export async function registerCardPurchase(input: RegisterCardPurchaseInput) {
  * Billing cycles are deliberately left behind — they are shared by every
  * purchase on the card, and an empty one is harmless.
  */
-export async function deleteCardPurchase(purchaseId: string) {
-  const user = await requireUser();
+export async function deleteCardPurchaseCore(userId: string, purchaseId: string) {
   const purchase = await db.query.creditCardPurchases.findFirst({
     where: eq(creditCardPurchases.id, purchaseId),
   });
   if (!purchase) throw new ApiError(404, "not_found", "Card purchase not found.");
-  const card = await loadOwnedCreditCard(user.id, purchase.creditCardId);
+  // 404 for another tenant's purchase too: loadOwnedCreditCard says "credit
+  // card not found", which would confirm the purchase id exists.
+  const card = await db.query.creditCards.findFirst({
+    where: and(eq(creditCards.id, purchase.creditCardId), eq(creditCards.userId, userId)),
+  });
+  if (!card) throw new ApiError(404, "not_found", "Card purchase not found.");
 
   await db.delete(transactions).where(eq(transactions.id, purchase.transactionId));
 
   await recomputeAccountBalances([card.accountId]);
   await logAudit({
-    userId: user.id,
+    userId,
     action: "credit_card_purchase.deleted",
     entityType: "credit_card_purchase",
     entityId: purchaseId,
     data: { merchant: purchase.merchant, totalAmountMinor: purchase.totalAmountMinor },
   });
+}
+
+export async function deleteCardPurchase(purchaseId: string) {
+  const user = await requireUser();
+  await deleteCardPurchaseCore(user.id, purchaseId);
   revalidateFinance();
 }
 

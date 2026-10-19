@@ -190,8 +190,13 @@ inside the `xCore` functions.
 
 ### Agent / MCP surface
 
-`modules/agent/registry.ts` holds `readTools` and `writeTools`, each Zod-typed with a `kind` and a
-`risk`. `MCP_TOOLS = TOOLS` — **the external MCP endpoint exposes both**, and what actually stops a
+`modules/agent/registry.ts` joins every tool into `TOOLS`: its own `readTools`/`writeTools` plus one
+array per domain in `modules/agent/tools/<domain>.ts` (helpers in `tools/shared.ts`). Each tool is
+Zod-typed with a `kind` and a `risk`. A tool defined in a domain file but not spread into `TOOLS` is
+dead. **The MCP surface must match the screens:** anything a page shows or lets the user do needs a
+tool returning the same figures (call the very query the page calls), and its description must say how
+each number is computed; `get_methodology` holds the cross-cutting explanation. `MCP_TOOLS = TOOLS` —
+**the external MCP endpoint exposes both**, and what actually stops a
 write is the caller's scopes, checked in three places: tool filtering (`agent.ts`), execution
 (`execute.ts`), and token validation (`app/api/mcp/route.ts`). A token minted with only
 `finance:read` is read-only; one minted with `transactions:write` writes for real. The `409

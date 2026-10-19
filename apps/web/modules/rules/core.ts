@@ -160,6 +160,29 @@ export async function setRuleActiveCore(userId: string, ruleId: string, isActive
   return { name: existing.name, isActive };
 }
 
+/**
+ * Delete a rule and (by cascade) its conditions and actions; its past runs stay
+ * in the activity log with the rule reference cleared. Transactions it already changed keep those changes: a rule's effects are
+ * ledger edits, not something derived from the rule at read time.
+ */
+export async function deleteRuleCore(userId: string, ruleId: string) {
+  const existing = await db.query.automationRules.findFirst({
+    where: and(eq(automationRules.id, ruleId), eq(automationRules.userId, userId)),
+  });
+  if (!existing) throw new Error("Rule not found.");
+  await db
+    .delete(automationRules)
+    .where(and(eq(automationRules.id, ruleId), eq(automationRules.userId, userId)));
+  await logAudit({
+    userId,
+    action: "rule.deleted",
+    entityType: "automation_rule",
+    entityId: ruleId,
+    data: { name: existing.name },
+  });
+  return { name: existing.name };
+}
+
 export async function runRuleCore(userId: string, ruleId: string) {
   return executeStoredRule(userId, ruleId, "manual");
 }
