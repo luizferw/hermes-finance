@@ -42,7 +42,9 @@ import {
 import {
   calculateSafeToSpend,
   calculateSpendingRoom,
+  debtPaymentsFromForecast,
   simulatePurchasePlan,
+  type CardActivity,
   type PlanItemOption,
   type PurchasePlanSimulation,
 } from "@hermes-finance/planning";
@@ -225,6 +227,18 @@ export function forecastForScenario(detailed: UserForecast, scenario: VariableSp
       ...(scenario === "none" ? [] : detailed.budgetConsumption.events),
     ],
   });
+}
+
+/**
+ * What the forecast already expects on the cards: each statement it settles,
+ * and — when it carries the budget estimate — the card share of that spending,
+ * charged on the day it is spent.
+ */
+export function cardActivityFor(detailed: UserForecast): CardActivity {
+  return {
+    debtPayments: debtPaymentsFromForecast(detailed.commitmentEvents),
+    charges: detailed.scenario === "none" ? [] : detailed.budgetConsumption.cardCharges,
+  };
 }
 
 /**
@@ -1452,6 +1466,7 @@ export async function getPurchasePlanImpact(
     })),
     targetDate: plan.targetDate ?? undefined,
     items,
+    cardActivity: cardActivityFor(baseline),
   });
 
   return { plan, simulation, baseline, unprojectedItems };

@@ -9,6 +9,7 @@ import {
   type Forecast,
   type ForecastEvent,
 } from "@hermes-finance/forecast";
+import { peakCardUsage, type CardActivity, type CardCharge } from "./card-usage";
 
 export interface SafeToSpendInput {
   forecastInput: BuildForecastInput;
@@ -578,11 +579,17 @@ export interface CardLoad {
   cardId: string;
   label: string;
   creditLimitMinor: number;
-  /** Already taken by billed and projected installments before this plan. */
+  /** Limit taken today, before this plan. */
   committedMinor: number;
   /** Added by every item in this plan charged to this card. */
   planChargedMinor: number;
-  /** How far past the limit the plan pushes this card; 0 when it fits. */
+  /** The most of the limit in use on any day of the horizon without the plan, and when. */
+  baselinePeakMinor: number;
+  baselinePeakDate: DateString;
+  /** The same with every item of the plan charged. */
+  peakMinor: number;
+  peakDate: DateString;
+  /** How far past the limit the peak goes; 0 when it fits. */
   exceededMinor: number;
 }
 
@@ -623,6 +630,12 @@ export interface SimulatePurchasePlanInput {
   /** The plan's own target date; every item must be paid off by it. */
   targetDate?: DateString;
   items: PlanItemOption[];
+  /**
+   * Statement payments and expected charges on the cards over the horizon.
+   * Without it nothing is paid down and nothing else is charged, so the peak
+   * is today's debt plus the whole plan.
+   */
+  cardActivity?: CardActivity;
 }
 
 export interface PurchasePlanSimulation {
@@ -722,31 +735,70 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     );
   }
 
-  // Card limits are shared, so they are summed across the plan rather than
-  // checked per item. Two 60%-of-limit purchases both pass alone and fail here.
-  const cardById = new Map<string, CardLoad>();
+  // Card limits are shared, so the plan's items are charged together rather
+  // than checked one by one: two 60%-of-limit purchases both pass alone and
+  // fail here. And a limit is freed as statements are paid, so what counts is
+  // the most in use on any one day, not the sum of everything ever charged.
+  const { asOf, horizonEnd } = input.forecastInput;
+  const activity = input.cardActivity ?? { debtPayments: [], charges: [] };
+  const planCharges = new Map<string, { load: CardLoad; charges: CardCharge[] }>();
   for (const item of input.items) {
     const card = item.option.card;
     if (!card) continue;
-    const load = cardById.get(card.cardId) ?? {
-      cardId: card.cardId,
-      label: card.label ?? card.cardId,
-      creditLimitMinor: card.creditLimitMinor,
-      committedMinor: card.committedMinor,
-      planChargedMinor: 0,
-      exceededMinor: 0,
+    const entry = planCharges.get(card.cardId) ?? {
+      load: {
+        cardId: card.cardId,
+        label: card.label ?? card.cardId,
+        creditLimitMinor: card.creditLimitMinor,
+        committedMinor: card.committedMinor,
+        planChargedMinor: 0,
+        baselinePeakMinor: 0,
+        baselinePeakDate: asOf,
+        peakMinor: 0,
+        peakDate: asOf,
+        exceededMinor: 0,
+      },
+      charges: [],
     };
-    load.planChargedMinor += item.option.totalCostMinor;
-    cardById.set(card.cardId, load);
+    entry.load.planChargedMinor += item.option.totalCostMinor;
+    // The issuer blocks the whole purchase on the day it is made and frees
+    // each instalment when the statement billing it is paid.
+    for (const event of item.option.cashEvents) {
+      if (event.amountMinor >= 0) continue;
+      entry.charges.push({
+        cardId: card.cardId,
+        chargedAt: item.purchaseDate ?? asOf,
+        settlesAt: event.expectedAt,
+        amountMinor: -event.amountMinor,
+      });
+    }
+    planCharges.set(card.cardId, entry);
   }
-  const cards = [...cardById.values()].map((load) => ({
-    ...load,
-    exceededMinor: Math.max(0, load.committedMinor + load.planChargedMinor - load.creditLimitMinor),
-  }));
+  const cards = [...planCharges.values()].map(({ load, charges }): CardLoad => {
+    const usage = {
+      asOf,
+      horizonEnd,
+      committedMinor: load.committedMinor,
+      debtPayments: activity.debtPayments.filter((payment) => payment.cardId === load.cardId),
+    };
+    const expected = activity.charges.filter((charge) => charge.cardId === load.cardId);
+    const baseline = peakCardUsage({ ...usage, charges: expected });
+    const withPlan = peakCardUsage({ ...usage, charges: [...expected, ...charges] });
+    return {
+      ...load,
+      baselinePeakMinor: baseline.peakMinor,
+      baselinePeakDate: baseline.peakDate,
+      peakMinor: withPlan.peakMinor,
+      peakDate: withPlan.peakDate,
+      exceededMinor: Math.max(0, withPlan.peakMinor - load.creditLimitMinor),
+    };
+  });
   for (const load of cards) {
     if (load.exceededMinor > 0) {
       rejections.push("CREDIT_LIMIT_EXCEEDED");
-      reasons.push(`${load.label} goes ${load.exceededMinor} over its limit once every item on it is charged`);
+      reasons.push(
+        `${load.label} reaches ${load.peakMinor} of its ${load.creditLimitMinor} limit on ${load.peakDate}, ${load.exceededMinor} over`,
+      );
     }
   }
 

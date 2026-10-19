@@ -77,6 +77,15 @@ Uma compra no cartão tem duas dimensões separadas:
 
 `nominalCycleFor` decide em qual fatura uma compra cai: comprar no dia 24 e no dia 26, com fechamento no 25, difere em um mês inteiro de float — e errar isso desloca todas as parcelas seguintes. Ciclos reais (`CreditCardBillingCycle`) sobrescrevem a configuração nominal sempre que existirem.
 
+### Uso do limite no tempo
+
+No plano de compras, o limite é checado pelo **pico de uso** no horizonte (`peakCardUsage`), não pela soma de tudo o que o plano cobra. No fim de cada dia, o uso é:
+
+- o que o cartão deve hoje, menos as faturas pagas até ali (`debtPaymentsFromForecast`), nunca abaixo de zero, porque um pagamento não libera mais do que a dívida que quita;
+- mais toda cobrança feita e ainda não paga.
+
+Uma compra parcelada bloqueia o valor inteiro no dia da compra e libera cada parcela no vencimento da fatura que a cobra, como o emissor faz. A parte dos budgets que vai para o cartão entra como cobrança diária e é liberada no vencimento da fatura correspondente. O resultado mostra o pico com e sem o plano, e a data de cada um. O comparator e o recomendador de opções ainda usam a soma.
+
 `expandInstallmentTail` reproduz a regra do Entropy: uma parcela que já existe como fato (`N`) nunca é reprojetada — apenas `N+1 … M`. A última parcela absorve o resto da divisão, de modo que a cauda soma exatamente o valor em aberto.
 
 ## Comparator e recomendação

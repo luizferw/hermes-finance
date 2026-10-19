@@ -148,6 +148,12 @@ describe("projectBudgetConsumption", () => {
       ["budget:market:2026-10:card:card-x:2026-10", "2026-11-05"],
       ["budget:market:2026-10:card:card-x:2026-11", "2026-12-05"],
     ]);
+    // The same money, day by day, for the card's limit: spent each day, freed
+    // when the statement that event settles is paid.
+    expect(result.cardCharges).toHaveLength(13);
+    expect(total(cardEvents)).toBe(-result.cardCharges.reduce((sum, charge) => sum + charge.amountMinor, 0));
+    expect(result.cardCharges[0]).toMatchObject({ cardId: card.id, chargedAt: AS_OF, settlesAt: "2026-11-05" });
+    expect(result.cardCharges.at(-1)).toMatchObject({ chargedAt: "2026-10-31", settlesAt: "2026-12-05" });
   });
 
   it("treats spending on a card that is no longer active as cash", () => {

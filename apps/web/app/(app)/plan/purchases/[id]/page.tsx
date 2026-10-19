@@ -323,10 +323,13 @@ function HorizonImpact({
                 key={card.cardId}
                 className="flex items-center justify-between gap-2 py-1.5 text-xs first:pt-0 last:pb-0"
               >
-                <span>{card.label}</span>
+                <span>
+                  {card.label}
+                  <span className="ml-2 text-muted-foreground">peak on {formatDate(card.peakDate)}</span>
+                </span>
                 <span className="flex items-center gap-2">
                   <span className="font-amount tabular-nums text-muted-foreground">
-                    {formatMoney(card.committedMinor + card.planChargedMinor, currencyCode)}
+                    {formatMoney(card.peakMinor, currencyCode)}
                     {" / "}
                     {formatMoney(card.creditLimitMinor, currencyCode)}
                   </span>

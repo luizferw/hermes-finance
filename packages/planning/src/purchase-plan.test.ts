@@ -125,6 +125,48 @@ describe("simulatePurchasePlan", () => {
     expect(result.feasible).toBe(false);
   });
 
+  it("frees the limit a paid statement held before a later purchase is charged", () => {
+    const card = { cardId: "card-1", label: "Inter", creditLimitMinor: 300_000, committedMinor: 150_000 };
+    const crib = { ...cardItem("crib", 200_000, ["2026-11-10", "2026-12-10"], card), purchaseDate: "2026-10-20" };
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [crib],
+      cardActivity: {
+        debtPayments: [{ cardId: "card-1", paidAt: "2026-10-10", amountMinor: 150_000 }],
+        charges: [],
+      },
+    });
+
+    const load = result.cards[0]!;
+    // Summed, 150 000 + 200 000 is over the limit; by the 20th the debt is paid.
+    expect(load).toMatchObject({
+      baselinePeakMinor: 150_000,
+      baselinePeakDate: "2026-09-07",
+      peakMinor: 200_000,
+      peakDate: "2026-10-20",
+      exceededMinor: 0,
+    });
+    expect(result.rejections).not.toContain("CREDIT_LIMIT_EXCEEDED");
+  });
+
+  it("counts spending the forecast already expects on the card against its limit", () => {
+    const card = { cardId: "card-1", label: "Inter", creditLimitMinor: 300_000, committedMinor: 0 };
+    const crib = { ...cardItem("crib", 250_000, ["2026-11-10"], card), purchaseDate: "2026-10-20" };
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [crib],
+      cardActivity: {
+        debtPayments: [],
+        charges: [{ cardId: "card-1", chargedAt: "2026-10-15", settlesAt: "2026-11-10", amountMinor: 80_000 }],
+      },
+    });
+
+    expect(result.cards[0]).toMatchObject({ baselinePeakMinor: 80_000, peakMinor: 330_000, exceededMinor: 30_000 });
+    expect(result.rejections).toContain("CREDIT_LIMIT_EXCEEDED");
+  });
+
   it("keeps two cards' limits independent", () => {
     const result = simulatePurchasePlan({
       forecastInput,

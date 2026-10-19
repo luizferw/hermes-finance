@@ -31,6 +31,7 @@ export interface BudgetConsumption extends BudgetConsumptionResult {
 const EMPTY: BudgetConsumption = {
   estimates: [],
   events: [],
+  cardCharges: [],
   blockers: [],
   budgetNames: new Map(),
 };

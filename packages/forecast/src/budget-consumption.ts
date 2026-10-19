@@ -111,9 +111,24 @@ export interface BudgetConsumptionBlocker {
   categoryId: string;
 }
 
+/**
+ * One day's estimated spending on a card: it takes up the card's limit on the
+ * day it is spent and frees it when the statement billing it is paid — the
+ * date of the matching card event.
+ */
+export interface BudgetCardCharge {
+  cardId: string;
+  chargedAt: DateString;
+  settlesAt: DateString;
+  /** Positive magnitude. */
+  amountMinor: number;
+}
+
 export interface BudgetConsumptionResult {
   estimates: BudgetMonthEstimate[];
   events: ForecastEvent[];
+  /** The card share of `events`, day by day, for the cards' limits. */
+  cardCharges: BudgetCardCharge[];
   blockers: BudgetConsumptionBlocker[];
 }
 
@@ -218,7 +233,7 @@ function validate(input: BudgetConsumptionInput): void {
  */
 export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetConsumptionResult {
   validate(input);
-  const result: BudgetConsumptionResult = { estimates: [], events: [], blockers: [] };
+  const result: BudgetConsumptionResult = { estimates: [], events: [], cardCharges: [], blockers: [] };
   if (input.horizonEnd < input.asOf) return result;
 
   // A category in two budgets has no single remaining amount: either budget's
@@ -313,7 +328,9 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
       const from = month === currentMonth ? input.asOf : firstDay(month);
       const days: DateString[] = [];
       for (let day = from; day <= lastDay(month); day = addDaysIso(day, 1)) days.push(day);
-      result.events.push(...datedEvents(budget.id, month, remainingMinor, routes, days, cardById));
+      const dated = datedEvents(budget.id, month, remainingMinor, routes, days, cardById);
+      result.events.push(...dated.events);
+      result.cardCharges.push(...dated.cardCharges);
     }
   }
 
@@ -327,9 +344,10 @@ function datedEvents(
   routes: ConsumptionRoute[],
   days: DateString[],
   cardById: Map<string, ConsumptionCard>,
-): ForecastEvent[] {
-  if (amountMinor <= 0 || days.length === 0) return [];
+): { events: ForecastEvent[]; cardCharges: BudgetCardCharge[] } {
   const events: ForecastEvent[] = [];
+  const cardCharges: BudgetCardCharge[] = [];
+  if (amountMinor <= 0 || days.length === 0) return { events, cardCharges };
   const shares = splitByWeights(
     amountMinor,
     routes.map((route) => route.shareBasisPoints),
@@ -364,6 +382,9 @@ function datedEvents(
       const cycle = nominalCycleFor(day, card.closingDay, card.dueDay);
       const entry = byStatement.get(cycle.statementMonth) ?? { dueAt: cycle.dueAt, amountMinor: 0 };
       entry.amountMinor += perDay[dayIndex]!;
+      if (perDay[dayIndex]! > 0) {
+        cardCharges.push({ cardId: card.id, chargedAt: day, settlesAt: cycle.dueAt, amountMinor: perDay[dayIndex]! });
+      }
       byStatement.set(cycle.statementMonth, entry);
     });
     for (const [statementMonth, entry] of byStatement) {
@@ -380,5 +401,5 @@ function datedEvents(
     }
   });
 
-  return events;
+  return { events, cardCharges };
 }
