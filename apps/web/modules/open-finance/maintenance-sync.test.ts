@@ -61,6 +61,12 @@ describe.skipIf(!ARMED)("maintenance: sync every connection", () => {
       if (run?.stats.cardPaymentsPaired) {
         console.log(`  card payments paired: ${run.stats.cardPaymentsPaired}`);
       }
+      if (run?.stats.installmentPlansMerged) {
+        console.log(`  duplicate installment plans merged: ${run.stats.installmentPlansMerged}`);
+      }
+      if (run?.stats.installmentParcelsLinked) {
+        console.log(`  booked parcels linked: ${run.stats.installmentParcelsLinked}`);
+      }
       if (run?.stats.failedAccounts?.length) {
         console.log(`  failed accounts: ${JSON.stringify(run.stats.failedAccounts)}`);
       }

@@ -43,6 +43,17 @@ export interface ConsumptionSpend {
   cardId: string | null;
 }
 
+/** Where a committed amount comes from, so `committedMinor` can be taken apart. */
+export type CommitmentSourceKind = "bill" | "recurring_rule" | "projected_event" | "card_parcel";
+
+export interface CommitmentSource {
+  kind: CommitmentSourceKind;
+  /** The bill, rule, persisted event or card purchase id. */
+  id: string;
+  /** Human name: the bill or rule name, the event type, the purchase description. */
+  label: string;
+}
+
 /**
  * An outflow the forecast already projects in a category — a bill, a recurring
  * rule, a persisted event — dated when it is incurred, not when cash moves.
@@ -52,6 +63,8 @@ export interface ConsumptionCommitment {
   date: DateString;
   /** Positive magnitude. */
   amountMinor: number;
+  /** Optional provenance; without it the amount is reported as kind `other`. */
+  source?: CommitmentSource;
 }
 
 /**
@@ -67,6 +80,9 @@ export interface ConsumptionParcel {
   dueAt: DateString;
   /** Positive magnitude. */
   amountMinor: number;
+  /** The purchase the parcel belongs to, for `committedBySource`. */
+  purchaseId?: string;
+  label?: string;
 }
 
 export interface ConsumptionCard {
@@ -93,6 +109,32 @@ export interface ConsumptionRoute {
   shareBasisPoints: number;
 }
 
+/** One source's part of `committedMinor` in a month, summed over its occurrences. */
+export interface CommittedBySource {
+  kind: CommitmentSourceKind | "other";
+  sourceId: string | null;
+  label: string;
+  /** How many dated occurrences (bill instances, parcels, …) were summed. */
+  occurrences: number;
+  /** Earliest occurrence in the month. */
+  firstDate: DateString;
+  /** Positive magnitude. */
+  amountMinor: number;
+}
+
+/** How much of one month's remaining amount one route carries, and when it leaves. */
+export interface RouteAllocation {
+  /** null for cash. */
+  cardId: string | null;
+  shareBasisPoints: number;
+  /** This route's part of `remainingMinor`; the parts sum to it exactly. */
+  amountMinor: number;
+  /** The part settling after the horizon (a card statement due past it). */
+  beyondHorizonMinor: number;
+  /** Dates the route's events land on (cash: first and last day; card: each statement due date). */
+  settlementDates: DateString[];
+}
+
 export interface BudgetMonthEstimate {
   budgetId: string;
   /** `YYYY-MM`. */
@@ -100,9 +142,20 @@ export interface BudgetMonthEstimate {
   plannedMinor: number;
   spentMinor: number;
   committedMinor: number;
+  /** `committedMinor` taken apart by source; the amounts sum to it exactly. */
+  committedBySource: CommittedBySource[];
   /** `max(0, planned − spent − committed)`: what the forecast sets aside. */
   remainingMinor: number;
   routes: ConsumptionRoute[];
+  /** `remainingMinor` split by route; sums to it exactly. */
+  allocations: RouteAllocation[];
+  /**
+   * Part of `remainingMinor` whose events fall after `horizonEnd` — a card share
+   * billed on a statement due past it. Those events exist but the forecast over
+   * this horizon does not carry them; inside it, the events sum to
+   * `remainingMinor − beyondHorizonMinor`.
+   */
+  beyondHorizonMinor: number;
 }
 
 export interface BudgetConsumptionBlocker {
@@ -230,6 +283,11 @@ function validate(input: BudgetConsumptionInput): void {
  * share leaves on the due date of the statement open on the day it would be
  * spent. Card shares stay separate events rather than joining the statement's
  * total, which would relabel a guess with the statement's confidence.
+ *
+ * Every unit of `remaining` becomes an event, whatever the horizon. A card share
+ * spent late in a month can settle on a statement due after `horizonEnd`; that
+ * event still exists, but a forecast over the horizon drops it, so each estimate
+ * reports it as `beyondHorizonMinor` instead of letting it vanish.
  */
 export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetConsumptionResult {
   validate(input);
@@ -267,6 +325,11 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
       categoryId: parcel.categoryId,
       date: closesAt < input.asOf ? input.asOf : closesAt,
       amountMinor: parcel.amountMinor,
+      source: {
+        kind: "card_parcel",
+        id: parcel.purchaseId ?? parcel.cardId,
+        label: parcel.label ?? "card parcel",
+      },
     });
   }
   const currentMonth = monthOf(input.asOf);
@@ -310,20 +373,9 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
       if (planned === null) continue;
 
       const spentMinor = spentByMonth.get(month) ?? 0;
-      const committedMinor = commitments
-        .filter((commitment) => monthOf(commitment.date) === month)
-        .reduce((sum, commitment) => sum + commitment.amountMinor, 0);
+      const inMonth = commitments.filter((commitment) => monthOf(commitment.date) === month);
+      const committedMinor = inMonth.reduce((sum, commitment) => sum + commitment.amountMinor, 0);
       const remainingMinor = Math.max(0, planned - spentMinor - committedMinor);
-
-      result.estimates.push({
-        budgetId: budget.id,
-        month,
-        plannedMinor: planned,
-        spentMinor,
-        committedMinor,
-        remainingMinor,
-        routes,
-      });
 
       const from = month === currentMonth ? input.asOf : firstDay(month);
       const days: DateString[] = [];
@@ -331,10 +383,69 @@ export function projectBudgetConsumption(input: BudgetConsumptionInput): BudgetC
       const dated = datedEvents(budget.id, month, remainingMinor, routes, days, cardById);
       result.events.push(...dated.events);
       result.cardCharges.push(...dated.cardCharges);
+
+      // Reported per route from the events themselves, so the parts can never
+      // disagree with what the forecast actually carries.
+      const allocations = routes.map((route, index): RouteAllocation => {
+        const own = dated.events.filter((event) => dated.routeOf.get(event.logicalKey) === index);
+        return {
+          cardId: route.cardId,
+          shareBasisPoints: route.shareBasisPoints,
+          // Events are outflows; subtracting them sums the magnitudes (and an
+          // empty route is 0, not −0).
+          amountMinor: own.reduce((sum, event) => sum - event.amountMinor, 0),
+          beyondHorizonMinor: own
+            .filter((event) => event.expectedAt > input.horizonEnd)
+            .reduce((sum, event) => sum - event.amountMinor, 0),
+          settlementDates:
+            route.cardId === null
+              ? [...new Set([own[0]?.expectedAt, own.at(-1)?.expectedAt].filter((date): date is string => !!date))]
+              : own.map((event) => event.expectedAt),
+        };
+      });
+
+      result.estimates.push({
+        budgetId: budget.id,
+        month,
+        plannedMinor: planned,
+        spentMinor,
+        committedMinor,
+        committedBySource: committedBySource(inMonth),
+        remainingMinor,
+        routes,
+        allocations,
+        beyondHorizonMinor: allocations.reduce((sum, allocation) => sum + allocation.beyondHorizonMinor, 0),
+      });
     }
   }
 
   return result;
+}
+
+/** Groups a month's commitments by source, in order of first occurrence. */
+function committedBySource(commitments: ConsumptionCommitment[]): CommittedBySource[] {
+  const bySource = new Map<string, CommittedBySource>();
+  const sorted = [...commitments].sort((left, right) => left.date.localeCompare(right.date));
+  for (const commitment of sorted) {
+    const kind = commitment.source?.kind ?? "other";
+    const sourceId = commitment.source?.id ?? null;
+    const key = `${kind}:${sourceId ?? ""}`;
+    const entry = bySource.get(key);
+    if (entry) {
+      entry.occurrences += 1;
+      entry.amountMinor += commitment.amountMinor;
+      continue;
+    }
+    bySource.set(key, {
+      kind,
+      sourceId,
+      label: commitment.source?.label ?? "unlabelled commitment",
+      occurrences: 1,
+      firstDate: commitment.date,
+      amountMinor: commitment.amountMinor,
+    });
+  }
+  return [...bySource.values()];
 }
 
 function datedEvents(
@@ -344,10 +455,12 @@ function datedEvents(
   routes: ConsumptionRoute[],
   days: DateString[],
   cardById: Map<string, ConsumptionCard>,
-): { events: ForecastEvent[]; cardCharges: BudgetCardCharge[] } {
+): { events: ForecastEvent[]; cardCharges: BudgetCardCharge[]; routeOf: Map<string, number> } {
   const events: ForecastEvent[] = [];
   const cardCharges: BudgetCardCharge[] = [];
-  if (amountMinor <= 0 || days.length === 0) return { events, cardCharges };
+  /** Which route (index into `routes`) produced each event, by logical key. */
+  const routeOf = new Map<string, number>();
+  if (amountMinor <= 0 || days.length === 0) return { events, cardCharges, routeOf };
   const shares = splitByWeights(
     amountMinor,
     routes.map((route) => route.shareBasisPoints),
@@ -364,6 +477,7 @@ function datedEvents(
       days.forEach((day, dayIndex) => {
         if (perDay[dayIndex]! <= 0) return;
         const key = `budget:${budgetId}:${month}:cash:${day}`;
+        routeOf.set(key, index);
         events.push({
           id: key,
           logicalKey: key,
@@ -390,6 +504,7 @@ function datedEvents(
     for (const [statementMonth, entry] of byStatement) {
       if (entry.amountMinor <= 0) continue;
       const key = `budget:${budgetId}:${month}:card:${card.id}:${statementMonth}`;
+      routeOf.set(key, index);
       events.push({
         id: key,
         logicalKey: key,
@@ -401,5 +516,5 @@ function datedEvents(
     }
   });
 
-  return { events, cardCharges };
+  return { events, cardCharges, routeOf };
 }

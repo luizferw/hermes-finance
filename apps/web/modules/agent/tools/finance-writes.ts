@@ -266,7 +266,7 @@ const cardTools: WriteTool[] = [
     title: "Edit credit card",
     description:
       "Fix a card's name, issuer, credit limit (major units, in the card's currency), closing day, due day or paying account (paidFrom: a bank/cash/wallet account name, or null to clear) — the card screen's 'Edit'. Only the fields you pass change; the currency cannot be changed. " +
-      "Every derived number depends on these: available limit = limit − amount owed; the closing day decides which statement each future purchase/instalment lands on and the due day when that statement leaves cash in the forecast. Already-registered instalments keep the cycles they were assigned to.",
+      "Every derived number depends on these: available limit = limit − amount owed; the closing day decides which statement each future purchase/instalment lands on and the due day when that statement leaves cash in the forecast. Already-registered instalments keep the cycles they were assigned to. The limit and issuer are also written to the card's ledger account, so get_credit_cards and get_account always agree. For an Open Finance card, each sync re-checks the closing/due days against the bank's published bills and replaces them when they disagree.",
     risk: "write",
     requiredScope: "plans:write",
     input: z.object({
@@ -719,10 +719,10 @@ const billTools: WriteTool[] = [
     name: "mark_bill_paid",
     title: "Mark bill paid",
     description:
-      "Mark a bill's current occurrence paid (the Bills screen's 'Mark paid'). Always: lastPaidDate = paymentDate (default today) and nextDueDate advances one recurrence period (shown in the confirmation), so this occurrence leaves the forecast. Three mutually exclusive forms: " +
-      "(1) transactionId — link an existing transaction as the payment (candidates from get_bill_payment_candidates); nothing new is created, and a variable bill will project at that transaction's amount next time. Re-sending the same transactionId is a no-op. " +
+      "Mark a bill's current occurrence paid (the Bills screen's 'Mark paid'). Always: nextDueDate advances one recurrence period (shown in the confirmation), so this occurrence leaves the forecast, and lastPaidDate records when the payment happened as best known — the linked transaction's date in form (1), paymentDate (default today) in form (2), today in form (3). Three mutually exclusive forms: " +
+      "(1) transactionId — link an existing transaction as the payment (candidates from get_bill_payment_candidates); nothing new is created, lastPaidDate is that transaction's date, and a variable bill will project at that transaction's amount next time. The transaction must count in the ledger (imported, reviewed or posted); a pending or rejected one is refused. Re-sending the same transactionId is a no-op. " +
       "(2) amount (major units, what was actually paid) with optional paymentDate — creates a posted expense on the bill's account, dated paymentDate, in the bill's category and linked to the bill, and recomputes that account's balance; requires the bill to have an account. Use this for a variable bill with no matching transaction. " +
-      "(3) neither — the plain one-click case for a fixed bill: only the dates move. Never pass both transactionId and amount.",
+      "(3) neither — the plain one-click case for a fixed bill: only the dates move; lastPaidDate becomes today (the day it was marked, not proven payment) and lastPaidTransactionId stays null. Never pass both transactionId and amount.",
     risk: "write",
     requiredScope: "plans:write",
     input: z.object({
@@ -741,6 +741,9 @@ const billTools: WriteTool[] = [
       }
       const tx = args.transactionId ? await getTransaction(ctx.userId, args.transactionId) : null;
       if (args.transactionId && !tx) throw new Error("Transaction not found.");
+      if (tx && !["imported", "reviewed", "posted"].includes(tx.status)) {
+        throw new Error(`That transaction is ${tx.status}, so it doesn't count in your balances yet; approve it first.`);
+      }
       const payload: MarkBillPaidInput = {
         billId: bill.id,
         transactionId: args.transactionId,
@@ -761,7 +764,7 @@ const billTools: WriteTool[] = [
             label: "New expense",
             value: `${formatMajor(args.amount, bill.currencyCode)} on ${bill.account?.name ?? "its account"}`,
           },
-          { label: "Paid on", value: args.paymentDate ?? todayIso() },
+          { label: "Paid on", value: tx?.date ?? args.paymentDate ?? todayIso() },
           { label: "Next due", value: `${bill.nextDueDate} → ${advanceOnePeriod(bill)}` },
         ]),
         undoable: false,
@@ -1516,7 +1519,7 @@ export const financeWritesReadTools: ReadTool[] = [
     name: "get_bill_payment_candidates",
     title: "Bill payment candidates",
     description:
-      "Transactions that mark_bill_paid can link as a bill's payment — the same list the 'Mark paid' dialog offers. Returns expense transactions not yet linked to any bill and not deleted, on the bill's account (or on every account when the bill has none), newest first (by date, then creation), up to limit (default 15 like the dialog, max 100). " +
+      "Transactions that mark_bill_paid can link as a bill's payment — the same list the 'Mark paid' dialog offers. Returns expense transactions not yet linked to any bill and not deleted, in a ledger status (imported, reviewed or posted: pending and rejected rows are not money that left the account and are never offered), on the bill's account (or on every account when the bill has none), newest first (by date, then creation), up to limit (default 15 like the dialog, max 100). " +
       "Each row: id, date, description, merchant, amountMinor (signed ledger amount in minor units, negative for an expense) and currency (the bill's currency, which the dialog formats them in).",
     requiredScope: "finance:read",
     input: z.object({

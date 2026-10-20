@@ -160,6 +160,17 @@ A Pluggy emite **uma transação por parcela**, não uma pela compra. A primeira
 pode começar no meio); as seguintes só marcam a própria parcela como `billed`. Nenhum evento
 de caixa por parcela — `projectStatements` emite um por ciclo (DOMAIN.md).
 
+Como a parcela é reconhecida, por que uma parcela relida pela janela nunca abre outro plano,
+a extensão do plano para trás quando uma parcela anterior chega depois, e a fusão de planos
+duplicados que roda a cada sync (`repairInstallmentPlans`, contada em `installmentPlansMerged`
+e `installmentParcelsLinked` nas stats do run): DOMAIN.md, "Parcelas".
+
+### Dias do cartão
+
+Os dias de fechamento e vencimento são capturados na criação do cartão e corrigidos a cada
+sync pelas faturas publicadas (`reconcileCycleDays`): a fatura é fato, a descrição da fatura
+aberta pode estar velha. Regra em DOMAIN.md, "Cartão de crédito".
+
 ### `PENDING` é assimétrico
 
 No banco, `PENDING` é autorização que pode nunca liquidar: fica fora do saldo. No cartão,

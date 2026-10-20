@@ -239,6 +239,89 @@ describe("projectBudgetConsumption", () => {
     expect(commitmentsOnly.minimumBalanceMinor - withEstimate.minimumBalanceMinor).toBe(-total(events));
   });
 
+  it("accounts for every unit of the remaining amount, reporting what settles past the horizon", () => {
+    // The production case: Supermercado, 33 652 left on 20/10, paid mostly on
+    // Inter (closes 30, due 7). Spending on 31/10 lands on November's
+    // statement, due 07/12 — past a 30-day horizon. That share used to vanish
+    // from the projection without a word.
+    const inter = { id: "inter", closingDay: 30, dueDay: 7 };
+    const santander = { id: "santander", closingDay: 2, dueDay: 10 };
+    const scenario = (horizonEnd: string) =>
+      input({
+        asOf: "2026-10-20",
+        horizonEnd,
+        cards: [inter, santander],
+        spending: [
+          monthly("2026-08", 1_000, null),
+          monthly("2026-08", 120_000, inter.id),
+          monthly("2026-09", 6_000, santander.id),
+          { categoryId: GROCERIES, date: "2026-10-05", amountMinor: 51_348, cardId: null },
+        ],
+      });
+    const inHorizon = (events: ForecastEvent[], horizonEnd: string) =>
+      events.filter((event) => event.expectedAt <= horizonEnd);
+
+    const short = projectBudgetConsumption(scenario("2026-11-19"));
+    const october = short.estimates[0]!;
+    expect(october.remainingMinor).toBe(33_652);
+    // The parts always add up to the whole, route by route.
+    expect(october.allocations.reduce((sum, allocation) => sum + allocation.amountMinor, 0)).toBe(33_652);
+    const octoberEvents = short.events.filter((event) => event.logicalKey.includes(":2026-10:"));
+    expect(total(octoberEvents)).toBe(-33_652);
+    const interPart = october.allocations.find((allocation) => allocation.cardId === inter.id)!;
+    expect(interPart.settlementDates).toEqual(["2026-11-07", "2026-12-07"]);
+    // One day of twelve settles on 07/12.
+    expect(interPart.beyondHorizonMinor).toBeGreaterThan(0);
+    expect(october.beyondHorizonMinor).toBe(interPart.beyondHorizonMinor);
+    expect(total(inHorizon(octoberEvents, "2026-11-19"))).toBe(-(33_652 - october.beyondHorizonMinor));
+    // What the forecast over that horizon actually carries matches.
+    const forecast = buildForecast({
+      asOf: "2026-10-20",
+      horizonEnd: "2026-11-19",
+      balances: [{ accountId: "bank", amountMinor: 0, observedAt: "2026-10-20" }],
+      events: octoberEvents,
+    });
+    expect(forecast.days.at(-1)!.closingBalanceMinor).toBe(-(33_652 - october.beyondHorizonMinor));
+
+    // A horizon reaching October's due dates carries all of October; the last
+    // month always spills onto a statement due after it, and says how much.
+    const long = projectBudgetConsumption(scenario("2027-02-17"));
+    expect(long.estimates[0]!.beyondHorizonMinor).toBe(0);
+    for (const estimate of long.estimates) {
+      const own = long.events.filter((event) => event.logicalKey.startsWith(`budget:market:${estimate.month}:`));
+      expect(total(own)).toBe(-estimate.remainingMinor);
+      expect(total(inHorizon(own, "2027-02-17"))).toBe(-(estimate.remainingMinor - estimate.beyondHorizonMinor));
+    }
+    expect(long.estimates.at(-1)!.beyondHorizonMinor).toBeGreaterThan(0);
+  });
+
+  it("takes committed apart by source, summing to committedMinor", () => {
+    const card = { id: "card-x", closingDay: 25, dueDay: 5 };
+    const result = projectBudgetConsumption(
+      input({
+        cards: [card],
+        commitments: [
+          { categoryId: GROCERIES, date: "2026-10-25", amountMinor: 10_000, source: { kind: "bill", id: "b1", label: "Feira" } },
+          { categoryId: GROCERIES, date: "2026-10-28", amountMinor: 2_000, source: { kind: "recurring_rule", id: "r1", label: "Clube" } },
+          { categoryId: GROCERIES, date: "2026-10-21", amountMinor: 3_000, source: { kind: "recurring_rule", id: "r1", label: "Clube" } },
+          { categoryId: GROCERIES, date: "2026-10-30", amountMinor: 500 },
+        ],
+        projectedParcels: [
+          { categoryId: GROCERIES, cardId: card.id, dueAt: "2026-11-05", amountMinor: 4_000, purchaseId: "p1", label: "Atacado" },
+        ],
+      }),
+    );
+    const october = result.estimates[0]!;
+
+    expect(october.committedMinor).toBe(19_500);
+    expect(october.committedBySource).toEqual([
+      { kind: "recurring_rule", sourceId: "r1", label: "Clube", occurrences: 2, firstDate: "2026-10-21", amountMinor: 5_000 },
+      { kind: "bill", sourceId: "b1", label: "Feira", occurrences: 1, firstDate: "2026-10-25", amountMinor: 10_000 },
+      { kind: "card_parcel", sourceId: "p1", label: "Atacado", occurrences: 1, firstDate: "2026-10-25", amountMinor: 4_000 },
+      { kind: "other", sourceId: null, label: "unlabelled commitment", occurrences: 1, firstDate: "2026-10-30", amountMinor: 500 },
+    ]);
+  });
+
   it("rejects fractional or negative magnitudes", () => {
     expect(() =>
       projectBudgetConsumption(input({ commitments: [{ categoryId: GROCERIES, date: "2026-10-25", amountMinor: -1 }] })),

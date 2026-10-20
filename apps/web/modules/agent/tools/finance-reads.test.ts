@@ -220,6 +220,25 @@ afterAll(async () => {
 });
 
 describe("finance read tools", () => {
+  it("get_purchase_plan_impact takes a horizon, a scenario and a daily range", async () => {
+    const from = plusDays(10);
+    const to = plusDays(20);
+    const result = await run("get_purchase_plan_impact", {
+      planId,
+      horizonDays: 500,
+      scenario: "none",
+      includeDaily: true,
+      dailyFrom: from,
+      dailyTo: to,
+    });
+
+    expect(result.scenario).toBe("none");
+    expect(result.horizonDays).toBeGreaterThanOrEqual(500);
+    expect(result.daily.map((row: any) => row.date)[0]).toBe(from);
+    expect(result.daily.at(-1).date).toBe(to);
+    expect(result.daily).toHaveLength(11);
+  });
+
   it("get_methodology returns the structured explanation", async () => {
     const result = await run("get_methodology");
     expect(result).toBe(METHODOLOGY);
@@ -247,6 +266,28 @@ describe("finance read tools", () => {
     const statement = result.events.find((event: any) => event.sourceType === "card_statement");
     expect(statement.label).toBe(`Fatura Card ${stamp}`);
     expect(result.days[0]).toHaveProperty("closingBalanceMinor");
+  });
+
+  it("get_projection lists a date range, and compact days carry only their balances", async () => {
+    const full = await run("get_projection", { horizonDays: 40, includeEstimateEvents: true });
+    const from = plusDays(5);
+    const to = plusDays(15);
+    const ranged = await run("get_projection", { horizonDays: 40, includeEstimateEvents: true, from, to, compact: true });
+
+    expect(ranged.days.map((day: any) => day.date)).toEqual(
+      full.days.filter((day: any) => day.date >= from && day.date <= to).map((day: any) => day.date),
+    );
+    expect(ranged.days[0]).toEqual({
+      date: from,
+      openingBalanceMinor: full.days.find((day: any) => day.date === from).openingBalanceMinor,
+      inflowsMinor: full.days.find((day: any) => day.date === from).inflowsMinor,
+      outflowsMinor: full.days.find((day: any) => day.date === from).outflowsMinor,
+      closingBalanceMinor: full.days.find((day: any) => day.date === from).closingBalanceMinor,
+    });
+    expect(ranged.events.every((event: any) => event.expectedAt >= from && event.expectedAt <= to)).toBe(true);
+    // The headline still covers the whole horizon.
+    expect(ranged.minimumBalanceMinor).toBe(full.minimumBalanceMinor);
+    expect(ranged.listedFrom).toBe(from);
   });
 
   it("get_credit_cards includes the payment account", async () => {
@@ -372,6 +413,13 @@ describe("finance read tools", () => {
       beforeMinor: impact.baseline!.forecast.days[0]!.closingBalanceMinor,
       afterMinor: simulation.forecastAfter.days[0]!.closingBalanceMinor,
     });
+
+    // Switched off by the user: out of the projection, but listed.
+    expect(result.inactiveItems.map((item: any) => item.name)).toEqual(["Rug"]);
+    expect(result.itemResults.map((item: any) => item.label)).not.toContain("Rug");
+    expect(Object.keys(result.monthlyImpactMinor)).toEqual(Object.keys(result.monthlyImpactMinor).sort());
+    expect(result.horizonDays).toBe(impact.horizonDays);
+    expect(result.verdict).toHaveProperty("baselineBreach");
 
     const missing = await run("get_purchase_plan_impact", { planId: randomUUID() });
     expect(missing.error).toBe("not_found");

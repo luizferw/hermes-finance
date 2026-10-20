@@ -70,6 +70,9 @@ services:
       PLUGGY_CLIENT_SECRET: ${PLUGGY_CLIENT_SECRET:-}
       PLUGGY_BASE_URL: ${PLUGGY_BASE_URL:-https://api.pluggy.ai}
       PLUGGY_TIMEZONE_OFFSET_MINUTES: ${PLUGGY_TIMEZONE_OFFSET_MINUTES:--180}
+      # "Today" is the process's local date: every forecast, statement and due
+      # date starts from it. Left at UTC, a Brazilian evening is already tomorrow.
+      TZ: ${TZ:-UTC}
       PLUGGY_BACKFILL_DAYS: ${PLUGGY_BACKFILL_DAYS:-365}
       PLUGGY_SYNC_SCHEDULE: ${PLUGGY_SYNC_SCHEDULE:-0 11 * * *}
     ports:

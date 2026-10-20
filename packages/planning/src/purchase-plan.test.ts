@@ -373,3 +373,45 @@ describe("safe-to-spend surplus", () => {
     expect(result.safeToSpendSurplusBeforeMinor - result.safeToSpendSurplusAfterMinor).toBe(500_000);
   });
 });
+
+describe("an already-short baseline", () => {
+  const short = {
+    ...forecastInput,
+    balances: [{ accountId: "cash", amountMinor: -10_000, observedAt: "2026-09-07" }],
+  };
+  const card = { cardId: "inter", label: "Inter", creditLimitMinor: 1_000_000, committedMinor: 0 };
+
+  it("judges the plan by whether it lowers the trough, as the recommender does", () => {
+    const result = simulatePurchasePlan({
+      forecastInput: short,
+      hardReserveMinor: 0,
+      // Settles after the September salary: the trough stays at −10 000.
+      items: [cardItem("chair", 90_000, ["2026-10-10", "2026-11-10", "2026-12-10"], card)],
+    });
+
+    expect(result.minimumBalanceAfterMinor).toBe(result.minimumBalanceBeforeMinor);
+    expect(result.feasible).toBe(true);
+    expect(result.baselineBreach).toMatchObject({ minimumBalanceMinor: -10_000, floorMinor: 0 });
+
+    const deeper = simulatePurchasePlan({
+      forecastInput: short,
+      hardReserveMinor: 0,
+      items: [cashItem("desk", 5_000, "2026-09-10")],
+    });
+    expect(deeper.feasible).toBe(false);
+    expect(deeper.rejections).toEqual(["NEGATIVE_BALANCE"]);
+  });
+
+  it("keeps monthlyImpactMinor in chronological order whatever the item order", () => {
+    const result = simulatePurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [
+        cardItem("late", 30_000, ["2026-12-10"], card),
+        cardItem("early", 30_000, ["2026-10-10", "2026-11-10"], card),
+      ],
+    });
+
+    expect(Object.keys(result.monthlyImpactMinor)).toEqual(["2026-10", "2026-11", "2026-12"]);
+  });
+});

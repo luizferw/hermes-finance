@@ -271,6 +271,8 @@ describe("recommendPurchasePlan", () => {
     expect(result.baselineBreach).toEqual({
       minimumBalanceMinor: baselineTrough,
       minimumBalanceDate: "2026-09-20",
+      floorMinor: 0,
+      hardReserveMinor: 0,
     });
     expect(result.status).toBe("OK");
     // The cash option would have made the existing trough worse.
@@ -390,5 +392,29 @@ describe("cash preservation when troughs tie", () => {
     // Both leave the September trough alone, so the tie is decided by what a
     // single month has to absorb — R$400 rather than R$1,200.
     expect(result.choices[0]!.installments).toBe(6);
+  });
+
+  it("splits a tie between two cards by the limit left free at the peak, not by id", () => {
+    const nearlyFull = { cardId: "a-inter", label: "Inter", creditLimitMinor: 1_584_000, committedMinor: 1_014_994 };
+    const empty = { cardId: "b-santander", label: "Santander", creditLimitMinor: 1_386_125, committedMinor: 9_325 };
+    const months = ["2026-10-10", "2026-11-10", "2026-12-10"];
+    const onCard = (constraint: typeof CARD) => ({
+      ...card("notebook", 300_000, months, constraint),
+      id: `notebook:${constraint.cardId}`,
+      label: `3x on ${constraint.label}`,
+    });
+
+    const result = recommendPurchasePlan({
+      forecastInput,
+      hardReserveMinor: 0,
+      items: [item("notebook", [onCard(nearlyFull), onCard(empty)])],
+    });
+    const [choice] = result.choices;
+
+    expect(choice!.cardId).toBe("b-santander");
+    expect(choice!.decidedBy).toBe("cardHeadroomAtPeakMinor");
+    expect(choice!.runnerUpOptionId).toBe("notebook:a-inter");
+    expect(choice!.cardHeadroomAtPeakMinor).toBe(1_386_125 - 9_325 - 300_000);
+    expect(choice!.reasons.some((reason) => reason.includes("of limit left free at the peak"))).toBe(true);
   });
 });

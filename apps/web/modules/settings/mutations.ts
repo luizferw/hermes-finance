@@ -14,6 +14,12 @@ const updateSettingsSchema = z.object({
     .optional(),
   locale: z.string().min(2).max(20).optional(),
   dateFormat: z.string().min(2).max(30).optional(),
+  /** ISO 3166-1 alpha-2. Recorded only; nothing derives from it. */
+  country: z
+    .string()
+    .regex(/^[A-Za-z]{2}$/, "Use a 2-letter ISO 3166-1 code")
+    .transform((s) => s.toUpperCase())
+    .optional(),
 });
 
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;

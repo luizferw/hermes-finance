@@ -2,7 +2,12 @@ import "server-only";
 import { and, asc, eq, gte, inArray } from "drizzle-orm";
 import { creditCardBillingCycles, creditCards, db, paymentOptions, purchaseItems } from "@kosh/db";
 import { todayIso } from "@kosh/domain";
-import { nominalCycleDueDates, nominalCycleFor, type ForecastEvent } from "@hermes-finance/forecast";
+import {
+  nominalCycleDueDates,
+  nominalCycleFor,
+  type ForecastEvent,
+  type VariableSpendingScenario,
+} from "@hermes-finance/forecast";
 import {
   comparePaymentOptions,
   recommendPurchasePlan,
@@ -219,10 +224,17 @@ async function loadReserves(userId: string): Promise<{ hardReserveMinor: number;
   };
 }
 
+/** The forecast option for a scenario; omitted, the forecast's default (`budget`) applies. */
+function scenarioOption(scenario?: VariableSpendingScenario) {
+  return scenario ? { variableSpending: scenario } : {};
+}
+
 export interface SimulationContext {
   horizonDays?: number;
   /** Latest acceptable date for the option's final settlement. */
   maxLastPaymentDate?: string;
+  /** Whether the baseline carries the budgets' estimate; defaults to `budget`. */
+  scenario?: VariableSpendingScenario;
 }
 
 /**
@@ -237,7 +249,7 @@ export async function simulateUserPurchase(
   context: SimulationContext = {},
 ): Promise<PurchaseSimulation> {
   const horizonDays = context.horizonDays ?? 365;
-  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays, scenarioOption(context.scenario));
   const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
 
@@ -268,7 +280,7 @@ export async function compareUserPaymentOptions(
   context: SimulationContext = {},
 ): Promise<PaymentComparison> {
   const horizonDays = context.horizonDays ?? 365;
-  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays, scenarioOption(context.scenario));
   const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
   const engineOptions = await Promise.all(options.map((option) => toEnginePaymentOption(userId, option)));
@@ -304,10 +316,13 @@ export async function compareStoredPaymentOptions(userId: string, purchaseItemId
     orderBy: [asc(paymentOptions.totalCostMinor)],
   });
   if (stored.length === 0) {
-    return {
-      item,
-      comparison: { options: [], status: "INSUFFICIENT_DATA" as const, blockers: ["no payment option is registered for this item"] },
+    const comparison: PaymentComparison = {
+      options: [],
+      ranking: [],
+      status: "INSUFFICIENT_DATA",
+      blockers: ["no payment option is registered for this item"],
     };
+    return { item, comparison };
   }
 
   const comparison = await compareUserPaymentOptions(
@@ -343,6 +358,8 @@ export interface PlanCandidateItemInput {
 
 export interface RecommendPlanContext {
   horizonDays?: number;
+  /** Whether the baseline carries the budgets' estimate; defaults to `budget`. */
+  scenario?: VariableSpendingScenario;
   /** The whole plan's target date; an item without its own `neededBy` inherits it. */
   targetDate?: string;
 }
@@ -368,7 +385,7 @@ export async function recommendUserPurchasePlan(
   context: RecommendPlanContext = {},
 ): Promise<PurchasePlanRecommendation> {
   const horizonDays = context.horizonDays ?? 365;
-  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const detailed = await buildUserForecastDetailed(userId, horizonDays, scenarioOption(context.scenario));
   const { forecast } = detailed;
   const { hardReserveMinor, softReserves } = await loadReserves(userId);
   const cardContext = await loadCardContext(userId);

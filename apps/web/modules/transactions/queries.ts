@@ -22,10 +22,15 @@ function baseWhere(userId: string): SQL {
   return and(eq(transactions.userId, userId), isNull(transactions.deletedAt))!;
 }
 
+/** Statuses that count in balances and reports; pending and rejected do not. */
+export const LEDGER_STATUSES = ["imported", "reviewed", "posted"] as const;
+
 /**
  * Recent, unlinked expenses on one account — candidates for "this is the
  * transaction that actually paid this bill". Already-linked transactions
- * are excluded so the same payment can't be attached to two bills.
+ * are excluded so the same payment can't be attached to two bills, and only
+ * ledger statuses are offered: a pending or rejected row is not money that
+ * left the account, so it can't be the payment that settled a bill.
  */
 export async function listUnlinkedExpenseCandidates(userId: string, accountId: string | null, limit = 15) {
   return db.query.transactions.findMany({
@@ -33,6 +38,7 @@ export async function listUnlinkedExpenseCandidates(userId: string, accountId: s
       baseWhere(userId),
       accountId ? eq(transactions.accountId, accountId) : undefined,
       eq(transactions.type, "expense"),
+      inArray(transactions.status, [...LEDGER_STATUSES]),
       isNull(transactions.billId),
     ),
     orderBy: [desc(transactions.date), desc(transactions.createdAt)],
@@ -80,10 +86,8 @@ function minorThreshold(amountMajor: number): SQL {
   return sql`(CASE ${sql.join(branches, sql` `)} ELSE ${Math.round(amountMajor * 100)}::bigint END)`;
 }
 
-export async function listTransactions(
-  userId: string,
-  input: ListTransactionsInput,
-) {
+/** The Transactions page's filters as one WHERE, shared by the list and its sums. */
+function listWhere(userId: string, input: Omit<ListTransactionsInput, "page" | "pageSize">): SQL {
   const conditions: (SQL | undefined)[] = [baseWhere(userId)];
   if (input.q) {
     const like = `%${input.q}%`;
@@ -105,7 +109,15 @@ export async function listTransactions(
       ),
     );
   }
-  if (input.categoryId) conditions.push(eq(transactions.categoryId, input.categoryId));
+  if (input.uncategorized) conditions.push(isNull(transactions.categoryId));
+  else if (input.categoryId) conditions.push(eq(transactions.categoryId, input.categoryId));
+  if (input.tagId) {
+    // Spelled out: inside a relational findMany drizzle renders every column
+    // reference with the root table's alias, which broke a typed subquery.
+    conditions.push(
+      sql`exists (select 1 from transaction_tags tt where tt.transaction_id = ${transactions.id} and tt.tag_id = ${input.tagId})`,
+    );
+  }
   if (input.status) conditions.push(eq(transactions.status, input.status));
   if (input.type) conditions.push(eq(transactions.type, input.type));
   if (input.from) conditions.push(gte(transactions.date, input.from));
@@ -117,7 +129,14 @@ export async function listTransactions(
     conditions.push(lte(sql`ABS(${transactions.amountMinor})`, minorThreshold(input.maxAmount)));
   }
 
-  const where = and(...conditions);
+  return and(...conditions)!;
+}
+
+export async function listTransactions(
+  userId: string,
+  input: ListTransactionsInput,
+) {
+  const where = listWhere(userId, input);
   const [items, totalRow] = await Promise.all([
     db.query.transactions.findMany({
       where,
@@ -140,6 +159,29 @@ export async function listTransactions(
     page: input.page,
     pageSize: input.pageSize,
   };
+}
+
+/**
+ * Signed sum of every transaction matching the Transactions page's filters
+ * (all pages), per currency, with the row count. Amounts are the stored ones:
+ * negative = money out of the source account, so an incoming transfer seen
+ * through an account filter still sums with the source account's sign.
+ */
+export async function sumTransactions(
+  userId: string,
+  input: Omit<ListTransactionsInput, "page" | "pageSize">,
+): Promise<Array<{ currencyCode: string; sumMinor: number; count: number }>> {
+  const rows = await db
+    .select({
+      currencyCode: transactions.currencyCode,
+      sumMinor: sql<string>`coalesce(sum(${transactions.amountMinor}), 0)`,
+      count: count(),
+    })
+    .from(transactions)
+    .where(listWhere(userId, input))
+    .groupBy(transactions.currencyCode)
+    .orderBy(transactions.currencyCode);
+  return rows.map((r) => ({ currencyCode: r.currencyCode, sumMinor: Number(r.sumMinor), count: r.count }));
 }
 
 export async function getTransaction(userId: string, id: string) {

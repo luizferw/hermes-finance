@@ -37,6 +37,19 @@ describe("computeConfidence", () => {
     expect(r.score).toBe(100);
   });
 
+  it("obligations are not covered when the net liquid balance is negative", () => {
+    const r = computeConfidence({
+      ...base,
+      liquidAssetsMinor: -457_200,
+      avgMonthlySpendMinor: 500_000,
+      upcomingBillsTotalMinor: 2_690,
+    });
+    const obligations = r.factors.find((f) => f.key === "obligations")!;
+    expect(obligations.score).toBe(55);
+    expect(obligations.note).toBe("What's due exceeds your cash");
+    expect(r.factors.find((f) => f.key === "runway")!.score).toBe(0);
+  });
+
   it("a healthy financial picture lands secure", () => {
     const r = computeConfidence({
       ...base,

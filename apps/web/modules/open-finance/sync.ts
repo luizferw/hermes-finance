@@ -46,7 +46,9 @@ import { resolveAccountLink } from "./link";
 import {
   ensureCreditCard,
   flagUnreconciledCycles,
+  reconcileCycleDays,
   registerSyncedPurchase,
+  repairInstallmentPlans,
   syncBills,
 } from "./cards";
 import type { Trx } from "./types";
@@ -264,6 +266,16 @@ export async function syncConnection(
         ];
       }
     }
+
+    // Heals what an older sync left in the installment ledger — one purchase
+    // split across several plans, parcels booked but never linked — so the
+    // forecast stops counting future parcels more than once (PRD R3). It is
+    // idempotent and cheap when there is nothing to heal, so it simply runs
+    // every time rather than once as a migration that could miss a late case.
+    const repaired = await db.transaction((trx) => repairInstallmentPlans(trx, userId));
+    if (repaired.plansMerged > 0) stats.installmentPlansMerged = repaired.plansMerged;
+    if (repaired.parcelsLinked > 0) stats.installmentParcelsLinked = repaired.parcelsLinked;
+    if (repaired.zeroCyclesSettled > 0) stats.zeroCyclesSettled = repaired.zeroCyclesSettled;
 
     // Pairing runs after every account of this connection has landed, and looks
     // across all of them: the card and the account that pays its bill are
@@ -665,10 +677,15 @@ async function syncCardSide(
     return counts;
   }
 
-  const card = await trx.query.creditCards.findFirst({
+  const stored = await trx.query.creditCards.findFirst({
     where: eq(creditCards.id, creditCardId),
   });
-  if (!card) return counts;
+  if (!stored) return counts;
+  // Before anything keys a cycle or dates a parcel: the published bills decide
+  // the card's closing and due days, not the configuration captured once at
+  // creation (see `reconcileCycleDays`).
+  const days = await reconcileCycleDays(trx, stored, bills);
+  const card = { ...stored, defaultClosingDay: days.closingDay, defaultDueDay: days.dueDay };
 
   await trx
     .update(openFinanceAccountLinks)

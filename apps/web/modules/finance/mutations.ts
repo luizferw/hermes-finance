@@ -290,21 +290,38 @@ export async function updateCreditCardCore(userId: string, cardId: string, input
   const existing = await loadOwnedCreditCard(userId, cardId);
   if (data.paymentAccountId !== undefined) await assertAccountsOwned(userId, [data.paymentAccountId]);
   const currency = data.currencyCode ?? existing.currencyCode;
+  const creditLimitMinor =
+    data.creditLimit !== undefined ? majorToMinor(data.creditLimit, currency) : existing.creditLimitMinor;
+  const issuer = data.issuer ?? existing.issuer;
 
-  await db
-    .update(creditCards)
-    .set({
-      name: data.name ?? existing.name,
-      issuer: data.issuer ?? existing.issuer,
-      currencyCode: currency,
-      creditLimitMinor:
-        data.creditLimit !== undefined ? majorToMinor(data.creditLimit, currency) : existing.creditLimitMinor,
-      defaultClosingDay: data.defaultClosingDay ?? existing.defaultClosingDay,
-      defaultDueDay: data.defaultDueDay ?? existing.defaultDueDay,
-      paymentAccountId: data.paymentAccountId === undefined ? existing.paymentAccountId : data.paymentAccountId,
-      active: data.active ?? existing.active,
-    })
-    .where(eq(creditCards.id, cardId));
+  await db.transaction(async (trx) => {
+    await trx
+      .update(creditCards)
+      .set({
+        name: data.name ?? existing.name,
+        issuer,
+        currencyCode: currency,
+        creditLimitMinor,
+        defaultClosingDay: data.defaultClosingDay ?? existing.defaultClosingDay,
+        defaultDueDay: data.defaultDueDay ?? existing.defaultDueDay,
+        paymentAccountId: data.paymentAccountId === undefined ? existing.paymentAccountId : data.paymentAccountId,
+        active: data.active ?? existing.active,
+      })
+      .where(eq(creditCards.id, cardId));
+
+    // The card's ledger account carries its own copy of the limit and the
+    // institution, and the accounts screen reads that copy. Changing only the
+    // card left two different limits for the same card on two screens.
+    if (data.creditLimit !== undefined || data.issuer !== undefined) {
+      await trx
+        .update(accounts)
+        .set({
+          ...(data.creditLimit !== undefined ? { limitMinor: creditLimitMinor } : {}),
+          ...(data.issuer !== undefined ? { institution: issuer } : {}),
+        })
+        .where(and(eq(accounts.id, existing.accountId), eq(accounts.userId, userId)));
+    }
+  });
 
   await logAudit({
     userId,

@@ -64,13 +64,16 @@ async function computeTodaysConfidence(userId: string): Promise<ConfidenceResult
       getInboxCount(userId),
     ]);
 
+  // Net liquid cash: every liquid account's balance, overdrafts included.
+  // Summing only the positive balances let an overdrawn current account
+  // vanish, so "what's due is covered" read true with the net position below
+  // zero. This is the same total get_position reports as the liquid balance.
   const liquidAssetsMinor = accounts
     .filter(
       (a) =>
         a.currencyCode === settings.currencyCode &&
         !a.isArchived &&
-        LIQUID_TYPES.has(a.type) &&
-        a.currentBalanceMinor > 0,
+        LIQUID_TYPES.has(a.type),
     )
     .reduce((s, a) => s + a.currentBalanceMinor, 0);
 

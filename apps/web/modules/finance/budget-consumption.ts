@@ -26,6 +26,8 @@ const SPENT_STATUSES = ["imported", "reviewed", "posted"] as const;
 export interface BudgetConsumption extends BudgetConsumptionResult {
   /** Budget names keyed by id, for labelling estimates and blockers. */
   budgetNames: Map<string, string>;
+  /** Card names keyed by id, for labelling an estimate's routes. */
+  cardNames: Map<string, string>;
 }
 
 const EMPTY: BudgetConsumption = {
@@ -34,6 +36,7 @@ const EMPTY: BudgetConsumption = {
   cardCharges: [],
   blockers: [],
   budgetNames: new Map(),
+  cardNames: new Map(),
 };
 
 /**
@@ -49,7 +52,7 @@ export async function loadBudgetConsumption(input: {
   asOf: string;
   horizonEnd: string;
   currencyCode: string;
-  cards: Array<ConsumptionCard & { accountId: string }>;
+  cards: Array<ConsumptionCard & { accountId: string; name: string }>;
   commitments: ConsumptionCommitment[];
 }): Promise<BudgetConsumption> {
   const { userId, asOf, horizonEnd, currencyCode } = input;
@@ -114,7 +117,11 @@ export async function loadBudgetConsumption(input: {
     cards: input.cards.map(({ id, closingDay, dueDay }) => ({ id, closingDay, dueDay })),
   });
 
-  return { ...result, budgetNames: new Map(budgetRows.map((budget) => [budget.id, budget.name])) };
+  return {
+    ...result,
+    budgetNames: new Map(budgetRows.map((budget) => [budget.id, budget.name])),
+    cardNames: new Map(input.cards.map((card) => [card.id, card.name])),
+  };
 }
 
 /**
@@ -134,11 +141,14 @@ async function loadProjectedParcels(cardIds: string[], categoryIds: string[], fr
   const linked = alias(installments, "linked");
   const rows = await db
     .select({
+      purchaseId: creditCardPurchases.id,
       cardId: creditCardPurchases.creditCardId,
       dueAt: installments.expectedAt,
       amountMinor: installments.amountMinor,
       purchaseCategoryId: creditCardPurchases.categoryId,
       transactionCategoryId: transactions.categoryId,
+      merchant: creditCardPurchases.merchant,
+      description: transactions.description,
     })
     .from(installments)
     .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
@@ -161,6 +171,15 @@ async function loadProjectedParcels(cardIds: string[], categoryIds: string[], fr
   return rows.flatMap((row) => {
     const categoryId = row.purchaseCategoryId ?? row.transactionCategoryId;
     if (!categoryId || !budgeted.has(categoryId)) return [];
-    return [{ categoryId, cardId: row.cardId, dueAt: row.dueAt, amountMinor: row.amountMinor }];
+    return [
+      {
+        categoryId,
+        cardId: row.cardId,
+        dueAt: row.dueAt,
+        amountMinor: row.amountMinor,
+        purchaseId: row.purchaseId,
+        label: row.merchant ?? row.description,
+      },
+    ];
   });
 }

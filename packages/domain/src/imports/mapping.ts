@@ -37,12 +37,28 @@ export interface ParsedImportRow {
 }
 
 /**
+ * Header text reduced to bare ASCII letters, so "Descrição", "DESCRICAO" and
+ * "Descricao " compare equal. Accents are folded before non-letters are
+ * dropped; dropping first turned "Descrição" into "descrio" and nothing
+ * Portuguese ever matched.
+ */
+function normalizeHeader(header: string): string {
+  return header
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+}
+
+/**
  * Suggest a mapping from CSV headers using common bank-statement column
- * names (HDFC, ICICI, SBI, Axis exports and generic English headers).
+ * names: HDFC, ICICI, SBI, Axis and generic English exports, and Brazilian
+ * ones (Nubank, Inter, Itaú, Santander, Banco do Brasil: Data, Descrição,
+ * Histórico, Lançamento, Valor, Débito/Crédito, Documento).
  */
 export function guessMapping(headers: string[]): ColumnMapping {
   const mapping: ColumnMapping = {};
-  const normalized = headers.map((h) => h.toLowerCase().replace(/[^a-z]/g, ""));
+  const normalized = headers.map(normalizeHeader);
 
   const firstMatch = (candidates: string[]): string | undefined => {
     for (const candidate of candidates) {
@@ -65,15 +81,56 @@ export function guessMapping(headers: string[]): ColumnMapping {
     }
   };
 
-  assign("date", ["txndate", "transactiondate", "tradate", "date"]);
-  assign("valueDate", ["valuedate", "valuedt"]);
-  assign("debit", ["withdrawalamt", "withdrawal", "debit"]);
-  assign("credit", ["depositamt", "deposit", "credit"]);
-  if (!mapping.debit && !mapping.credit) {
-    assign("amount", ["amount", "amt"]);
+  // Specific transaction-date names first, then the value date, and only then
+  // the bare "date"/"data": a bare "data" is a substring of "Data Valor", so
+  // the value date has to be claimed before the generic pass runs.
+  assign("date", [
+    "txndate",
+    "transactiondate",
+    "tradate",
+    "datalancamento",
+    "datamovimento",
+    "datatransacao",
+    "datadacompra",
+    "datacompra",
+    "dataoperacao",
+  ]);
+  assign("valueDate", ["valuedate", "valuedt", "datavalor"]);
+  if (!mapping.date) assign("date", ["date", "data"]);
+  // A file whose only date column is the value date still needs a date.
+  if (!mapping.date && mapping.valueDate) {
+    mapping.date = mapping.valueDate;
+    delete mapping.valueDate;
   }
-  assign("description", ["narration", "description", "particulars", "remarks", "details"]);
-  assign("externalId", ["chqrefno", "refno", "referenceno", "reference", "transactionid", "txnid"]);
+  assign("debit", ["withdrawalamt", "withdrawal", "debit", "saida"]);
+  assign("credit", ["depositamt", "deposit", "credit", "entrada"]);
+  if (!mapping.debit && !mapping.credit) {
+    assign("amount", ["amount", "amt", "valor"]);
+  }
+  assign("description", [
+    "narration",
+    "description",
+    "particulars",
+    "remarks",
+    "details",
+    "descricao",
+    "historico",
+    "lancamento",
+    "detalhes",
+    "estabelecimento",
+    "title",
+  ]);
+  assign("externalId", [
+    "chqrefno",
+    "refno",
+    "referenceno",
+    "reference",
+    "transactionid",
+    "txnid",
+    "identificador",
+    "documento",
+    "docto",
+  ]);
   assign("utrNumber", ["utr"]);
   assign("upiReference", ["upiref", "upi"]);
 

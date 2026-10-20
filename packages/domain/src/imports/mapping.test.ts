@@ -26,6 +26,81 @@ describe("guessMapping", () => {
     expect(mapping.amount).toBe("Amount");
     expect(mapping.description).toBe("Description");
   });
+
+  it("maps Portuguese headers without accents", () => {
+    expect(guessMapping(["Data", "Descricao", "Valor"])).toEqual({
+      date: "Data",
+      description: "Descricao",
+      amount: "Valor",
+    });
+  });
+
+  it("folds accents before matching (Nubank account export)", () => {
+    const mapping = guessMapping(["Data", "Valor", "Identificador", "Descrição"]);
+    expect(mapping).toEqual({
+      date: "Data",
+      amount: "Valor",
+      externalId: "Identificador",
+      description: "Descrição",
+    });
+  });
+
+  it("prefers Descrição over Histórico and skips the balance (Inter)", () => {
+    const mapping = guessMapping(["Data Lançamento", "Histórico", "Descrição", "Valor", "Saldo"]);
+    expect(mapping.date).toBe("Data Lançamento");
+    expect(mapping.description).toBe("Descrição");
+    expect(mapping.amount).toBe("Valor");
+  });
+
+  it("maps Histórico when it is the only description column", () => {
+    const mapping = guessMapping(["DATA", "HISTÓRICO", "DOCUMENTO", "VALOR"]);
+    expect(mapping).toEqual({
+      date: "DATA",
+      description: "HISTÓRICO",
+      externalId: "DOCUMENTO",
+      amount: "VALOR",
+    });
+  });
+
+  it("maps Crédito/Débito columns as credit/debit (Santander)", () => {
+    const mapping = guessMapping([
+      "Data",
+      "Descrição",
+      "Docto",
+      "Situação",
+      "Crédito (R$)",
+      "Débito (R$)",
+      "Saldo (R$)",
+    ]);
+    expect(mapping.date).toBe("Data");
+    expect(mapping.description).toBe("Descrição");
+    expect(mapping.externalId).toBe("Docto");
+    expect(mapping.credit).toBe("Crédito (R$)");
+    expect(mapping.debit).toBe("Débito (R$)");
+    expect(mapping.amount).toBeUndefined();
+  });
+
+  it("maps Lançamento as the description when there is no Descrição (Itaú, BB)", () => {
+    expect(guessMapping(["data", "lançamento", "ag./origem", "valor"])).toMatchObject({
+      date: "data",
+      description: "lançamento",
+      amount: "valor",
+    });
+    const bb = guessMapping(["Data", "Lançamento", "Detalhes", "N° documento", "Valor", "Tipo Lançamento"]);
+    expect(bb).toMatchObject({ date: "Data", description: "Lançamento", externalId: "N° documento", amount: "Valor" });
+  });
+
+  it("keeps a value-date column apart from the transaction date", () => {
+    const mapping = guessMapping(["Data Valor", "Data", "Descrição", "Valor"]);
+    expect(mapping.valueDate).toBe("Data Valor");
+    expect(mapping.date).toBe("Data");
+  });
+
+  it("falls back to the value date when it is the only date column", () => {
+    const mapping = guessMapping(["Value Date", "Description", "Amount"]);
+    expect(mapping.date).toBe("Value Date");
+    expect(mapping.valueDate).toBeUndefined();
+  });
 });
 
 describe("applyMapping", () => {

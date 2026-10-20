@@ -4,6 +4,7 @@ import { asc, sql } from "drizzle-orm";
 import { db, systemJobs } from "@kosh/db";
 import { env } from "@/lib/env";
 import packageJson from "../../package.json";
+import { isJobStale } from "./schedule";
 
 export type CheckStatus = "ok" | "warn" | "error";
 
@@ -105,11 +106,10 @@ export async function getSystemHealth(): Promise<SystemHealth> {
   try {
     jobs = await db.query.systemJobs.findMany({ orderBy: [asc(systemJobs.name)] });
     const disabled = env().KOSH_DISABLE_JOBS;
-    const stale = jobs.filter(
-      (job) =>
-        job.lastRunAt &&
-        Date.now() - job.lastRunAt.getTime() > 1000 * 60 * 60 * 36,
-    );
+    // Staleness follows each job's own cron schedule: a monthly job that
+    // ran on the 1st is healthy all month (see ./schedule.ts).
+    const now = new Date();
+    const stale = jobs.filter((job) => isJobStale(job, now));
     const failing = jobs.filter((job) => job.lastStatus === "error");
     checks.push({
       id: "jobs",
@@ -128,7 +128,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
           : jobs.length === 0
             ? "No jobs registered yet — they register on first app start"
             : stale.length > 0
-              ? `${stale.map((j) => j.name).join(", ")} stale (>36h)`
+              ? `${stale.map((j) => j.name).join(", ")} stale (missed a scheduled run)`
               : `${jobs.length} jobs healthy`,
     });
   } catch {

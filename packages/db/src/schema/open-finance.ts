@@ -63,6 +63,12 @@ export interface OpenFinanceSyncStats {
   unmappedCategories?: string[];
   /** Mapped names this user has no category row for, so nothing was assigned. */
   missingCategories?: string[];
+  /** Duplicate installment plans of one purchase folded into a single plan (PRD R3). */
+  installmentPlansMerged?: number;
+  /** Booked parcels linked to the installment they settle, which turns it billed. */
+  installmentParcelsLinked?: number;
+  /** Provider cycles with nothing owed that had been left marked overdue. */
+  zeroCyclesSettled?: number;
 }
 
 /**

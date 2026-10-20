@@ -253,6 +253,37 @@ describe("budgets in the forecast", () => {
     expect(next).toMatchObject({ spentMinor: 0, committedMinor: BILL_MINOR + PARCEL_MINOR + OLD_PARCEL_MINOR });
   });
 
+  it("takes committed apart by source and names each route of the remaining amount", async () => {
+    const { estimates, horizonEnd } = await getBudgetForecast(userId, 2);
+    const current = estimates.find((estimate) => estimate.month === currentMonth)!;
+    const next = estimates.find((estimate) => estimate.month !== currentMonth)!;
+
+    expect(current.committedBySource).toEqual([
+      expect.objectContaining({ kind: "bill", label: "Grocery delivery club", occurrences: 1, amountMinor: BILL_MINOR }),
+    ]);
+    // Next month: the bill again plus the two booked-per-parcel purchases;
+    // the by-hand purchase is already whole in spent.
+    expect(next.committedBySource.map((source) => [source.kind, source.label, source.amountMinor]).sort()).toEqual(
+      [
+        ["bill", "Grocery delivery club", BILL_MINOR],
+        ["card_parcel", "Card purchase 1/3", PARCEL_MINOR],
+        ["card_parcel", "Card purchase 2/4", OLD_PARCEL_MINOR],
+      ].sort(),
+    );
+    for (const estimate of [current, next]) {
+      expect(estimate.committedBySource.reduce((sum, source) => sum + source.amountMinor, 0)).toBe(
+        estimate.committedMinor,
+      );
+      expect(estimate.routeMix.reduce((sum, route) => sum + route.amountMinor, 0)).toBe(estimate.remainingMinor);
+    }
+    // No spending in the three months before this one: it is all cash.
+    expect(current.routeMix).toEqual([
+      expect.objectContaining({ cardId: null, label: "Cash", shareBasisPoints: 10_000, amountMinor: REMAINING_MINOR, beyondHorizonMinor: 0 }),
+    ]);
+    expect(current.beyondHorizonMinor).toBe(0);
+    expect(horizonEnd >= next.month).toBe(true);
+  });
+
   it("keeps the commitments-only forecast one call away", async () => {
     const detailed = await buildUserForecastDetailed(userId, 70);
     const none = forecastForScenario(detailed, "none");

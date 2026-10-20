@@ -165,6 +165,7 @@ export function addStatementMonths(statementMonth: string, months: number): stri
 export interface BillingCycle {
   id: string;
   creditCardId: string;
+  /** `YYYY-MM`; a full date (`YYYY-MM-01`) is accepted and keyed by its month. */
   statementMonth: string;
   dueAt: DateString;
   /** Reconciled statement total in positive minor units, when the bill has arrived. */
@@ -210,7 +211,11 @@ export function projectStatements(cycles: BillingCycle[], charges: CycleCharge[]
 
     events.push({
       id: `statement:${cycle.id}`,
-      logicalKey: `statement:${cycle.creditCardId}:${cycle.statementMonth}`,
+      // Always `YYYY-MM`. A stored cycle's month is a date (`2026-11-01`), and
+      // passing it through gave one card two key shapes — which split the
+      // precedence `buildForecast` applies per key and hid the payment from
+      // `debtPaymentsFromForecast`, whose pattern only knows `YYYY-MM`.
+      logicalKey: `statement:${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`,
       expectedAt: cycle.dueAt,
       amountMinor: -Math.abs(totalMinor),
       sourceType: "card_statement",
@@ -345,7 +350,8 @@ export interface CardDebtAllocation {
   /** What each statement month still owes, as a positive magnitude. */
   billedByStatementMonth: Map<string, number>;
   /**
-   * Balance that landed on cycles already past due, and was not projected.
+   * Balance that landed on cycles already past due, or exceeded every cycle's
+   * charges, and was not projected.
    *
    * Not a rounding leftover and not necessarily money you owe on a future
    * statement — see the note on `allocateCardDebt` for why it is dropped rather
@@ -404,6 +410,11 @@ export function allocateCardDebt(
     if (cycle.dueAt < asOf) unplacedMinor += billedMinor;
     else billedByStatementMonth.set(cycle.statementMonth, billedMinor);
   }
+  // Balance larger than every charge the ledger holds — future parcels the
+  // ledger has not booked yet, or debt from before its history — found no
+  // cycle at all. It is just as unplaced as a spill onto a past-due cycle, and
+  // was being dropped without a trace.
+  unplacedMinor += Math.max(0, remainingMinor);
 
   return { billedByStatementMonth, unplacedMinor };
 }

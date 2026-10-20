@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, between, desc, eq, gte, inArray, isNull, lte, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, ne } from "drizzle-orm";
 import {
   accounts,
   bills,
@@ -189,6 +189,73 @@ export interface CardDebtUnplaced {
   cardName: string;
   /** How much of the balance found no statement, as a positive magnitude. */
   unplacedMinor: number;
+  /**
+   * Projected parcels of this card falling due from today on, at any date —
+   * the part of the balance the forecast does bill, parcel by parcel, on the
+   * statements that will charge them.
+   */
+  futureInstallmentsMinor: number;
+  /**
+   * `unplacedMinor − futureInstallmentsMinor`, never below zero: balance that
+   * neither a statement ahead nor a known future parcel accounts for. Zero on
+   * a card whose provider simply counts future parcels in its balance; above
+   * zero it is arrears, interest or a purchase the system never saw, and the
+   * forecast's statements understate the card by about this much.
+   */
+  unexplainedMinor: number;
+}
+
+/** One charge making up a projected statement, as the forecast counted it. */
+export type StatementComponent =
+  | {
+      /** The card's ledger debt allocated to this derived statement (`allocateCardDebt`). */
+      kind: "posted_charges";
+      amountMinor: number;
+    }
+  | {
+      kind: "installment";
+      amountMinor: number;
+      purchaseId: string;
+      description: string;
+      number: number;
+      totalInstallments: number;
+      status: "projected" | "billed" | "paid" | "cancelled";
+    }
+  | {
+      /** A bill charged to the card, on the statement open the day it posts. */
+      kind: "card_bill";
+      amountMinor: number;
+      billId: string;
+      name: string;
+      chargedAt: string;
+    };
+
+/**
+ * A card statement the forecast settles inside the horizon, taken apart.
+ *
+ * `amountMinor` is exactly the cash event's magnitude: the confirmed total when
+ * the cycle has one (`confirmedTotalMinor`, which then wins over its parts),
+ * otherwise `componentsTotalMinor`.
+ */
+export interface ProjectedCardStatement {
+  cardId: string;
+  cardName: string;
+  /** `YYYY-MM`. */
+  statementMonth: string;
+  dueAt: string;
+  logicalKey: string;
+  eventId: string;
+  /**
+   * recorded / open_finance: a stored cycle; derived: inferred from the card's
+   * ledger; synthesized: a month with no cycle yet, opened only because a card
+   * bill or a projected parcel falls due in it.
+   */
+  cycleSource: "recorded" | "open_finance" | "derived" | "synthesized";
+  amountMinor: number;
+  confidence: Confidence;
+  confirmedTotalMinor: number | null;
+  componentsTotalMinor: number;
+  components: StatementComponent[];
 }
 
 export interface UserForecast {
@@ -197,6 +264,8 @@ export interface UserForecast {
   position: FinancePosition;
   /** Empty whenever every card's balance fits on statements still ahead. */
   cardDebtUnplaced: CardDebtUnplaced[];
+  /** Every statement settlement in the horizon, with what it is made of. */
+  cardStatements: ProjectedCardStatement[];
   /** Which variable-spending estimate `forecast` carries. */
   scenario: VariableSpendingScenario;
   /** Every projected commitment, before any budget estimate joins them. */
@@ -270,6 +339,7 @@ export async function buildUserForecastDetailed(
   const labels = new Map<string, string>();
   const events: ForecastEvent[] = [];
   const cardDebtUnplaced: CardDebtUnplaced[] = [];
+  const cardStatements: ProjectedCardStatement[] = [];
 
   // 1. Events already materialized with explicit provenance.
   const persisted = await db.query.projectedEvents.findMany({
@@ -282,7 +352,12 @@ export async function buildUserForecastDetailed(
   });
   for (const event of persisted) {
     if (event.categoryId && event.amountMinor < 0 && !event.resolvedByTransactionId) {
-      commitments.push({ categoryId: event.categoryId, date: event.expectedAt, amountMinor: -event.amountMinor });
+      commitments.push({
+        categoryId: event.categoryId,
+        date: event.expectedAt,
+        amountMinor: -event.amountMinor,
+        source: { kind: "projected_event", id: event.id, label: event.eventType },
+      });
     }
     labels.set(event.logicalKey, event.eventType);
     events.push({
@@ -357,7 +432,12 @@ export async function buildUserForecastDetailed(
   for (const bill of activeBills) {
     if (!bill.categoryId) continue;
     for (const occurrence of projectRecurrences([ruleForBill(bill)], commitmentRange)) {
-      commitments.push({ categoryId: bill.categoryId, date: occurrence.expectedAt, amountMinor: -occurrence.amountMinor });
+      commitments.push({
+        categoryId: bill.categoryId,
+        date: occurrence.expectedAt,
+        amountMinor: -occurrence.amountMinor,
+        source: { kind: "bill", id: bill.id, label: bill.name },
+      });
     }
   }
 
@@ -402,34 +482,68 @@ export async function buildUserForecastDetailed(
   recurring.forEach((rule, index) => {
     if (!rule.categoryId || rule.amountMinor >= 0) return;
     for (const occurrence of projectRecurrences([recurringRules[index]!], commitmentRange)) {
-      commitments.push({ categoryId: rule.categoryId, date: occurrence.expectedAt, amountMinor: -occurrence.amountMinor });
+      commitments.push({
+        categoryId: rule.categoryId,
+        date: occurrence.expectedAt,
+        amountMinor: -occurrence.amountMinor,
+        source: { kind: "recurring_rule", id: rule.id, label: rule.name },
+      });
     }
   });
 
   // 4. Credit-card statements: one cash settlement per billing cycle.
   if (cards.length > 0) {
-    const recordedCycles = await db.query.creditCardBillingCycles.findMany({
-      where: and(
-        inArray(creditCardBillingCycles.creditCardId, [...cardById.keys()]),
-        gte(creditCardBillingCycles.dueAt, asOf),
-        lte(creditCardBillingCycles.dueAt, horizonEnd),
-      ),
+    const cardIds = [...cardById.keys()];
+    const allRecorded = await db.query.creditCardBillingCycles.findMany({
+      where: inArray(creditCardBillingCycles.creditCardId, cardIds),
       orderBy: [asc(creditCardBillingCycles.dueAt)],
     });
-    // A settled cycle is a fact, not a projection: it leaves the active set.
-    const openCycles = recordedCycles.filter((cycle) => cycle.status !== "paid");
+    // A recorded cycle owns its month whatever its due date: deriving the same
+    // month from the ledger when the recorded one fell out of the window (it is
+    // past due, or the card's due day moved) projected it a second time under a
+    // `derived` id, as if no statement had ever been recorded.
     const recordedMonths = new Set(
-      openCycles.map((cycle) => `${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`),
+      allRecorded.map((cycle) => `${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`),
+    );
+    // A settled cycle is a fact, not a projection: it leaves the active set.
+    const openCycles = allRecorded.filter(
+      (cycle) => cycle.status !== "paid" && cycle.dueAt >= asOf && cycle.dueAt <= horizonEnd,
     );
 
-    const billingCycles: BillingCycle[] = openCycles.map((cycle) => ({
-      id: cycle.id,
-      creditCardId: cycle.creditCardId,
-      statementMonth: cycle.statementMonth,
-      dueAt: cycle.dueAt,
-      confirmedTotalMinor: cycle.confirmedTotalMinor ?? undefined,
-    }));
-    const charges = await loadCycleCharges(openCycles.map((cycle) => cycle.id));
+    const charges: CycleCharge[] = [];
+    const cycleSource = new Map<string, ProjectedCardStatement["cycleSource"]>();
+    const components = new Map<string, StatementComponent[]>();
+    const addCharge = (cycleId: string, component: StatementComponent) => {
+      charges.push({ billingCycleId: cycleId, amountMinor: component.amountMinor });
+      const list = components.get(cycleId) ?? [];
+      list.push(component);
+      components.set(cycleId, list);
+    };
+
+    const recordedId = (id: string) => `recorded:${id}`;
+    const billingCycles: BillingCycle[] = openCycles.map((cycle) => {
+      cycleSource.set(recordedId(cycle.id), cycle.source === "pluggy" ? "open_finance" : "recorded");
+      return {
+        // Prefixed so the statement event's id says where the cycle came from,
+        // as the derived and synthesized ones already do.
+        id: recordedId(cycle.id),
+        creditCardId: cycle.creditCardId,
+        statementMonth: cycle.statementMonth.slice(0, 7),
+        dueAt: cycle.dueAt,
+        confirmedTotalMinor: cycle.confirmedTotalMinor ?? undefined,
+      };
+    });
+    for (const charge of await loadCycleCharges(openCycles.map((cycle) => cycle.id))) {
+      addCharge(recordedId(charge.billingCycleId), {
+        kind: "installment",
+        amountMinor: charge.amountMinor,
+        purchaseId: charge.purchaseId,
+        description: charge.description,
+        number: charge.number,
+        totalInstallments: charge.totalInstallments,
+        status: charge.status,
+      });
+    }
 
     // A card imported from a bank export has no recorded cycle at all — only
     // ledger transactions. Without deriving its statements the same way
@@ -442,6 +556,7 @@ export async function buildUserForecastDetailed(
     const debtByAccountId = new Map(
       cardAccounts.map((account) => [account.id, Math.max(0, -account.currentBalanceMinor)]),
     );
+    const unplacedByCard = new Map<string, number>();
     for (const card of cards) {
       const derived = await deriveLedgerCycles(userId, card);
 
@@ -458,13 +573,7 @@ export async function buildUserForecastDetailed(
         debtByAccountId.get(card.accountId) ?? 0,
         asOf,
       );
-      if (allocation.unplacedMinor > 0) {
-        cardDebtUnplaced.push({
-          cardId: card.id,
-          cardName: card.name,
-          unplacedMinor: allocation.unplacedMinor,
-        });
-      }
+      if (allocation.unplacedMinor > 0) unplacedByCard.set(card.id, allocation.unplacedMinor);
 
       for (const [month, billedMinor] of allocation.billedByStatementMonth) {
         if (recordedMonths.has(`${card.id}:${month}`)) continue;
@@ -472,8 +581,9 @@ export async function buildUserForecastDetailed(
         if (!dueAt || dueAt < asOf || dueAt > horizonEnd) continue;
 
         const id = `derived:${card.id}:${month}`;
+        cycleSource.set(id, "derived");
         billingCycles.push({ id, creditCardId: card.id, statementMonth: month, dueAt });
-        charges.push({ billingCycleId: id, amountMinor: billedMinor });
+        addCharge(id, { kind: "posted_charges", amountMinor: billedMinor });
       }
     }
 
@@ -489,7 +599,7 @@ export async function buildUserForecastDetailed(
     // report. `projectStatements` rates it HIGH, or CONFIRMED once the real
     // statement total is recorded.
     const cycleIdByCardMonth = new Map(
-      billingCycles.map((cycle) => [`${cycle.creditCardId}:${cycle.statementMonth.slice(0, 7)}`, cycle.id]),
+      billingCycles.map((cycle) => [`${cycle.creditCardId}:${cycle.statementMonth}`, cycle.id]),
     );
     for (const bill of cardBills) {
       const card = cardByAccountId.get(bill.accountId!)!;
@@ -505,6 +615,7 @@ export async function buildUserForecastDetailed(
         if (cycleId === undefined) {
           cycleId = `bill-cycle:${card.id}:${nominal.statementMonth}`;
           cycleIdByCardMonth.set(key, cycleId);
+          cycleSource.set(cycleId, "synthesized");
           billingCycles.push({
             id: cycleId,
             creditCardId: card.id,
@@ -513,7 +624,13 @@ export async function buildUserForecastDetailed(
           });
         }
         // Charges are positive magnitudes; the rule's amount is an outflow.
-        charges.push({ billingCycleId: cycleId, amountMinor: Math.abs(occurrence.amountMinor) });
+        addCharge(cycleId, {
+          kind: "card_bill",
+          amountMinor: Math.abs(occurrence.amountMinor),
+          billId: bill.id,
+          name: bill.name,
+          chargedAt: occurrence.expectedAt,
+        });
       }
     }
 
@@ -528,28 +645,41 @@ export async function buildUserForecastDetailed(
     //
     // Only `projected` rows are added. A `billed` parcel already exists as a
     // transaction on the card and was counted above; adding it again would
-    // charge the same money twice (PRD R3).
+    // charge the same money twice (PRD R3). Nor is a parcel assigned to a
+    // recorded cycle: `loadCycleCharges` already counted it on that cycle, or
+    // the cycle is settled — adding it here doubled every statement of a
+    // purchase registered by hand.
     const projectedInstallments = await db
       .select({
         cardId: creditCardPurchases.creditCardId,
         expectedAt: installments.expectedAt,
         amountMinor: installments.amountMinor,
+        number: installments.number,
+        purchaseId: creditCardPurchases.id,
+        totalInstallments: installmentPlans.totalInstallments,
+        description: transactions.description,
       })
       .from(installments)
       .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
       .innerJoin(creditCardPurchases, eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId))
       .innerJoin(creditCards, eq(creditCards.id, creditCardPurchases.creditCardId))
+      .innerJoin(transactions, eq(transactions.id, creditCardPurchases.transactionId))
       .where(
         and(
           eq(creditCards.userId, userId),
           eq(installments.status, "projected"),
-          between(installments.expectedAt, asOf, horizonEnd),
+          isNull(installments.billingCycleId),
+          gte(installments.expectedAt, asOf),
         ),
-      );
+      )
+      .orderBy(asc(installments.expectedAt), asc(installments.id));
 
+    const futureParcelsByCard = new Map<string, number>();
     for (const installment of projectedInstallments) {
       const card = cardById.get(installment.cardId);
       if (!card) continue;
+      futureParcelsByCard.set(card.id, (futureParcelsByCard.get(card.id) ?? 0) + installment.amountMinor);
+      if (installment.expectedAt > horizonEnd) continue;
       // `expectedAt` is the parcel's due date, so the statement it belongs to is
       // the one that falls due then — the same inverse the provider's bills use,
       // which is what keeps a parcel and a bill landing on one cycle.
@@ -563,6 +693,7 @@ export async function buildUserForecastDetailed(
       if (cycleId === undefined) {
         cycleId = `installment-cycle:${card.id}:${statementMonth}`;
         cycleIdByCardMonth.set(key, cycleId);
+        cycleSource.set(cycleId, "synthesized");
         billingCycles.push({
           id: cycleId,
           creditCardId: card.id,
@@ -570,10 +701,49 @@ export async function buildUserForecastDetailed(
           dueAt: installment.expectedAt,
         });
       }
-      charges.push({ billingCycleId: cycleId, amountMinor: installment.amountMinor });
+      addCharge(cycleId, {
+        kind: "installment",
+        amountMinor: installment.amountMinor,
+        purchaseId: installment.purchaseId,
+        description: installment.description,
+        number: installment.number,
+        totalInstallments: installment.totalInstallments,
+        status: "projected",
+      });
+    }
+
+    for (const [cardId, unplacedMinor] of unplacedByCard) {
+      const futureInstallmentsMinor = futureParcelsByCard.get(cardId) ?? 0;
+      cardDebtUnplaced.push({
+        cardId,
+        cardName: cardById.get(cardId)!.name,
+        unplacedMinor,
+        futureInstallmentsMinor,
+        unexplainedMinor: Math.max(0, unplacedMinor - futureInstallmentsMinor),
+      });
     }
 
     const statementEvents = projectStatements(billingCycles, charges, range);
+    const cycleById = new Map(billingCycles.map((cycle) => [cycle.id, cycle]));
+    for (const event of statementEvents) {
+      const cycle = cycleById.get(event.id.slice("statement:".length));
+      if (!cycle) continue;
+      const parts = components.get(cycle.id) ?? [];
+      cardStatements.push({
+        cardId: cycle.creditCardId,
+        cardName: cardById.get(cycle.creditCardId)?.name ?? cycle.creditCardId,
+        statementMonth: cycle.statementMonth,
+        dueAt: cycle.dueAt,
+        logicalKey: event.logicalKey,
+        eventId: event.id,
+        cycleSource: cycleSource.get(cycle.id) ?? "synthesized",
+        amountMinor: -event.amountMinor,
+        confidence: event.confidence,
+        confirmedTotalMinor: cycle.confirmedTotalMinor ?? null,
+        componentsTotalMinor: parts.reduce((total, part) => total + part.amountMinor, 0),
+        components: parts,
+      });
+    }
     for (const cycle of billingCycles) {
       const card = cardById.get(cycle.creditCardId);
       if (card) labels.set(`statement:${cycle.creditCardId}:${cycle.statementMonth}`, `Fatura ${card.name}`);
@@ -592,6 +762,7 @@ export async function buildUserForecastDetailed(
     cards: cards.map((card) => ({
       id: card.id,
       accountId: card.accountId,
+      name: card.name,
       closingDay: card.defaultClosingDay,
       dueDay: card.defaultDueDay,
     })),
@@ -633,7 +804,16 @@ export async function buildUserForecastDetailed(
     `ms=${Math.round(performance.now() - startedAt)}`,
   );
 
-  return { forecast, labels, position, cardDebtUnplaced, scenario, commitmentEvents, budgetConsumption };
+  return {
+    forecast,
+    labels,
+    position,
+    cardDebtUnplaced,
+    cardStatements,
+    scenario,
+    commitmentEvents,
+    budgetConsumption,
+  };
 }
 
 function tagLabels(
@@ -650,17 +830,33 @@ function tagLabels(
   return events;
 }
 
-async function loadCycleCharges(cycleIds: string[]): Promise<CycleCharge[]> {
+/** Installments assigned to recorded cycles, with what a statement breakdown names them by. */
+async function loadCycleCharges(cycleIds: string[]) {
   if (cycleIds.length === 0) return [];
-  const rows = await db.query.installments.findMany({
-    where: and(
-      inArray(installments.billingCycleId, cycleIds),
-      inArray(installments.status, ["projected", "billed"]),
-    ),
-  });
-  return rows
-    .filter((row) => row.billingCycleId !== null)
-    .map((row) => ({ billingCycleId: row.billingCycleId!, amountMinor: row.amountMinor }));
+  return db
+    .select({
+      billingCycleId: installments.billingCycleId,
+      amountMinor: installments.amountMinor,
+      number: installments.number,
+      status: installments.status,
+      purchaseId: creditCardPurchases.id,
+      totalInstallments: installmentPlans.totalInstallments,
+      description: transactions.description,
+    })
+    .from(installments)
+    .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
+    .innerJoin(creditCardPurchases, eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId))
+    .innerJoin(transactions, eq(transactions.id, creditCardPurchases.transactionId))
+    .where(
+      and(
+        inArray(installments.billingCycleId, cycleIds),
+        inArray(installments.status, ["projected", "billed"]),
+      ),
+    )
+    .orderBy(asc(installments.expectedAt), asc(installments.id))
+    .then((rows) =>
+      rows.flatMap((row) => (row.billingCycleId === null ? [] : [{ ...row, billingCycleId: row.billingCycleId }])),
+    );
 }
 
 /** Backwards-compatible entry point returning only the forecast. */
@@ -936,9 +1132,13 @@ export async function getMonthlyOutlook(userId: string, months = 4): Promise<Mon
 
 export interface BudgetForecastEstimate extends BudgetMonthEstimate {
   budgetName: string;
+  /** `allocations` with each route named: 'Cash' or the card's name. */
+  routeMix: Array<BudgetMonthEstimate["allocations"][number] & { label: string }>;
 }
 
 export interface BudgetForecast {
+  /** Last day the forecast behind `outlook` covers; estimate events after it are `beyondHorizonMinor`. */
+  horizonEnd: string;
   outlook: MonthOutlook[];
   /** Per budget and month, how each scenario's estimate was reached. */
   estimates: BudgetForecastEstimate[];
@@ -971,12 +1171,20 @@ export async function getBudgetForecast(userId: string, months = 4): Promise<Bud
     estimatedVariableMinor: estimated.get(month) ?? 0,
   }));
   const shown = new Set(outlook.map((entry) => entry.month));
-  const { budgetNames } = detailed.budgetConsumption;
+  const { budgetNames, cardNames } = detailed.budgetConsumption;
   return {
+    horizonEnd: detailed.forecast.horizonEnd,
     outlook,
     estimates: detailed.budgetConsumption.estimates
       .filter((estimate) => shown.has(estimate.month))
-      .map((estimate) => ({ ...estimate, budgetName: budgetNames.get(estimate.budgetId) ?? estimate.budgetId })),
+      .map((estimate) => ({
+        ...estimate,
+        budgetName: budgetNames.get(estimate.budgetId) ?? estimate.budgetId,
+        routeMix: estimate.allocations.map((allocation) => ({
+          ...allocation,
+          label: allocation.cardId === null ? "Cash" : (cardNames.get(allocation.cardId) ?? allocation.cardId),
+        })),
+      })),
     blockers: detailed.budgetConsumption.blockers.map((blocker) => ({
       ...blocker,
       budgetName: budgetNames.get(blocker.budgetId) ?? blocker.budgetId,
@@ -1055,17 +1263,26 @@ export async function listCreditCards(userId: string) {
   });
   if (cards.length === 0) return [];
 
-  // Scoped to this user's cards: a tenant must never read another's schedule.
-  const cardIds = cards.map((card) => card.id);
-  const scheduled = await db.query.installments.findMany({
-    where: and(gte(installments.expectedAt, todayIso()), inArray(installments.status, ["projected", "billed"])),
-    with: { installmentPlan: { with: { creditCardPurchase: true } } },
-  });
+  // Scoped to this user's cards in the query itself: a tenant must never read
+  // another's schedule, not even to discard it afterwards.
+  const scheduled = await db
+    .select({ cardId: creditCardPurchases.creditCardId, amountMinor: installments.amountMinor })
+    .from(installments)
+    .innerJoin(installmentPlans, eq(installmentPlans.id, installments.installmentPlanId))
+    .innerJoin(creditCardPurchases, eq(creditCardPurchases.id, installmentPlans.creditCardPurchaseId))
+    .where(
+      and(
+        inArray(
+          creditCardPurchases.creditCardId,
+          cards.map((card) => card.id),
+        ),
+        gte(installments.expectedAt, todayIso()),
+        inArray(installments.status, ["projected", "billed"]),
+      ),
+    );
   const scheduledByCard = new Map<string, number>();
   for (const item of scheduled) {
-    const cardId = item.installmentPlan.creditCardPurchase.creditCardId;
-    if (!cardIds.includes(cardId)) continue;
-    scheduledByCard.set(cardId, (scheduledByCard.get(cardId) ?? 0) + item.amountMinor);
+    scheduledByCard.set(item.cardId, (scheduledByCard.get(item.cardId) ?? 0) + item.amountMinor);
   }
 
   return cards.map((card) => {
@@ -1074,7 +1291,12 @@ export async function listCreditCards(userId: string) {
     return {
       ...card,
       committedMinor,
-      /** Of the committed total, how much is already scheduled as installments. */
+      /**
+       * Instalment parcels of this card on statements due from today on:
+       * projected parcels plus billed ones whose statement is not yet due. Part
+       * of `committedMinor` whenever the provider counts future parcels in the
+       * balance, as issuers do.
+       */
       scheduledInstallmentsMinor: scheduledByCard.get(card.id) ?? 0,
       availableLimitMinor: card.creditLimitMinor - committedMinor,
       utilizationPercent:
@@ -1236,19 +1458,25 @@ export async function getCardStatement(userId: string, cardId: string) {
     const chargedMinor = cycle.installments
       .filter((item) => item.status !== "cancelled")
       .reduce((total, item) => total + item.amountMinor, 0);
+    const totalMinor = cycle.confirmedTotalMinor ?? chargedMinor;
     byMonth.set(month, {
       id: cycle.id,
       statementMonth: month,
-      closesAt: cycle.closedAt ?? cycle.openedAt,
+      // A cycle recorded before it closed has no closing date yet. Its opening
+      // date is not one — showing it read as a statement closing a month early
+      // — so the nominal closing day of its own month stands in.
+      closesAt:
+        cycle.closedAt ?? nominalCycleFor(`${month}-01`, card.defaultClosingDay, card.defaultDueDay).closesAt,
       dueAt: cycle.dueAt,
       chargesMinor: chargedMinor,
       creditsMinor: 0,
-      totalMinor: cycle.confirmedTotalMinor ?? chargedMinor,
+      totalMinor,
       isReconciled: cycle.confirmedTotalMinor !== null,
       // A cycle the institution itself confirmed says so, so the card screen can
       // distinguish "you typed this total" from "the bank published it" (R7).
       source: cycle.source === "pluggy" ? "open_finance" : "recorded",
-      status: cycle.status,
+      // Nothing owed cannot be overdue.
+      status: cycle.status === "overdue" && totalMinor <= 0 ? "paid" : cycle.status,
     });
   }
 
@@ -1357,6 +1585,20 @@ export interface PurchasePlanImpactResult {
   baseline?: UserForecast;
   /** Items missing an account or a purchase date — excluded from the simulation, reported instead of silently dropped. */
   unprojectedItems: Array<{ id: string; name: string }>;
+  /** Items the user switched off (isActive=false): out of the projection on purpose, listed so that is visible. */
+  inactiveItems: Array<{ id: string; name: string }>;
+  /** The horizon the simulation was measured over; undefined exactly when `simulation` is. */
+  horizonDays?: number;
+}
+
+export interface PurchasePlanImpactOptions {
+  /**
+   * Shortest horizon to look at, in days; defaults to `MIN_PLAN_HORIZON_DAYS`.
+   * Always stretched to cover the plan's last settlement.
+   */
+  horizonDays?: number;
+  /** Whether the baseline carries the budgets' estimate; defaults to `budget`. */
+  scenario?: VariableSpendingScenario;
 }
 
 /**
@@ -1378,6 +1620,7 @@ const MIN_PLAN_HORIZON_DAYS = 365;
 export async function getPurchasePlanImpact(
   userId: string,
   planId: string,
+  options: PurchasePlanImpactOptions = {},
 ): Promise<PurchasePlanImpactResult | undefined> {
   const plan = await getPurchasePlan(userId, planId);
   if (!plan) return undefined;
@@ -1389,11 +1632,15 @@ export async function getPurchasePlanImpact(
   const cardByAccountId = new Map(cardContext.cards.map((card) => [card.accountId, card]));
 
   const unprojectedItems: Array<{ id: string; name: string }> = [];
+  const inactiveItems: Array<{ id: string; name: string }> = [];
   const projectable: Array<(typeof plan.items)[number] & { accountId: string; purchaseDate: string }> = [];
   for (const item of plan.items) {
     // Switched off by the user: out of the projection on purpose, so it is
-    // neither simulated nor reported as unprojected.
-    if (!item.isActive) continue;
+    // not simulated — but listed, so its absence is never silent.
+    if (!item.isActive) {
+      inactiveItems.push({ id: item.id, name: item.name });
+      continue;
+    }
     if (!item.accountId || !item.purchaseDate) {
       unprojectedItems.push({ id: item.id, name: item.name });
       continue;
@@ -1402,7 +1649,7 @@ export async function getPurchasePlanImpact(
   }
 
   if (projectable.length === 0) {
-    return { plan, simulation: undefined, baseline: undefined, unprojectedItems };
+    return { plan, simulation: undefined, baseline: undefined, unprojectedItems, inactiveItems };
   }
 
   const items: PlanItemOption[] = await Promise.all(
@@ -1440,12 +1687,12 @@ export async function getPurchasePlanImpact(
     .flatMap((item) => item.option.cashEvents.map((event) => event.expectedAt))
     .reduce((latest, date) => (date > latest ? date : latest), asOf);
   const horizonDays = Math.max(
-    MIN_PLAN_HORIZON_DAYS,
+    options.horizonDays ?? MIN_PLAN_HORIZON_DAYS,
     daysBetween(asOf, monthRange(lastPaymentDate).end),
   );
 
   const [baseline, hardReserveMinor, softReserves] = await Promise.all([
-    buildUserForecastDetailed(userId, horizonDays),
+    buildUserForecastDetailed(userId, horizonDays, { variableSpending: options.scenario ?? DEFAULT_VARIABLE_SPENDING }),
     getHardReserveMinor(userId),
     getSoftReserves(userId),
   ]);
@@ -1469,7 +1716,7 @@ export async function getPurchasePlanImpact(
     cardActivity: cardActivityFor(baseline),
   });
 
-  return { plan, simulation, baseline, unprojectedItems };
+  return { plan, simulation, baseline, unprojectedItems, inactiveItems, horizonDays };
 }
 
 
@@ -1480,16 +1727,31 @@ export async function getPurchasePlanImpact(
  * Ownership is enforced on the card rather than the purchase: the purchase
  * table has no `userId` of its own, so reading it unscoped would cross tenants.
  */
-export async function listCardPurchases(userId: string, cardId: string) {
+export interface CardPurchaseFilter {
+  /** Purchase date on or after (inclusive). */
+  from?: string;
+  /** Purchase date on or before (inclusive). */
+  to?: string;
+  /** Only purchases with a parcel still ahead (see `isRemainingParcel`). */
+  openOnly?: boolean;
+  /** Case-insensitive substring of the description or the merchant. */
+  q?: string;
+}
+
+export async function listCardPurchases(userId: string, cardId: string, filter: CardPurchaseFilter = {}) {
   const card = await db.query.creditCards.findFirst({
     where: and(eq(creditCards.id, cardId), eq(creditCards.userId, userId)),
     columns: { id: true },
   });
   if (!card) return [];
 
-  return db.query.creditCardPurchases.findMany({
-    where: eq(creditCardPurchases.creditCardId, card.id),
-    orderBy: [desc(creditCardPurchases.purchaseDate)],
+  const purchases = await db.query.creditCardPurchases.findMany({
+    where: and(
+      eq(creditCardPurchases.creditCardId, card.id),
+      filter.from ? gte(creditCardPurchases.purchaseDate, filter.from) : undefined,
+      filter.to ? lte(creditCardPurchases.purchaseDate, filter.to) : undefined,
+    ),
+    orderBy: [desc(creditCardPurchases.purchaseDate), asc(creditCardPurchases.id)],
     with: {
       transaction: { columns: { id: true, description: true, deletedAt: true } },
       installmentPlans: {
@@ -1503,6 +1765,48 @@ export async function listCardPurchases(userId: string, cardId: string) {
       },
     },
   });
+
+  const today = todayIso();
+  const needle = filter.q?.trim().toLocaleLowerCase();
+  const withRemaining = purchases.map((purchase) => ({
+    ...purchase,
+    installmentPlans: purchase.installmentPlans.map((plan) => {
+      const parcels = plan.installments.map((one) => ({ ...one, remaining: isRemainingParcel(one, today) }));
+      const remaining = parcels.filter((one) => one.remaining);
+      return {
+        ...plan,
+        installments: parcels,
+        remainingCount: remaining.length,
+        remainingTotalMinor: remaining.reduce((total, one) => total + one.amountMinor, 0),
+        nextExpectedAt: remaining[0]?.expectedAt ?? null,
+      };
+    }),
+  }));
+  return withRemaining.filter((purchase) => {
+    if (
+      needle &&
+      !purchase.transaction.description.toLocaleLowerCase().includes(needle) &&
+      !(purchase.merchant ?? "").toLocaleLowerCase().includes(needle)
+    ) {
+      return false;
+    }
+    if (filter.openOnly) return purchase.installmentPlans.some((plan) => plan.remainingCount > 0);
+    return true;
+  });
+}
+
+/**
+ * Whether a parcel is still ahead of the user.
+ *
+ * `projected` and `billed` say whether the charge exists yet; neither says
+ * whether it is still owed. A parcel is owed until its statement falls due —
+ * after that the statement has collected it, or, for a projected parcel no
+ * charge ever matched, there is no future statement left for it to land on.
+ * Counting either as remaining listed purchases from a year ago as still
+ * being paid off.
+ */
+function isRemainingParcel(parcel: { status: string; expectedAt: string }, today: string): boolean {
+  return (parcel.status === "projected" || parcel.status === "billed") && parcel.expectedAt >= today;
 }
 
 /** Archived cards, so the UI can offer them back. */
@@ -1541,12 +1845,19 @@ export async function listOpenInstallmentPlans(userId: string) {
     },
   });
 
+  const today = todayIso();
   return purchases
     .flatMap((purchase) =>
       purchase.installmentPlans.map((plan) => {
         const remaining = plan.installments
-          .filter((one) => one.status === "projected" || one.status === "billed")
+          .filter((one) => isRemainingParcel(one, today))
           .sort((left, right) => left.expectedAt.localeCompare(right.expectedAt));
+        // Projected parcels whose statement is already due with no charge ever
+        // matched to them. Not remaining (see `isRemainingParcel`), and not
+        // known to be paid either, so they are counted apart.
+        const lapsed = plan.installments.filter(
+          (one) => one.status === "projected" && one.expectedAt < today,
+        );
         const next = remaining[0];
         const card = cardById.get(purchase.creditCardId)!;
         return {
@@ -1559,6 +1870,8 @@ export async function listOpenInstallmentPlans(userId: string) {
           totalInstallments: plan.totalInstallments,
           paidInstallments: plan.totalInstallments - remaining.length,
           remainingCount: remaining.length,
+          lapsedCount: lapsed.length,
+          nextNumber: next?.number ?? null,
           nextAmountMinor: next?.amountMinor ?? 0,
           nextExpectedAt: next?.expectedAt ?? null,
           lastExpectedAt: remaining[remaining.length - 1]?.expectedAt ?? null,
@@ -1568,4 +1881,42 @@ export async function listOpenInstallmentPlans(userId: string) {
     )
     .filter((plan) => plan.remainingCount > 0)
     .sort((left, right) => (left.nextExpectedAt ?? "").localeCompare(right.nextExpectedAt ?? ""));
+}
+
+/**
+ * The statements of one card the forecast settles in the next `horizonDays`,
+ * each with what it is made of — the same `buildUserForecastDetailed` run every
+ * cash figure comes from, so the amounts are the forecast's own, not a second
+ * computation that could drift from it. Budget card-share estimates billed on
+ * the same statement are separate events (LOW confidence) and are reported
+ * beside each statement, never inside its amount.
+ */
+export async function getUpcomingCardStatements(userId: string, cardId: string, horizonDays = 120) {
+  const card = await db.query.creditCards.findFirst({
+    where: and(eq(creditCards.id, cardId), eq(creditCards.userId, userId)),
+    columns: { id: true },
+  });
+  if (!card) return null;
+
+  const detailed = await buildUserForecastDetailed(userId, horizonDays);
+  const budgetShare = new Map<string, number>();
+  for (const event of detailed.budgetConsumption.events) {
+    // budget:<budgetId>:<month>:card:<cardId>:<statementMonth>
+    const parts = event.logicalKey.split(":");
+    if (parts[3] !== "card" || parts[4] !== cardId) continue;
+    const month = parts[5]!;
+    budgetShare.set(month, (budgetShare.get(month) ?? 0) + Math.abs(event.amountMinor));
+  }
+
+  return {
+    asOf: detailed.forecast.asOf,
+    horizonEnd: detailed.forecast.horizonEnd,
+    statements: detailed.cardStatements
+      .filter((statement) => statement.cardId === cardId)
+      .map((statement) => ({
+        ...statement,
+        budgetCardShareMinor: budgetShare.get(statement.statementMonth) ?? 0,
+      })),
+    debtUnplaced: detailed.cardDebtUnplaced.find((entry) => entry.cardId === cardId) ?? null,
+  };
 }

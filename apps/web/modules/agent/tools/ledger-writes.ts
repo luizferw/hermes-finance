@@ -144,7 +144,7 @@ const ruleActionInput = z.object({
     .describe("category name for set_category; tag name for add_tag; new merchant name for rename_merchant; omit for mark_reviewed"),
 });
 
-const ruleDefinitionInput = z.object({
+export const ruleDefinitionInput = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional().describe("free-text note shown on the rule card"),
   matchAll: z.boolean().default(true).describe("true = every condition must match (AND); false = any condition (OR)"),
@@ -171,9 +171,12 @@ interface ResolvedRule {
   definition: CreateRuleInput;
   when: string;
   then: string;
+  /** One human label per condition / action, in definition order. */
+  conditionLabels: string[];
+  actionLabels: string[];
 }
 
-async function resolveRuleDefinition(ctx: ToolContext, input: RuleDefinitionInput): Promise<ResolvedRule> {
+export async function resolveRuleDefinition(ctx: ToolContext, input: RuleDefinitionInput): Promise<ResolvedRule> {
   const conditions: CreateRuleInput["conditions"] = [];
   const conditionLabels: string[] = [];
   for (const c of input.conditions) {
@@ -233,10 +236,12 @@ async function resolveRuleDefinition(ctx: ToolContext, input: RuleDefinitionInpu
     },
     when: conditionLabels.join(input.matchAll ? " AND " : " OR "),
     then: actionLabels.join(", "),
+    conditionLabels,
+    actionLabels,
   };
 }
 
-async function rulePreview(ctx: ToolContext, definition: CreateRuleInput) {
+export async function rulePreview(ctx: ToolContext, definition: CreateRuleInput) {
   return previewRuleDefinition(ctx.userId, {
     matchAll: definition.matchAll,
     conditions: definition.conditions,
@@ -244,7 +249,7 @@ async function rulePreview(ctx: ToolContext, definition: CreateRuleInput) {
   });
 }
 
-const RULE_SEMANTICS =
+export const RULE_SEMANTICS =
   "Conditions: description_contains / raw_text_contains are case-insensitive substring matches (raw text is the bank's encrypted narration, so it cannot be pre-filtered in SQL and forces a full scan); amount_* compare the ABSOLUTE transaction amount against the value converted to minor units with the user's display currency; account_is takes an account name (no fuzzy fallback: an unknown name fails); transaction_type_is is income|expense|transfer. Actions: set_category (category name), add_tag (tag name), rename_merchant (new name), mark_reviewed (moves imported/pending rows to reviewed). Amount values are major units. Saving a rule does not change existing transactions: use run_rule for that. runOnImport=true (default) applies the rule automatically to every future CSV import commit and Open Finance sync.";
 
 /* ── import wizard ─────────────────────────────────────────────────────── */
@@ -335,7 +340,7 @@ export const ledgerWritesTools: WriteTool[] = [
     name: "create_transaction",
     title: "Add transaction",
     description:
-      "Record an expense, income or transfer, exactly like the New transaction dialog. `amount` is a positive number in MAJOR units of the account's currency (e.g. 49.90); the sign is derived from `type`: expense and transfer are stored negative on `account`, income positive, converted to integer minor units with the account currency's exponent. `account` is an account name (defaults to the first non-archived account when omitted; an unknown name falls back the same way, so pass it when it matters). type=transfer moves money between two of your own accounts: `toAccount` is required, both accounts must share a currency, the source is debited and the destination credited by the same amount (nets to zero, PRD R5), and it takes no category (a transfer is neither income nor expense). `category` and `tags` are names (tags must already exist; unknown names fail). status=posted (default) counts in account balances, reports and the forecast immediately; status=pending parks the entry in the Inbox and keeps it out of balances until approved with mark_transaction_reviewed. `date` defaults to today. Returns the new transaction id and stored amountMinor.",
+      "Record an expense, income or transfer, exactly like the New transaction dialog. `amount` is a positive number in MAJOR units of the account's currency (e.g. 49.90); the sign is derived from `type`: expense and transfer are stored negative on `account`, income positive, converted to integer minor units with the account currency's exponent. `account` is an account name (exact, else partial match; an unknown name fails). When omitted it defaults to the first non-archived account, so pass it when it matters. type=transfer moves money between two of your own accounts: `toAccount` is required, both accounts must share a currency, the source is debited and the destination credited by the same amount (nets to zero, PRD R5), and it takes no category (a transfer is neither income nor expense). `category` and `tags` are names (tags must already exist; unknown names fail). status=posted (default) counts in account balances, reports and the forecast immediately; status=pending parks the entry in the Inbox and keeps it out of balances until approved with mark_transaction_reviewed. `date` defaults to today. Returns the new transaction id and stored amountMinor.",
     risk: "write",
     requiredScope: "transactions:write",
     input: z.object({
@@ -352,7 +357,12 @@ export const ledgerWritesTools: WriteTool[] = [
       status: z.enum(["posted", "pending"]).default("posted"),
     }),
     async prepare(ctx, args) {
-      const account = await resolveAccount(ctx.userId, args.account);
+      // A named account must exist: falling back to the first account would
+      // post the money somewhere the user did not say. Only an omitted
+      // account defaults to the first non-archived one.
+      const account = args.account
+        ? await resolveNamedAccount(ctx.userId, args.account)
+        : await resolveAccount(ctx.userId);
       if (!account) throw new Error("No account found to add this to.");
       let toAccount: Awaited<ReturnType<typeof resolveNamedAccount>> | null = null;
       if (args.type === "transfer") {
@@ -1141,22 +1151,25 @@ export const ledgerWritesTools: WriteTool[] = [
   write({
     name: "update_settings",
     title: "Update settings",
-    description: `Change display settings, as the Settings screen does. currency (${SETTINGS_CURRENCIES.join(", ")}): the currency dashboard and report totals are computed in, the default for amounts tools don't specify, and the only currency summed into net worth; transactions keep their stored currency and nothing is converted. locale (${SETTINGS_LOCALES.join(", ")}): number and date formatting. dateFormat (${SETTINGS_DATE_FORMATS.join(", ")}): how dates are displayed. Pass only what changes.`,
+    description: `Change display settings, as the Settings screen does. currency (${SETTINGS_CURRENCIES.join(", ")}): the currency dashboard and report totals are computed in, the default for amounts tools don't specify, and the only currency summed into net worth; transactions keep their stored currency and nothing is converted. locale (${SETTINGS_LOCALES.join(", ")}): number and date formatting. dateFormat (${SETTINGS_DATE_FORMATS.join(", ")}): how dates are displayed. country (ISO 3166-1 alpha-2, e.g. BR): recorded only — onboarding set it from the region picked there and nothing in the app reads it, so changing it changes no figure; use it to correct a country that disagrees with the currency and locale. The Settings screen offers currency, locale and date format; country has no field there. Pass only what changes.`,
     risk: "write",
     requiredScope: "settings:write",
     input: z.object({
       currency: z.enum(SETTINGS_CURRENCIES).optional(),
       locale: z.enum(SETTINGS_LOCALES).optional(),
       dateFormat: z.enum(SETTINGS_DATE_FORMATS).optional(),
+      country: z.string().regex(/^[A-Za-z]{2}$/, "Use a 2-letter ISO 3166-1 code").optional(),
     }),
     async prepare(ctx, args) {
       const current = await getUserSettings(ctx.userId);
+      const country = args.country?.toUpperCase();
       const payload = {
         ...(args.currency ? { currencyCode: args.currency } : {}),
         ...(args.locale ? { locale: args.locale } : {}),
         ...(args.dateFormat ? { dateFormat: args.dateFormat } : {}),
+        ...(country ? { country } : {}),
       };
-      if (Object.keys(payload).length === 0) throw new Error("Nothing to change: pass currency, locale or dateFormat.");
+      if (Object.keys(payload).length === 0) throw new Error("Nothing to change: pass currency, locale, dateFormat or country.");
       return {
         payload,
         title: "Update settings?",
@@ -1165,6 +1178,7 @@ export const ledgerWritesTools: WriteTool[] = [
           ...(args.currency ? [{ label: "Currency", value: `${current.currencyCode} → ${args.currency}` }] : []),
           ...(args.locale ? [{ label: "Locale", value: `${current.locale} → ${args.locale}` }] : []),
           ...(args.dateFormat ? [{ label: "Date format", value: `${current.dateFormat} → ${args.dateFormat}` }] : []),
+          ...(country ? [{ label: "Country", value: `${current.country} → ${country}` }] : []),
         ],
         undoable: true,
       };
@@ -1176,6 +1190,7 @@ export const ledgerWritesTools: WriteTool[] = [
         currency: s.currencyCode,
         locale: s.locale,
         dateFormat: s.dateFormat,
+        country: s.country,
       });
     },
   }),

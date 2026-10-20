@@ -20,7 +20,9 @@ import {
   getRecentlyRejected,
   getTransaction,
   listTransactions,
+  sumTransactions,
 } from "@/modules/transactions/queries";
+import { transactionSource } from "@/modules/transactions/source";
 import {
   transactionStatusSchema,
   transactionTypeSchema,
@@ -34,14 +36,16 @@ import { listGoals } from "@/modules/goals/queries";
 import { listArchivedBudgets, listBudgetsWithProgress } from "@/modules/budgets/queries";
 import { getImportFile, listImportFiles, listImportMappings } from "@/modules/imports/queries";
 import { getUserSettings } from "@/modules/settings/queries";
+import { isOnboarded } from "@/modules/onboarding/queries";
 import { getSystemHealth } from "@/modules/system/queries";
+import { isJobStale } from "@/modules/system/schedule";
 import {
   isOpenFinanceEnabled,
   listConnections,
   listLinkTargets,
   listSyncRuns,
 } from "@/modules/open-finance/queries";
-import { listCategories, listTags } from "@/modules/taxonomy/queries";
+import { listCategories, listTags, listTagsWithUsage } from "@/modules/taxonomy/queries";
 import { currencyWarningBlocks, isoDateSchema, monthLabel, read } from "./shared";
 import type { ReadTool } from "../types";
 
@@ -68,6 +72,14 @@ async function findCategoryByName(userId: string, name: string) {
     categories.find((c) => c.name.toLowerCase().includes(h));
   if (!category) throw new Error(`No category matching "${name}".`);
   return category;
+}
+
+async function findTagByName(userId: string, name: string) {
+  const tags = await listTags(userId);
+  const h = name.trim().replace(/^#/, "").toLowerCase();
+  const tag = tags.find((t) => t.name.toLowerCase() === h);
+  if (!tag) throw new Error(`No tag named "${name}".`);
+  return tag;
 }
 
 function iso(value: Date | null | undefined) {
@@ -110,7 +122,7 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "search_transactions",
     title: "Search transactions",
     description:
-      "The Transactions page: the full ledger, newest first (by date, then creation time), with the same filters and pagination as the screen. Filters: q (case-insensitive substring of description, merchant or raw bank description — notes and narration are encrypted and cannot be searched), account (by accountId or account name; matches both the source account and the destination of a transfer, archived accounts included), category (categoryId or name), status, type, from/to (inclusive ISO dates), minAmount/maxAmount (major units, compared against the absolute amount, converted with a 2-decimal exponent exactly as the UI does). page/pageSize (pageSize up to 200, the UI uses 50). Each row has date, description, merchant, raw description, notes, category, account, transfer target account (transfers only), status, type, signed amount in integer minor units (negative = money out of the source account) with its currency, and tags. total is the count of every row matching the filters, not just this page. Rows of every status are returned unless status is set; rejected and pending rows do not count toward balances.",
+      "The Transactions page: the full ledger, newest first (by date, then creation time), with the same filters and pagination as the screen. Filters: q (case-insensitive substring of description, merchant or raw bank description — notes and narration are encrypted and cannot be searched), account (by accountId or account name, exact else partial; matches both the source account and the destination of a transfer, archived accounts included; filters.account echoes the account actually used), category (categoryId or name), uncategorized=true (only rows with no category; overrides category), tag (tagId or exact tag name; rows carrying that tag), status, type, from/to (inclusive ISO dates), minAmount/maxAmount (major units, compared against the absolute amount, converted with a 2-decimal exponent exactly as the UI does). page/pageSize (pageSize up to 200, the UI uses 50). Each row has date, description, merchant, raw description, notes, category, account, transfer target account (transfers only), status, type, signed amount in integer minor units (negative = money out of the source account) with its currency, and tags. total is the count of every row matching the filters, not just this page. Rows of every status are returned unless status is set; rejected and pending rows do not count toward balances. Sums are computed here, so never add rows up yourself: pageSums = signed sum of this page's rows per currency, with the row count; totalSums = signed sum of EVERY row matching the filters (all pages), per currency with its count, computed by the database. Both are stored signed amounts (expenses and outgoing transfers negative, income positive) and mix whatever types and statuses the filters let through — filter by type and status (e.g. type=expense) for a spending total; an incoming transfer matched through an account filter keeps the source account's negative sign.",
     requiredScope: "finance:read",
     input: z.object({
       q: z.string().max(200).optional().describe("substring of description, merchant or raw description"),
@@ -119,6 +131,9 @@ export const ledgerReadsTools: ReadTool[] = [
       account: z.string().max(150).optional().describe("account name (exact, else partial match)"),
       categoryId: uuid.optional(),
       category: z.string().max(150).optional().describe("category name (exact, else partial match)"),
+      uncategorized: z.boolean().optional().describe("true = only transactions without a category"),
+      tagId: uuid.optional(),
+      tag: z.string().max(60).optional().describe("tag name (exact, case-insensitive, leading # ignored)"),
       status: transactionStatusSchema.optional(),
       type: transactionTypeSchema.optional(),
       from: isoDateSchema.optional(),
@@ -130,23 +145,34 @@ export const ledgerReadsTools: ReadTool[] = [
       limit: z.number().int().min(1).max(200).optional().describe("alias of pageSize"),
     }),
     async execute(ctx, args) {
-      const accountId = args.accountId ?? (args.account ? (await findAccountByName(ctx.userId, args.account)).id : undefined);
-      const categoryId =
-        args.categoryId ?? (args.category ? (await findCategoryByName(ctx.userId, args.category)).id : undefined);
+      const account = args.accountId
+        ? null
+        : args.account
+          ? await findAccountByName(ctx.userId, args.account)
+          : null;
+      const accountId = args.accountId ?? account?.id;
+      const categoryId = args.uncategorized
+        ? undefined
+        : (args.categoryId ?? (args.category ? (await findCategoryByName(ctx.userId, args.category)).id : undefined));
+      const tagId = args.tagId ?? (args.tag ? (await findTagByName(ctx.userId, args.tag)).id : undefined);
       const pageSize = args.pageSize ?? args.limit ?? 50;
-      const { items, total, page } = await listTransactions(ctx.userId, {
+      const filters = {
         q: args.q ?? args.text,
         accountId,
         categoryId,
+        uncategorized: args.uncategorized,
+        tagId,
         status: args.status,
         type: args.type,
         from: args.from,
         to: args.to,
         minAmount: args.minAmount,
         maxAmount: args.maxAmount,
-        page: args.page,
-        pageSize,
-      });
+      };
+      const [{ items, total, page }, totals] = await Promise.all([
+        listTransactions(ctx.userId, { ...filters, page: args.page, pageSize }),
+        sumTransactions(ctx.userId, filters),
+      ]);
       const rows = items.map((t) => ({
         id: t.id,
         date: t.date,
@@ -164,6 +190,13 @@ export const ledgerReadsTools: ReadTool[] = [
         tags: t.transactionTags.map(({ tag }) => tag.name),
       }));
       const pageCount = Math.max(1, Math.ceil(total / pageSize));
+      const pageSums = new Map<string, { currency: string; sumMinor: number; count: number }>();
+      for (const row of rows) {
+        const entry = pageSums.get(row.currency) ?? { currency: row.currency, sumMinor: 0, count: 0 };
+        entry.sumMinor += row.amountMinor;
+        entry.count += 1;
+        pageSums.set(row.currency, entry);
+      }
       return {
         forModel: {
           total,
@@ -171,7 +204,22 @@ export const ledgerReadsTools: ReadTool[] = [
           pageSize,
           pageCount,
           hasMore: page < pageCount,
-          filters: { q: args.q ?? args.text ?? null, accountId: accountId ?? null, categoryId: categoryId ?? null, status: args.status ?? null, type: args.type ?? null, from: args.from ?? null, to: args.to ?? null, minAmount: args.minAmount ?? null, maxAmount: args.maxAmount ?? null },
+          filters: {
+            q: filters.q ?? null,
+            accountId: accountId ?? null,
+            account: account?.name ?? null,
+            categoryId: categoryId ?? null,
+            uncategorized: args.uncategorized ?? false,
+            tagId: tagId ?? null,
+            status: args.status ?? null,
+            type: args.type ?? null,
+            from: args.from ?? null,
+            to: args.to ?? null,
+            minAmount: args.minAmount ?? null,
+            maxAmount: args.maxAmount ?? null,
+          },
+          pageSums: [...pageSums.values()],
+          totalSums: totals.map((t) => ({ currency: t.currencyCode, sumMinor: t.sumMinor, count: t.count })),
           transactions: rows,
         },
         block: {
@@ -195,17 +243,13 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "get_transaction",
     title: "Get transaction",
     description:
-      "Everything the transaction detail sheet shows for one transaction id: description, status, date and value date (the bank's settlement date when it differs), signed amount in integer minor units with currency (negative = out of the source account), type, category, splits (each with category, description and amount in minor units; the sheet shows them when there is more than one), tags, notes, account and transfer destination, raw bank description, narration, UPI reference, counterparty UPI id, UTR number, external id, extra metadata key/values, the linked bill, the suspected duplicate original (see get_review_inbox), and the source: 'Imported from <file>' when it came from a CSV import, 'Recurring: <name>' when a recurring rule drafted it, otherwise 'Manual entry'. Encrypted fields are returned decrypted. Returns error not_found for an unknown or another user's id.",
+      "Everything the transaction detail sheet shows for one transaction id: description, status, date and value date (the bank's settlement date when it differs), signed amount in integer minor units with currency (negative = out of the source account), type, category, splits (each with category, description and amount in minor units; the sheet shows them when there is more than one), tags, notes, account and transfer destination, raw bank description, narration, UPI reference, counterparty UPI id, UTR number, external id, extra metadata key/values, the linked bill, the suspected duplicate original (see get_review_inbox), and the source: 'Imported from <file>' when it came from a CSV import, 'Open Finance sync (<provider>)' when an Open Finance sync created it (metadata open_finance.provider), 'Recurring: <name>' when a recurring rule drafted it, otherwise 'Manual entry' (typed in the app or via create_transaction/mark_bill_paid); sourceKind is the same as import, open_finance, recurring or manual. Encrypted fields are returned decrypted. Returns error not_found for an unknown or another user's id.",
     requiredScope: "finance:read",
     input: z.object({ id: uuid }),
     async execute(ctx, args) {
       const tx = await getTransaction(ctx.userId, args.id);
       if (!tx) return { forModel: { error: "not_found" } };
-      const source = tx.importFile
-        ? `Imported from ${tx.importFile.fileName}`
-        : tx.recurringTransaction
-          ? `Recurring: ${tx.recurringTransaction.name}`
-          : "Manual entry";
+      const source = transactionSource(tx);
       return {
         forModel: {
           id: tx.id,
@@ -236,7 +280,8 @@ export const ledgerReadsTools: ReadTool[] = [
           utrNumber: tx.utrNumber,
           externalId: tx.externalId,
           metadata: tx.metadata.map((m) => ({ key: m.key, value: m.value })),
-          source,
+          source: source.label,
+          sourceKind: source.kind,
           importFile: tx.importFile ? { id: tx.importFile.id, fileName: tx.importFile.fileName } : null,
           recurringTransaction: tx.recurringTransaction
             ? { id: tx.recurringTransaction.id, name: tx.recurringTransaction.name }
@@ -360,6 +405,23 @@ export const ledgerReadsTools: ReadTool[] = [
             externalId: t.externalId,
             rejectedAt: iso(t.updatedAt),
           })),
+        },
+      };
+    },
+  }),
+
+  read({
+    name: "get_tags",
+    title: "Tags",
+    description:
+      "Every tag the user has (the tag picker on the Transactions page), by name: id, name, color (null when none was chosen) and transactionCount — how many non-deleted transactions of any status carry it. Tag names are what create_transaction, update_transaction, search_transactions (tag) and add_tag rule actions take. Tags (like categories) cannot be deleted anywhere in the app, so there is no delete tool; an unused tag is simply one with transactionCount 0.",
+    requiredScope: "finance:read",
+    input: z.object({}),
+    async execute(ctx) {
+      const tags = await listTagsWithUsage(ctx.userId);
+      return {
+        forModel: {
+          tags: tags.map((t) => ({ id: t.id, name: t.name, color: t.color, transactionCount: t.transactionCount })),
         },
       };
     },
@@ -652,7 +714,7 @@ export const ledgerReadsTools: ReadTool[] = [
   read({
     name: "get_cash_flow",
     title: "Cash flow",
-    description: `Recorded daily cash flow over the last N days (default 30), from the day N days ago through today, one point per calendar day (days with nothing are zero). Only income and expense transactions in the user's default currency count (transfers, adjustments and opening balances are excluded; other currencies are excluded, not converted). ${LEDGER_STATUSES_NOTE} Per day: inflowMinor = sum of positive amounts, outflowMinor = sum of negative amounts as a positive figure (so an expense refund counts as inflow), netMinor = inflow − outflow. The totals add the daily points.`,
+    description: `Recorded daily cash flow over the last N days (default 30), from the day N days ago through today, one point per calendar day, so days=N gives N+1 points (days with nothing are zero). Only income and expense transactions in the user's default currency count (transfers, adjustments and opening balances are excluded; other currencies are excluded, not converted). ${LEDGER_STATUSES_NOTE} Per day: inflowMinor = sum of positive amounts, outflowMinor = sum of negative amounts as a positive figure (so an expense refund counts as inflow), netMinor = inflow − outflow. The totals add the daily points.`,
     requiredScope: "finance:read",
     input: z.object({ days: z.number().int().min(7).max(365).default(30) }),
     async execute(ctx, args) {
@@ -720,7 +782,7 @@ export const ledgerReadsTools: ReadTool[] = [
   read({
     name: "get_patterns",
     title: "Spending patterns",
-    description: `The figures on the Patterns page, as computed by the patterns view. Default currency only; ${LEDGER_STATUSES_NOTE} keptMonths/ofMonths: over the months with activity among the last 6 calendar months (current month included), how many had net (income − expense) ≥ 0 — the page reads this as 'You've kept money in X of the last Y months'. avgSavingsRatePct: the average, over those months that had income, of (income − expense) / income, ×100 and rounded (0 when no month had income). thisMonthSpendMinor / lastMonthSpendMinor: total expense this calendar month vs last (expense transactions only, refunds not netted), and spendDeltaMinor = this − last. whereItGoes (the 'Where it goes' bars): this month's spending per category, largest first. drift ('What's shifting'): per category, this month vs last month, sorted by absolute change — currentMinor, priorMinor, deltaMinor = current − prior, deltaPct = round(delta / prior × 100) (null when there was no prior spend), isNew when there was no prior spend; categories spent last month but not this month appear with current 0 and −100%. topCategory: this month's biggest category and its share of this month's spend.`,
+    description: `The figures on the Patterns page, as computed by the patterns view. Default currency only; ${LEDGER_STATUSES_NOTE} keptMonths/ofMonths: over the months with activity among the last 6 calendar months (current month included), how many had net (income − expense) ≥ 0 — the page reads this as 'You've kept money in X of the last Y months'. avgSavingsRatePct: the average, over those months that had income, of (income − expense) / income, ×100 and rounded (0 when no month had income) — each month weighs the same, so it differs from confidence's 'Keeping X%' (this month only) and the financial-year rate (pooled over the year); see get_methodology reports.savingsRates. thisMonthSpendMinor / lastMonthSpendMinor: total expense this calendar month vs last (expense transactions only, refunds not netted), and spendDeltaMinor = this − last. whereItGoes (the 'Where it goes' bars): this month's spending per category, largest first. drift ('What's shifting'): per category, this month vs last month, sorted by absolute change — currentMinor, priorMinor, deltaMinor = current − prior, deltaPct = round(delta / prior × 100) (null when there was no prior spend), isNew when there was no prior spend; categories spent last month but not this month appear with current 0 and −100%. topCategory: this month's biggest category and its share of this month's spend.`,
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -784,7 +846,7 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "get_confidence",
     title: "Financial confidence",
     description:
-      "The confidence card on the Overview: a 0–100 composite with band, a one-line read, week delta, streak, 30-day trend and the factors lifting or weighing on it. Six factors, each 0–100; a factor that does not apply is dropped and the base weights are renormalised over the rest (weight is returned). Runway (base 30%): liquid balance (positive balances of non-archived cash/wallet/bank accounts in the default currency) ÷ average monthly expense of the completed months among the last 6 (this month's expense if none); 6 months = 100. Cashflow (20%): this month's savings rate r = (income − expense)/income, score = 35 + 217·r clamped; 32 when spending with no income yet. On plan (15%): budgets with a period this month, 100 − 130 × over/total. Obligations (15%): active bills due in the next 14 days plus overdue ones, default currency: 100 if liquid balance covers their total else 55, minus 35 per overdue bill. Goals (10%): share of goals on pace (achieved counts; a dated goal is on pace when progress ≥ 90% of the elapsed share of its timeline; an undated one when it has any progress). Upkeep (10%): 100 with an empty inbox, else 100 − 4 per item clamped to 30–95. score = round(Σ score×weight). Bands: ≥80 secure, ≥62 steady, ≥42 finding footing, else stretched. A factor is lifting at ≥65 and weighing below 45. onTop = inbox empty and no bill overdue. weekDelta = today's score − the latest stored daily reading at least 7 days old (null if none); streakDays = consecutive days back from today whose stored reading was onTop. History comes from snapshots the Overview stores when opened; this tool overlays today's reading in memory and does NOT write one, so asking does not alter the history.",
+      "The confidence card on the Overview: a 0–100 composite with band, a one-line read, week delta, streak, 30-day trend and the factors lifting or weighing on it. Six factors, each 0–100; a factor that does not apply is dropped and the base weights are renormalised over the rest (weight is returned). Liquid balance = the NET balance of non-archived cash, wallet and bank (asset) accounts in the default currency — overdrafts subtract, so it can be negative; it is the same total get_position reports. Runway (base 30%): liquid balance ÷ average monthly expense of the completed months among the last 6 (this month's expense if none); 6 months = 100, 0 or below = 0. Cashflow (20%): this month's savings rate r = (income − expense)/income, score = 35 + 217·r clamped; 32 when spending with no income yet. On plan (15%): budgets with a period this month, 100 − 130 × over/total. Obligations (15%): active bills (tracked on the Bills page, whatever account they are charged to, cards included) whose next due date is within the next 14 days or already past, default currency, at their typed expected amount: 100 if the liquid balance is at least their total ('What's due is covered') else 55 ('What's due exceeds your cash'), minus 35 per overdue bill; the factor is dropped when no such bill exists. Card statements and recurring items are not part of it. Goals (10%): share of goals on pace (achieved counts; a dated goal is on pace when progress ≥ 90% of the elapsed share of its timeline; an undated one when it has any progress). Upkeep (10%): 100 with an empty inbox, else 100 − 4 per item clamped to 30–95. score = round(Σ score×weight). Bands: ≥80 secure, ≥62 steady, ≥42 finding footing, else stretched. A factor is lifting at ≥65 and weighing below 45. onTop = inbox empty and no bill overdue. weekDelta = today's score − the latest stored daily reading at least 7 days old (null if none); streakDays = consecutive days back from today whose stored reading was onTop. History comes from snapshots the Overview stores when opened; this tool overlays today's reading in memory and does NOT write one, so asking does not alter the history.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -820,7 +882,7 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "get_bills",
     title: "Bills",
     description:
-      "The Bills page: every tracked bill, active and inactive, ordered by next due date. Each has name, expected amount (integer minor units, positive) and currency, recurrence, amountStrategy (fixed: the forecast projects the typed amount; variable: it prefers the amount of the transaction that last paid the bill and falls back to the typed amount), due day, next due date, last paid date, active flag, account, category, notes, state and daysUntilDue (next due date − today; negative when late). state: inactive when paused; overdue when the next due date is before today; due_soon within 7 days; otherwise upcoming. For the forecast's view of what is still to pay see get_projected_commitments.",
+      "The Bills page: every tracked bill, active and inactive, ordered by next due date. Each has name, expected amount (integer minor units, positive) and currency, recurrence, amountStrategy (fixed: the forecast projects the typed amount; variable: it prefers the amount of the transaction that last paid the bill and falls back to the typed amount), due day, next due date, lastPaidDate and lastPaidTransactionId, active flag, account, category, notes, state and daysUntilDue (next due date − today; negative when late). state: inactive when paused; overdue when the next due date is before today; due_soon within 7 days; otherwise upcoming. lastPaidDate is written only by 'Mark paid' (mark_bill_paid) and records when the last occurrence was paid as best known: the linked transaction's date when one was linked (lastPaidTransactionId set), the payment date entered with an amount (a transaction is created and linked), or — for the one-click mark-paid of a fixed bill — the day it was marked, with lastPaidTransactionId null; paidEvidence says which (transaction or marked_only, null when never paid). It is not proof a payment left an account unless paidEvidence is transaction. Nothing else (no job, no Open Finance sync) changes it. For the forecast's view of what is still to pay see get_projected_commitments.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -836,6 +898,7 @@ export const ledgerReadsTools: ReadTool[] = [
         nextDueDate: bill.nextDueDate,
         lastPaidDate: bill.lastPaidDate,
         lastPaidTransactionId: bill.lastPaidTransactionId,
+        paidEvidence: bill.lastPaidDate === null ? null : bill.lastPaidTransactionId ? "transaction" : "marked_only",
         isActive: bill.isActive,
         account: bill.account ? { id: bill.account.id, name: bill.account.name } : null,
         category: bill.category ? { id: bill.category.id, name: bill.category.name } : null,
@@ -1156,12 +1219,12 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "get_settings",
     title: "Settings",
     description:
-      "The user's regional settings from the Settings page: country, default currency (every report, net worth, patterns and confidence figure uses only this currency; other currencies are excluded, not converted), locale (number and date formatting), date format, and financial year start month (1–12; drives get_financial_year_summary). Defaults (IN, INR, en-IN, dd MMM yyyy, April) apply until the user saves settings.",
+      "The user's regional settings: default currency (every report, net worth, patterns and confidence figure uses only this currency; other currencies are excluded, not converted), locale (number and date formatting), date format, financial year start month (1–12; drives get_financial_year_summary), and country (ISO 3166-1 alpha-2). Country is only recorded — onboarding sets it from the region picked there (India, Pakistan, Bangladesh, Sri Lanka, or US for 'Global'; there is no Brazil option) and nothing in the app reads it: currency, locale, date format and financial year are separate settings, so a country that disagrees with them (e.g. IN with BRL/pt-BR) changes no figure. update_settings can correct it. Defaults (IN, INR, en-IN, dd MMM yyyy, April) apply until settings are saved; isDefault says whether that is the case.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
-      const settings = await getUserSettings(ctx.userId);
-      return { forModel: settings };
+      const [settings, saved] = await Promise.all([getUserSettings(ctx.userId), isOnboarded(ctx.userId)]);
+      return { forModel: { ...settings, isDefault: !saved } };
     },
   }),
 
@@ -1169,11 +1232,12 @@ export const ledgerReadsTools: ReadTool[] = [
     name: "get_system_health",
     title: "System health",
     description:
-      "The System health page (instance-wide, not per user): app version and environment, each self-hosting check (database connection and Postgres version, migrations applied, app URL, file storage writable, background jobs, auth secret, telemetry) with status ok/warn/error and detail, passing count, and every background job with schedule, last run, last status, last error and duration. Jobs read 'stale' when their last run is over 36 hours old.",
+      "The System health page (instance-wide, not per user): app version and environment, each self-hosting check (database connection and Postgres version, migrations applied, app URL, file storage writable, background jobs, auth secret, telemetry) with status ok/warn/error and detail, passing count, and every background job with schedule (5-field cron, UTC), last run, last status, last error and duration. The background-jobs check is error when any job's last run failed; warn when jobs are disabled, none are registered, or a job is stale; else ok. A job is stale when it missed a run its own schedule called for: its last run started before the most recent scheduled fire time that is older than a grace of one schedule interval, clamped to 1–12 hours (a half-hourly job after an hour, a daily or monthly one 12 hours after the missed fire time). So a monthly job that ran on the 1st is healthy all month; a job that never ran is not stale. Each job also carries stale.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute() {
       const health = await getSystemHealth();
+      const now = new Date();
       const issues = health.checks.filter((c) => c.status !== "ok").length;
       return {
         forModel: {
@@ -1186,6 +1250,7 @@ export const ledgerReadsTools: ReadTool[] = [
             name: job.name,
             description: job.description,
             schedule: job.schedule,
+            stale: isJobStale(job, now),
             lastRunAt: iso(job.lastRunAt),
             lastStatus: job.lastStatus,
             lastError: job.lastError,

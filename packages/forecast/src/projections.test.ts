@@ -204,6 +204,25 @@ describe("projectStatements", () => {
     expect(events[0]).toMatchObject({ amountMinor: -250_000, confidence: "CONFIRMED" });
   });
 
+  it("keys a stored cycle's full-date month as YYYY-MM, like every other cycle", () => {
+    const events = projectStatements(
+      [
+        { ...cycles[0]!, id: "recorded:sep", statementMonth: "2026-09-01" },
+        { ...cycles[1]!, id: "derived:inter:2026-10" },
+      ],
+      [
+        { billingCycleId: "recorded:sep", amountMinor: 1_000 },
+        { billingCycleId: "derived:inter:2026-10", amountMinor: 2_000 },
+      ],
+      { from: "2026-09-07", to: "2026-11-30" },
+    );
+
+    expect(events.map((event) => [event.id, event.logicalKey])).toEqual([
+      ["statement:recorded:sep", "statement:inter:2026-09"],
+      ["statement:derived:inter:2026-10", "statement:inter:2026-10"],
+    ]);
+  });
+
   it("skips cycles outside the range and cycles with nothing charged", () => {
     const events = projectStatements(cycles, [{ billingCycleId: "cycle-oct", amountMinor: 10_000 }], {
       from: "2026-09-07",
@@ -380,11 +399,22 @@ describe("allocateCardDebt", () => {
   });
 
   it("caps each cycle at its own charges and stops once the balance is spent", () => {
+    const result = allocateCardDebt(cycles, 800_000, "2026-07-01");
+
+    const total = [...result.billedByStatementMonth.values()].reduce((sum, value) => sum + value, 0);
+    expect(total).toBe(800_000);
+    expect(result.billedByStatementMonth.get("2026-07")).toBe(300_000);
+    expect(result.unplacedMinor).toBe(0);
+  });
+
+  it("reports balance larger than every charge as unplaced, never drops it", () => {
+    // Future parcels the ledger has not booked yet: the provider's balance
+    // counts them, no cycle holds them.
     const result = allocateCardDebt(cycles, 1_000_000, "2026-07-01");
 
     const total = [...result.billedByStatementMonth.values()].reduce((sum, value) => sum + value, 0);
     expect(total).toBe(900_000);
-    expect(result.unplacedMinor).toBe(0);
+    expect(result.unplacedMinor).toBe(100_000);
   });
 
   it("reports balance it could not place rather than absorbing it silently", () => {

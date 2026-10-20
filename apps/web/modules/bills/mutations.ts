@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { bills, db, transactions, transactionSplits } from "@kosh/db";
 import {
@@ -142,14 +142,26 @@ export async function markBillPaidCore(userId: string, input: MarkBillPaidInput)
     return;
   }
 
+  let linkedDate: string | null = null;
   if (data.transactionId) {
     const tx = await db.query.transactions.findFirst({
       where: and(
         eq(transactions.id, data.transactionId),
         eq(transactions.userId, userId),
+        isNull(transactions.deletedAt),
       ),
     });
     if (!tx) throw new ApiError(404, "not_found", "Transaction not found.");
+    // Same rule as the candidate list: only money that is in the ledger can
+    // be the payment that settled a bill.
+    if (!["imported", "reviewed", "posted"].includes(tx.status)) {
+      throw new ApiError(
+        422,
+        "not_in_ledger",
+        `That transaction is ${tx.status}, so it doesn't count in your balances yet; approve it first.`,
+      );
+    }
+    linkedDate = tx.date;
   }
 
   if (data.amount !== undefined && !bill.accountId) {
@@ -208,9 +220,12 @@ export async function markBillPaidCore(userId: string, input: MarkBillPaidInput)
     await trx
       .update(bills)
       .set({
-        // When the user says the payment happened on another day, that day is
-        // when the bill was paid — not the day they got around to recording it.
-        lastPaidDate: data.paymentDate ?? todayIso(),
+        // lastPaidDate is when the payment happened, as best known: the linked
+        // transaction's own date, else the payment date the user gave, else
+        // today — the day it was marked paid, with no payment evidence (that
+        // case keeps lastPaidTransactionId null). Using today for a linked
+        // transaction made a bill paid on the 6th read "paid" on the 19th.
+        lastPaidDate: linkedDate ?? data.paymentDate ?? todayIso(),
         lastPaidTransactionId: data.transactionId ?? createdTransactionId,
         nextDueDate: advanceOnePeriod(bill),
       })

@@ -21,6 +21,7 @@ import { prepareProposal } from "./execute";
 import { executeProposal } from "./execute";
 import { MCP_TOOLS, TOOL_BY_NAME } from "./registry";
 import { getSafeToSpend } from "@/modules/finance/queries";
+import { todayIso } from "@kosh/domain";
 import { createPurchaseItemCore, createPurchasePlanCore } from "@/modules/finance/mutations";
 import { listAccounts } from "@/modules/accounts/queries";
 import {
@@ -153,6 +154,8 @@ describe("MCP tool exposure", () => {
     expect(typeof simResult.feasible).toBe("boolean");
     expect(Array.isArray(simResult.rejections)).toBe(true);
     expect(simResult.reasons.length).toBeGreaterThan(0);
+    // PIX today: the first settlement is today.
+    expect((simResult as unknown as { firstSettlementDate: string }).firstSettlementDate).toBe(todayIso());
 
     const compare = TOOL_BY_NAME.get("compare_payment_options") as ReadTool;
     const compareResult = (
@@ -164,9 +167,20 @@ describe("MCP tool exposure", () => {
     expect(["OK", "NO_FEASIBLE_OPTION", "INSUFFICIENT_DATA"]).toContain(compareResult.status);
     expect(Array.isArray(compareResult.blockers)).toBe(true);
     expect(compareResult.options.length).toBe(2);
-    // Never a fabricated recommendation when the engine found none feasible.
+    // Never a fabricated recommendation when the engine found none feasible —
+    // but always a ranking, so the least bad is visible.
+    const ranked = compareResult as unknown as {
+      ranking: Array<{ optionId: string; decidedBy: string | null }>;
+      leastBadOptionId?: string;
+    };
+    expect(ranked.ranking).toHaveLength(2);
+    expect(ranked.ranking[0]!.decidedBy).toBeNull();
+    expect(ranked.ranking[1]!.decidedBy).not.toBeNull();
     if (compareResult.status !== "OK") {
       expect(compareResult.recommendedOptionId).toBeUndefined();
+      expect(ranked.leastBadOptionId).toBe(ranked.ranking[0]!.optionId);
+    } else {
+      expect(compareResult.recommendedOptionId).toBe(ranked.ranking[0]!.optionId);
     }
   });
 });

@@ -60,6 +60,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { transactionSource } from "@/modules/transactions/source";
 
 export interface AccountOption {
   id: string;
@@ -813,16 +814,7 @@ function TransactionDetailSheet({
                 {tx.metadata.map((meta) => (
                   <Row key={meta.id} label={meta.key} value={meta.value} mono />
                 ))}
-                <Row
-                  label="Source"
-                  value={
-                    tx.importFile
-                      ? `Imported from ${tx.importFile.fileName}`
-                      : tx.recurringTransaction
-                        ? `Recurring: ${tx.recurringTransaction.name}`
-                        : "Manual entry"
-                  }
-                />
+                <Row label="Source" value={transactionSource(tx).label} />
               </dl>
 
               <div className="flex gap-2 pt-2">

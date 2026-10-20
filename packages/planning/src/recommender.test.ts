@@ -185,16 +185,95 @@ describe("comparePaymentOptions hard constraints", () => {
     expect(result.options.find((option) => option.id === "five")!.feasible).toBe(true);
   });
 
-  it("reports NO_FEASIBLE_OPTION instead of inventing a recommendation", () => {
+  it("reports NO_FEASIBLE_OPTION instead of inventing a recommendation, and still ranks the least bad", () => {
     const result = comparePaymentOptions({
       forecastInput: scenario,
-      hardReserveMinor: 900_000,
+      // The baseline trough (531 618 on 15/09) is already under this reserve.
+      hardReserveMinor: 600_000,
+      maxLastPaymentDate: "2026-09-30",
       options: strollerOptions(),
     });
 
     expect(result.status).toBe("NO_FEASIBLE_OPTION");
     expect(result.recommendedOptionId).toBeUndefined();
     expect(result.blockers).toHaveLength(3);
+    // PIX lowers the trough; both card plans finish after the deadline.
+    expect(result.options.find((option) => option.id === "pix")!.rejections).toEqual(["HARD_RESERVE_VIOLATED"]);
+    expect(result.ranking.map((entry) => [entry.optionId, entry.decidedBy])).toEqual([
+      ["pix", null],
+      ["five", "totalCostMinor"],
+      ["ten", "totalCostMinor"],
+    ]);
+    expect(result.leastBadOptionId).toBe("pix");
+    expect(result.ranking[0]!.explanation).toMatch(/least bad, not a recommendation/);
+  });
+
+  it("with the forecast already under the reserve, accepts an option that does not lower the trough", () => {
+    const result = comparePaymentOptions({
+      forecastInput: scenario,
+      hardReserveMinor: 900_000,
+      options: strollerOptions(),
+    });
+
+    // The trough is 531 618 on 15/09, before any card instalment is paid.
+    expect(result.baselineBreach).toEqual({
+      minimumBalanceMinor: 531_618,
+      minimumBalanceDate: "2026-09-15",
+      floorMinor: 0,
+      hardReserveMinor: 900_000,
+    });
+    const pix = result.options.find((option) => option.id === "pix")!;
+    expect(pix.feasible).toBe(false);
+    expect(pix.reasons).toContain("lowers the trough from 531618 to 306618 on 2026-09-15");
+    const five = result.options.find((option) => option.id === "five")!;
+    expect(five.feasible).toBe(true);
+    expect(five.reasons[0]).toMatch(/already falls to 531618 on 2026-09-15 before this purchase/);
+    expect(result.status).toBe("OK");
+    expect(result.recommendedOptionId).toBe("five");
+    expect(result.ranking.map((entry) => entry.optionId)).toEqual(["five", "ten", "pix"]);
+    expect(result.ranking[2]!.decidedBy).toBe("feasibility");
+  });
+
+  it("never reports a zero hard reserve as a second violation next to the negative balance", () => {
+    const result = comparePaymentOptions({
+      forecastInput: { ...scenario, balances: [{ accountId: "consolidated", amountMinor: 230_000, observedAt: "2026-09-07" }] },
+      hardReserveMinor: 0,
+      options: strollerOptions().slice(0, 1),
+    });
+
+    const [pix] = result.options;
+    expect(pix!.rejections).toEqual(["NEGATIVE_BALANCE"]);
+    expect(pix!.reasons.some((reason) => reason.includes("hard reserve"))).toBe(false);
+  });
+
+  it("breaks a tie between two cards by the limit left free at the peak, not by id", () => {
+    const onCard = (cardId: string, committedMinor: number) => ({
+      id: `${cardId}-10x`,
+      label: `10x on ${cardId}`,
+      totalCostMinor: 270_000,
+      installments: 10,
+      card: { cardId, creditLimitMinor: 1_584_000, committedMinor },
+      purchaseDate: "2026-09-07",
+      cashEvents: monthlySettlementEvents({
+        logicalKeyPrefix: `simulation:${cardId}`,
+        sourceType: "purchase_simulation",
+        firstPaymentDate: "2026-10-02",
+        installments: 10,
+        installmentAmountMinor: 27_000,
+      }),
+    });
+    const result = comparePaymentOptions({
+      forecastInput: scenario,
+      hardReserveMinor: HARD_RESERVE,
+      // "a-inter" sorts first and is nearly full; "b-santander" is almost empty.
+      options: [onCard("a-inter", 1_014_994), onCard("b-santander", 9_325)],
+    });
+
+    expect(result.recommendedOptionId).toBe("b-santander-10x");
+    expect(result.ranking[1]).toMatchObject({ optionId: "a-inter-10x", decidedBy: "cardHeadroomAtPeakMinor" });
+    expect(result.options.find((option) => option.id === "b-santander-10x")!.cardHeadroomAtPeakMinor).toBe(
+      1_584_000 - 9_325 - 270_000,
+    );
   });
 
   it("reports INSUFFICIENT_DATA when there is nothing to compare", () => {
@@ -376,6 +455,47 @@ describe("simulatePurchase", () => {
     expect(simulation.feasible).toBe(false);
     expect(simulation.rejections).toContain("HARD_RESERVE_VIOLATED");
     expect(simulation.safeToSpendAfterMinor).toBe(0);
+  });
+
+  it("passes a purchase that leaves an already-short trough where it was, and says the baseline is short", () => {
+    // The production case: no reserve, the forecast already at −5 952 before
+    // the salary, and a 3x card purchase whose first instalment lands after it.
+    const short = {
+      ...scenario,
+      balances: [{ accountId: "consolidated", amountMinor: 212_666, observedAt: "2026-09-07" }],
+    };
+    const [, five] = strollerOptions();
+    const simulation = simulatePurchase({ forecastInput: short, hardReserveMinor: 0, option: five! });
+
+    expect(simulation.minimumBalanceBeforeMinor).toBe(-5_716);
+    expect(simulation.minimumBalanceAfterMinor).toBe(simulation.minimumBalanceBeforeMinor);
+    expect(simulation.feasible).toBe(true);
+    expect(simulation.rejections).toEqual([]);
+    expect(simulation.baselineBreach).toEqual({
+      minimumBalanceMinor: -5_716,
+      minimumBalanceDate: "2026-09-15",
+      floorMinor: 0,
+      hardReserveMinor: 0,
+    });
+    expect(simulation.reasons).toContain("does not lower the trough (trough -5716 on 2026-09-15)");
+
+    // Paid today in cash it deepens the hole, and only NEGATIVE_BALANCE is
+    // reported: a zero reserve is the floor, not a second constraint.
+    const [pix] = strollerOptions();
+    const cash = simulatePurchase({ forecastInput: short, hardReserveMinor: 0, option: pix! });
+    expect(cash.feasible).toBe(false);
+    expect(cash.rejections).toEqual(["NEGATIVE_BALANCE"]);
+  });
+
+  it("dates the first settlement instead of implying the money leaves today", () => {
+    const [, five] = strollerOptions();
+    const simulation = simulatePurchase({ forecastInput: scenario, hardReserveMinor: HARD_RESERVE, option: five! });
+
+    expect(simulation.firstSettlementDate).toBe("2026-10-02");
+    expect(simulation.immediateImpactMinor).toBe(50_000);
+    expect(Object.keys(simulation.monthlyImpactMinor)).toEqual(
+      [...Object.keys(simulation.monthlyImpactMinor)].sort(),
+    );
   });
 
   it("leaves the baseline untouched, so before and after share one snapshot", () => {

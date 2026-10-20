@@ -4,6 +4,7 @@ import {
   addMonthsClamped,
   formatMoney,
   majorToMinor,
+  monthRange,
   todayIso,
 } from "@kosh/domain";
 import { getNetWorthSummary, listAccounts } from "@/modules/accounts/queries";
@@ -60,16 +61,14 @@ import {
   setRuleActiveCore,
   runRuleCore,
 } from "@/modules/rules/core";
-import { previewRuleDefinition } from "@/modules/rules/engine";
-import type { CreateRuleInput } from "@/modules/rules/validators";
 import {
   currencyCodeInput,
   currencyWarningBlocks,
   formatMajor,
   isoDateSchema,
   monthIsoFor,
+  monthLabel,
   read,
-  resolveAccount,
   resolveCategory,
   resolveNamedAccount,
   write,
@@ -77,12 +76,17 @@ import {
 import { financeReadsTools } from "./tools/finance-reads";
 import { financeWritesReadTools, financeWritesTools } from "./tools/finance-writes";
 import { ledgerReadsTools } from "./tools/ledger-reads";
-import { ledgerWritesTools } from "./tools/ledger-writes";
+import {
+  ledgerWritesTools,
+  resolveRuleDefinition,
+  RULE_SEMANTICS,
+  ruleDefinitionInput,
+  rulePreview,
+} from "./tools/ledger-writes";
 import type {
   ReadTool,
   WriteTool,
   Tool,
-  ToolContext,
   ExecStatus,
   Scope,
 } from "./types";
@@ -110,6 +114,10 @@ const simulationContextInput = z
   .object({
     horizonDays: z.number().int().min(1).max(365).default(30),
     maxLastPaymentDate: isoDateSchema.optional(),
+    scenario: z
+      .enum(["none", "budget"])
+      .optional()
+      .describe("'budget' (default): the baseline includes what each budget still allows; 'none': commitments only"),
   })
   .default(() => ({ horizonDays: 30 }));
 
@@ -130,97 +138,6 @@ const planRecommendationItemInput = z.object({
 
 const planStatusInput = z.enum(["active", "completed", "archived"]);
 
-/* ── rule construction (narrow, typed; values resolved to owned ids) ──────── */
-
-// A deliberately narrow surface for conversational rule-building. The model
-// works in names; we resolve to owned ids before anything is stored or run.
-const ruleConditionInput = z.object({
-  field: z.enum([
-    "description_contains",
-    "raw_text_contains",
-    "amount_greater_than",
-    "amount_less_than",
-    "amount_equals",
-    "account_is",
-    "transaction_type_is",
-  ]),
-  value: z.string().min(1).max(300).describe(
-    "text to match; for account_is pass the account name; for transaction_type_is pass income|expense|transfer; for amount_* pass major units",
-  ),
-});
-const ruleActionInput = z.object({
-  type: z.enum(["set_category", "rename_merchant", "mark_reviewed"]),
-  value: z.string().max(300).nullish().describe("category name for set_category; new merchant name for rename_merchant; omit for mark_reviewed"),
-});
-const ruleInput = z.object({
-  name: z.string().min(1).max(120),
-  matchAll: z.boolean().default(true).describe("true = all conditions must match (AND); false = any (OR)"),
-  conditions: z.array(ruleConditionInput).min(1).max(10),
-  actions: z.array(ruleActionInput).min(1).max(10),
-});
-type RuleInput = z.infer<typeof ruleInput>;
-
-const CONDITION_LABEL: Record<string, string> = {
-  description_contains: "description contains",
-  raw_text_contains: "raw text contains",
-  amount_greater_than: "amount greater than",
-  amount_less_than: "amount less than",
-  amount_equals: "amount equals",
-  account_is: "account is",
-  transaction_type_is: "type is",
-};
-
-/** Resolve model-friendly names to the concrete, owned ids the engine stores. */
-async function resolveRule(ctx: ToolContext, input: RuleInput): Promise<{
-  definition: CreateRuleInput;
-  conditionLabels: Array<{ field: string; value: string; label: string }>;
-  actionLabels: Array<{ type: string; value: string | null; label: string }>;
-}> {
-  const conditions: CreateRuleInput["conditions"] = [];
-  const conditionLabels = [];
-  for (const c of input.conditions) {
-    let value = c.value;
-    let display = c.value;
-    if (c.field === "account_is") {
-      const acct = await resolveAccount(ctx.userId, c.value);
-      if (!acct) throw new Error(`No account matching "${c.value}".`);
-      value = acct.id;
-      display = acct.name;
-    } else if (c.field.startsWith("amount_")) {
-      const minor = Math.round(Number(c.value) * 100);
-      if (!Number.isFinite(minor)) throw new Error(`"${c.value}" is not an amount.`);
-      value = String(minor);
-      display = formatMoney(minor, ctx.currency);
-    }
-    conditions.push({ field: c.field, value });
-    conditionLabels.push({ field: c.field, value, label: `${CONDITION_LABEL[c.field]} ${display}` });
-  }
-
-  const actions: CreateRuleInput["actions"] = [];
-  const actionLabels = [];
-  for (const a of input.actions) {
-    if (a.type === "set_category") {
-      const cat = await resolveCategory(ctx.userId, a.value ?? null);
-      if (!cat) throw new Error(`No category matching "${a.value}".`);
-      actions.push({ type: "set_category", value: cat.id });
-      actionLabels.push({ type: a.type, value: cat.id, label: `categorise as ${cat.name}` });
-    } else if (a.type === "rename_merchant") {
-      if (!a.value) throw new Error("rename_merchant needs a new merchant name.");
-      actions.push({ type: "rename_merchant", value: a.value });
-      actionLabels.push({ type: a.type, value: a.value, label: `rename merchant to ${a.value}` });
-    } else {
-      actions.push({ type: "mark_reviewed", value: null });
-      actionLabels.push({ type: a.type, value: null, label: "mark reviewed" });
-    }
-  }
-
-  return {
-    definition: { name: input.name, matchAll: input.matchAll, runOnImport: true, conditions, actions },
-    conditionLabels,
-    actionLabels,
-  };
-}
-
 /* ── READ TOOLS ─────────────────────────────────────────────────────────── */
 
 const readTools: ReadTool[] = [
@@ -228,7 +145,7 @@ const readTools: ReadTool[] = [
     name: "get_financial_snapshot",
     title: "Financial snapshot",
     description:
-      "Net worth, assets, liabilities, and this month's income/expense/net. Use for 'how am I doing' overview questions.",
+      "Net worth, assets, liabilities, and this month's income/expense/net. Use for 'how am I doing' overview questions. Net worth is get_accounts' header: over non-archived accounts in the default currency with includeInNetWorth on, assets = sum of positive balances, liabilities = sum of negative balances as a positive figure, netWorth = assets − liabilities. The month figures follow compare_periods: income = positive income transactions, expense = negative expense transactions as a positive figure, net = income − expense, ledger statuses (imported, reviewed, posted) and default currency only, transfers excluded; the month is the current calendar month to date.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -260,24 +177,52 @@ const readTools: ReadTool[] = [
   read({
     name: "get_spending_breakdown",
     title: "Spending breakdown",
-    description: "Spending grouped by category for this month or last month.",
+    description: `Spending grouped by category for one calendar month: this month (default), last month, or the month containing \`month\` (any yyyy-MM-dd date inside it; overrides period). What counts: transactions of type expense with a negative amount, dated inside the month, in a ledger status (imported, reviewed, posted — pending and rejected are excluded, as are deleted rows), in the user's default currency only (other currencies are excluded, not converted). Income, transfers, adjustments and opening balances never count, and refunds (positive expense rows) are not netted. Each row's spentMinor is the sum of those amounts as a positive figure, grouped by the transaction's own category ('Uncategorized' when it has none), largest first. totalMinor is the sum over every category — the same figure as compare_periods' expense and get_monthly_flows for that month. Up to \`limit\` categories are listed (default 8, max 100); the remainder is folded into one 'Other (N categories)' row so rows always add up to totalMinor, and truncated says whether that happened. categoryCount is how many categories had spending.`,
     requiredScope: "finance:read",
-    input: z.object({ period: periodSchema }),
+    input: z.object({
+      period: periodSchema,
+      month: isoDateSchema.optional().describe("any date inside the month (yyyy-MM-dd); overrides period"),
+      limit: z.number().int().min(1).max(100).default(8),
+    }),
     async execute(ctx, args) {
-      const spending = await getSpendingByCategory(ctx.userId, monthIsoFor(args.period));
+      const monthIso = args.month ?? monthIsoFor(args.period);
+      const { start, end } = monthRange(monthIso);
+      const spending = await getSpendingByCategory(ctx.userId, monthIso);
       const total = spending.reduce((s, c) => s + c.spentMinor, 0);
-      const rows = spending.slice(0, 8).map((c) => ({
-        name: c.name,
-        color: c.color,
-        spentMinor: c.spentMinor,
-      }));
+      const shown = spending.slice(0, args.limit);
+      const rest = spending.slice(args.limit);
+      const rows: Array<{ name: string; color: string | null; spentMinor: number; categoryId: string | null }> = shown.map(
+        (c) => ({ name: c.name, color: c.color, spentMinor: c.spentMinor, categoryId: c.categoryId }),
+      );
+      if (rest.length > 0) {
+        rows.push({
+          name: `Other (${rest.length} ${rest.length === 1 ? "category" : "categories"})`,
+          color: null,
+          spentMinor: rest.reduce((s, c) => s + c.spentMinor, 0),
+          categoryId: null,
+        });
+      }
+      const title = args.month
+        ? `Where it went · ${monthLabel(monthIso)}`
+        : args.period === "last_month"
+          ? "Where it went · last month"
+          : "Where it went";
       return {
-        forModel: { totalMinor: total, categories: rows, currency: ctx.currency },
+        forModel: {
+          month: monthLabel(monthIso),
+          from: start,
+          to: end,
+          totalMinor: total,
+          categoryCount: spending.length,
+          truncated: rest.length > 0,
+          categories: rows,
+          currency: ctx.currency,
+        },
         block: {
           type: "breakdown",
-          title: args.period === "last_month" ? "Where it went · last month" : "Where it went",
+          title,
           currency: ctx.currency,
-          rows,
+          rows: rows.map(({ name, color, spentMinor }) => ({ name, color, spentMinor })),
           totalMinor: total,
         },
       };
@@ -287,7 +232,8 @@ const readTools: ReadTool[] = [
   read({
     name: "compare_periods",
     title: "Compare months",
-    description: "Income/expense/net for this month versus last month.",
+    description:
+      "Income, expense and net for this calendar month (to date, partial) versus the whole of last month. incomeMinor = sum of income transactions with a positive amount; expenseMinor = sum of expense transactions with a negative amount, as a positive figure; netMinor = income − expense. Only ledger statuses count (imported, reviewed, posted — pending, rejected and deleted rows are excluded), only the user's default currency (others excluded, not converted), and transfers between your own accounts, adjustments and opening balances never count. Refunds are not netted: a positive expense row is neither income nor a reduction of expense. These are the same month figures as get_financial_snapshot, get_monthly_flows and get_spending_breakdown's total.",
     requiredScope: "finance:read",
     input: z.object({}),
     async execute(ctx) {
@@ -343,7 +289,7 @@ const readTools: ReadTool[] = [
     name: "find_unusual_spending",
     title: "Unusual spending",
     description:
-      "Find the largest category-level changes this month versus last month. This is a simple change heuristic, not fraud detection.",
+      "Find the largest category-level changes in spending this month (to date) versus the whole of last month — the Patterns page's 'What's shifting'. Spending per category is computed as in get_spending_breakdown (negative expense transactions, ledger statuses, default currency). For each category with spending in either month: currentMinor, priorMinor, deltaMinor = current − prior, deltaPct = round(delta / prior × 100) (null when there was no prior spend), isNew when there was none last month. Sorted by absolute delta, unchanged categories dropped, top `limit` (default 5). Because this month is partial, early in the month most categories read as down. A simple change heuristic, not fraud or anomaly detection.",
     requiredScope: "finance:read",
     input: z.object({ limit: z.number().int().min(1).max(8).default(5) }),
     async execute(ctx, args) {
@@ -452,23 +398,39 @@ const readTools: ReadTool[] = [
   read({
     name: "propose_rule",
     title: "Propose a rule (dry run)",
-    description:
-      "Build a deterministic rule from typed conditions and actions and DRY-RUN it against historical transactions. Does NOT save or activate anything — it returns the draft and what it would have matched so the user can review and narrow it. Always propose before creating.",
+    description: `Build a deterministic rule from typed conditions and actions — the same vocabulary and name resolution as create_rule — and DRY-RUN it against the ledger. Does NOT save or activate anything. ${RULE_SEMANTICS} Scan: every non-deleted transaction in status pending, imported, reviewed or posted (rejected rows are never touched by rules); scannedCount is that total, matchedCount how many the conditions select. alreadyInTargetCount is how many of those matches the actions would leave unchanged (category already set, merchant already renamed, already reviewed or posted, every tag already present), so matchedCount − alreadyInTargetCount is what run_rule would report as applied right now. sample: up to 8 matched rows, newest first, each with date, description, signed amount in minor units, currency, current category and status, and wouldChange. resolved echoes the conditions and actions as stored (names resolved to ids, amounts converted to minor units). Always propose before creating.`,
     requiredScope: "rules:read",
-    input: ruleInput,
+    input: ruleDefinitionInput,
     async execute(ctx, args) {
-      const { definition, conditionLabels, actionLabels } = await resolveRule(ctx, args);
-      const preview = await previewRuleDefinition(ctx.userId, {
-        matchAll: definition.matchAll,
-        conditions: definition.conditions,
-        actions: definition.actions.map((a) => ({ type: a.type, value: a.value ?? null })),
-      });
+      const { definition, when, then, conditionLabels, actionLabels } = await resolveRuleDefinition(ctx, args);
+      const [preview, categories] = await Promise.all([
+        rulePreview(ctx, definition),
+        listCategories(ctx.userId),
+      ]);
+      const categoryName = new Map(categories.map((c) => [c.id, c.name]));
       const broad = preview.matchedCount > 50 || args.conditions.some((c) => c.field.includes("contains") && c.value.length < 3);
+      const sample = preview.sample.map((s) => ({
+        id: s.id,
+        date: s.date,
+        description: s.description,
+        amountMinor: s.amountMinor,
+        currency: s.currencyCode,
+        category: s.categoryId ? (categoryName.get(s.categoryId) ?? null) : null,
+        status: s.status,
+        wouldChange: s.wouldChange,
+      }));
       return {
         forModel: {
           name: definition.name,
+          when,
+          then,
+          resolved: { matchAll: definition.matchAll, conditions: definition.conditions, actions: definition.actions },
           matchedCount: preview.matchedCount,
+          alreadyInTargetCount: preview.alreadyInTargetCount,
+          wouldChangeCount: preview.matchedCount - preview.alreadyInTargetCount,
           scannedCount: preview.scannedCount,
+          sample,
+          warning: broad ? "This looks broad — consider narrowing the conditions before activating." : undefined,
           note: "Not saved. Call create_rule to activate after the user confirms.",
         },
         block: {
@@ -476,15 +438,15 @@ const readTools: ReadTool[] = [
           draft: {
             name: definition.name,
             matchAll: definition.matchAll,
-            conditions: conditionLabels,
-            actions: actionLabels,
+            conditions: definition.conditions.map((c, i) => ({ field: c.field, value: c.value, label: conditionLabels[i]! })),
+            actions: definition.actions.map((a, i) => ({ type: a.type, value: a.value ?? null, label: actionLabels[i]! })),
             matchedCount: preview.matchedCount,
             scannedCount: preview.scannedCount,
-            sample: preview.sample.map((s) => ({
+            sample: sample.map((s) => ({
               description: s.description,
               date: s.date,
               amountMinor: s.amountMinor,
-              currency: s.currencyCode,
+              currency: s.currency,
             })),
             warning: broad ? "This looks broad — consider narrowing the conditions before activating." : undefined,
           },
@@ -529,7 +491,7 @@ const readTools: ReadTool[] = [
     name: "get_budget_forecast",
     title: "Budgets in the forecast",
     description:
-      "How budgets feed the cash forecast, per month (default this month and next): projected closing balance and lowest balance with its date, and the budgeted spending already inside those figures; plus, per budget, planned, already spent, already committed by bills, recurring rules and card parcels, and the remaining amount the forecast sets aside (the budget is the ceiling; LOW confidence). Budgets left out are listed in blockers with the reason.",
+      "How budgets feed the cash forecast, per month (default this month and next): projected closing balance and lowest balance with its date, and estimatedVariableMinor (the budgets' remaining for the month, already inside those figures). Per budget and month: plannedMinor; spentMinor (expenses already in the ledger in its categories this month); committedMinor (what the forecast already carries in its categories later this month) with committedBySource taking it apart — one row per source with kind ('bill', 'recurring_rule', 'projected_event', 'card_parcel' = projected parcel of a past card purchase counted in its statement's month, 'other'), sourceId, label, occurrences summed, firstDate and amountMinor; the rows sum to committedMinor exactly. remainingMinor = max(0, planned − spent − committed) is what the forecast sets aside (the budget is the ceiling; LOW confidence). routeMix splits remainingMinor by how the categories were paid over the last 3 full months: per route cardId (null = cash), label ('Cash' or the card name), shareBasisPoints (of 10 000), amountMinor (the parts sum to remainingMinor exactly), settlementDates (cash: first and last day it is spread over; card: due date of each statement it is billed on) and beyondHorizonMinor (the part settling after horizonEnd, e.g. spending late in the last month billed on a statement due later — it exists but is not in these balances). beyondHorizonMinor per budget is the sum over routes. Budgets left out are listed in blockers with the reason.",
     requiredScope: "finance:read",
     input: z.object({ months: z.number().int().min(1).max(6).default(2) }),
     async execute(ctx, args) {
@@ -537,6 +499,7 @@ const readTools: ReadTool[] = [
       return {
         forModel: {
           currency: ctx.currency,
+          horizonEnd: result.horizonEnd,
           months: result.outlook,
           budgets: result.estimates.map((estimate) => ({
             budget: estimate.budgetName,
@@ -544,7 +507,17 @@ const readTools: ReadTool[] = [
             plannedMinor: estimate.plannedMinor,
             spentMinor: estimate.spentMinor,
             committedMinor: estimate.committedMinor,
+            committedBySource: estimate.committedBySource,
             remainingMinor: estimate.remainingMinor,
+            beyondHorizonMinor: estimate.beyondHorizonMinor,
+            routeMix: estimate.routeMix.map((route) => ({
+              cardId: route.cardId,
+              label: route.label,
+              shareBasisPoints: route.shareBasisPoints,
+              amountMinor: route.amountMinor,
+              beyondHorizonMinor: route.beyondHorizonMinor,
+              settlementDates: route.settlementDates,
+            })),
           })),
           blockers: result.blockers.map((blocker) => ({ budget: blocker.budgetName, code: blocker.code })),
         },
@@ -591,13 +564,18 @@ const readTools: ReadTool[] = [
     name: "simulate_purchase",
     title: "Simulate a purchase",
     description:
-      "Runs one payment option through the deterministic planning engine and reports its exact cash impact: feasibility, hard-constraint rejections, and the audit reasons behind them. Never recommends or computes anything itself — it only reports the engine's output verbatim.",
+      "Runs one payment option through the deterministic planning engine against the forecast (horizon context.horizonDays, default 30; scenario 'budget' by default — includes what each budget still allows — or 'none'), and reports the engine's output verbatim. " +
+      "Settlements: a non-card method settles in full on purchaseDate (default today); a card settles one instalment per statement, on the due dates of the card's recorded cycles from the purchase's cycle onward, else the nominal closing/due days. firstSettlementDate = the first of those dates; immediateImpactMinor = cash leaving on firstSettlementDate (the name is historical: it is only 'today' for a non-card payment made today; for a card it is the first instalment). monthlyImpactMinor = the option's cash outflow per month, chronological. " +
+      "minimumBalanceBefore/AfterMinor = the forecast's lowest daily closing without/with the purchase; safeToSpendBefore/AfterMinor = max(0, that − hard reserve). " +
+      "Verdict (rejections in order, reasons with raw minor units): NEGATIVE_BALANCE when the trough after falls below the floor of 0; HARD_RESERVE_VIOLATED when it falls below a hard reserve > 0 (never reported for a zero reserve, which is the floor itself); CREDIT_LIMIT_EXCEEDED when the card's peak usage exceeds its limit; DEADLINE_EXCEEDED when the last settlement is after context.maxLastPaymentDate. When the forecast is already below the floor (or a hard reserve > 0) before buying, baselineBreach reports it and the bar becomes 'does not lower the trough': the purchase passes if minimumBalanceAfter ≥ minimumBalanceBefore, else it is rejected with the level it is under. " +
+      "cardUsage (card options): committedMinor today, baselinePeakMinor/Date without, peakMinor/Date with the purchase, exceededMinor; cardHeadroomAtPeakMinor = creditLimitMinor − cardUsage.peakMinor. cardUtilizationAfterMinor is deprecated: the same number as cardUsage.peakMinor, kept for compatibility. See get_methodology.purchaseSimulation.",
     requiredScope: "finance:read",
     input: z.object({ option: purchaseOptionInput, context: simulationContextInput }),
     async execute(ctx, args) {
       const result = await simulateUserPurchase(ctx.userId, args.option, {
         horizonDays: args.context.horizonDays,
         maxLastPaymentDate: args.context.maxLastPaymentDate,
+        scenario: args.context.scenario,
       });
       return {
         forModel: {
@@ -605,6 +583,7 @@ const readTools: ReadTool[] = [
           optionId: result.optionId,
           label: result.label,
           totalCostMinor: result.totalCostMinor,
+          firstSettlementDate: result.firstSettlementDate ?? null,
           immediateImpactMinor: result.immediateImpactMinor,
           monthlyImpactMinor: result.monthlyImpactMinor,
           safeToSpendBeforeMinor: result.safeToSpendBeforeMinor,
@@ -612,11 +591,13 @@ const readTools: ReadTool[] = [
           minimumBalanceBeforeMinor: result.minimumBalanceBeforeMinor,
           minimumBalanceAfterMinor: result.minimumBalanceAfterMinor,
           minimumBalanceDateAfter: result.minimumBalanceDateAfter,
+          baselineBreach: result.baselineBreach ?? null,
           hardReserveViolated: result.hardReserveViolated,
           softReserveImpacts: result.softReserveImpacts,
           creditLimitExceededMinor: result.creditLimitExceededMinor,
           cardUtilizationAfterMinor: result.cardUtilizationAfterMinor,
           cardUsage: result.cardUsage,
+          cardHeadroomAtPeakMinor: result.cardHeadroomAtPeakMinor,
           lastPaymentDate: result.lastPaymentDate,
           installments: result.installments,
           feasible: result.feasible,
@@ -631,20 +612,26 @@ const readTools: ReadTool[] = [
     name: "compare_payment_options",
     title: "Compare payment options",
     description:
-      "Compares payment alternatives for the same purchase against one shared cash forecast. Reports each option's feasibility, hard-constraint rejections, and audit reasons, plus which option (if any) the engine recommends. Never invents a recommendation when the engine reports NO_FEASIBLE_OPTION or INSUFFICIENT_DATA — that verdict is propagated as-is.",
+      "Compares payment alternatives for the same purchase against one shared forecast (context as in simulate_purchase: horizonDays default 30, scenario 'budget' or 'none', maxLastPaymentDate). Each option carries the same verdict simulate_purchase gives (feasible, rejections, reasons, minimumBalance, cardUsage, cardHeadroomAtPeakMinor = limit − peak usage, peakMonthlyOutflowMinor = its largest single-month cash outflow). " +
+      "ranking lists every option best first, whatever the status: feasible ones first; among infeasible ones fewer rejections first; then lowest totalCostMinor → highest minimumBalanceMinor → lowest peakMonthlyOutflowMinor → earliest lastPaymentDate → lowest soft-reserve shortfall → most cardHeadroomAtPeakMinor (an option on no card counts as the most) → id. Each entry says decidedBy (the first criterion on which it lost to the option ranked just above, comparedWithOptionId) and an explanation with both raw values. " +
+      "status OK → recommendedOptionId is ranking[0]. NO_FEASIBLE_OPTION → no recommendation; leastBadOptionId is ranking[0], the least bad, which must be presented as such, never as a recommendation; blockers say what each option breaks. INSUFFICIENT_DATA → no options. baselineBreach is set when the forecast is already below the floor before buying (the bar is then 'does not lower the trough').",
     requiredScope: "finance:read",
     input: z.object({ options: z.array(purchaseOptionInput).min(1).max(10), context: simulationContextInput }),
     async execute(ctx, args) {
       const result = await compareUserPaymentOptions(ctx.userId, args.options, {
         horizonDays: args.context.horizonDays,
         maxLastPaymentDate: args.context.maxLastPaymentDate,
+        scenario: args.context.scenario,
       });
       return {
         forModel: {
           currency: ctx.currency,
           status: result.status,
           recommendedOptionId: result.recommendedOptionId,
+          leastBadOptionId: result.leastBadOptionId,
+          baselineBreach: result.baselineBreach ?? null,
           blockers: result.blockers,
+          ranking: result.ranking,
           options: result.options.map((option) => ({
             id: option.id,
             label: option.label,
@@ -659,6 +646,7 @@ const readTools: ReadTool[] = [
             softReserveImpacts: option.softReserveImpacts,
             creditLimitExceededMinor: option.creditLimitExceededMinor,
             cardUsage: option.cardUsage,
+            cardHeadroomAtPeakMinor: option.cardHeadroomAtPeakMinor,
             lastPaymentDate: option.lastPaymentDate,
             installments: option.installments,
             peakMonthlyOutflowMinor: option.peakMonthlyOutflowMinor,
@@ -672,11 +660,17 @@ const readTools: ReadTool[] = [
     name: "recommend_purchase_plan",
     title: "Recommend a purchase plan",
     description:
-      "Given a shopping list (items with an amount and, optionally, a needed-by date and an installment cap), the engine generates every plausible way to pay each item — in full, or on each of the user's active cards at a spread of installment counts — and decides the cash-preserving way to pay the whole basket. Never invents a recommendation: NO_FEASIBLE_PLAN and INSUFFICIENT_DATA are propagated as-is, not softened into a suggestion.",
+      "Given a shopping list (items with an amount and, optionally, a needed-by date and an installment cap), the engine generates every way to pay each item — in full (one cash settlement today), plus each active card at 1, 2, 3, 4, 5, 6, 10 and 12 instalments (those above the item's maxInstallments are not generated), all bought today — and decides the cash-preserving way to pay the whole basket over a 365-day forecast (scenario 'budget' by default, or 'none'). " +
+      "Items are decided one by one, earliest deadline first, then most expensive, then id; each candidate is checked against what earlier choices already occupy (cash and card limits). A candidate is workable when it breaks nothing: balance (NEGATIVE_BALANCE below the 0 floor; HARD_RESERVE_VIOLATED below a hard reserve > 0; when the forecast is already below the floor before buying — baselineBreach — the bar is 'does not lower that trough'), card limit by peak usage, deadline, instalment cap. Among workable ones it prefers: highest trough → lowest peak monthly outflow → lowest total cost → fewest instalments → most card limit left free at the card's peak (cardHeadroomAtPeakMinor; cash counts as the most) → id. Each choice reports decidedBy (the criterion that beat runnerUpOptionId, the next-best workable way) and workableCount. " +
+      "When nothing works for an item, the least-bad candidate (fewest walls hit, then the same preference) is still returned with fits=false, its rejections, and a blockedItems entry counting how many candidates failed each way (cappedCount, lateCount, overCardCount, belowFloorCount — each candidate counted once, under the first of those it hits). simulation is the whole chosen basket judged by the same rules as get_purchase_plan_impact. Never invents a recommendation: NO_FEASIBLE_PLAN and INSUFFICIENT_DATA are propagated as-is, not softened into a suggestion.",
     requiredScope: "finance:read",
     input: z.object({
       items: z.array(planRecommendationItemInput).min(1).max(20),
       targetDate: isoDateSchema.optional().describe("plan-level deadline; an item without its own neededBy inherits it"),
+      scenario: z
+        .enum(["none", "budget"])
+        .optional()
+        .describe("'budget' (default): the baseline includes what each budget still allows; 'none': commitments only"),
     }),
     async execute(ctx, args) {
       const items = args.items.map((item) => ({
@@ -687,6 +681,7 @@ const readTools: ReadTool[] = [
       }));
       const result = await recommendUserPurchasePlan(ctx.userId, items, {
         targetDate: args.targetDate,
+        scenario: args.scenario,
       });
       return {
         forModel: {
@@ -699,15 +694,20 @@ const readTools: ReadTool[] = [
           choices: result.choices.map((choice) => ({
             itemId: choice.itemId,
             label: choice.label,
+            optionId: choice.optionId,
             optionLabel: choice.optionLabel,
             totalCostMinor: choice.totalCostMinor,
             installments: choice.installments,
             installmentAmountMinor: choice.installmentAmountMinor,
             firstPaymentDate: choice.firstPaymentDate,
             lastPaymentDate: choice.lastPaymentDate,
+            cardId: choice.cardId,
             cardLabel: choice.cardLabel,
+            cardHeadroomAtPeakMinor: choice.cardHeadroomAtPeakMinor,
             minimumBalanceMinor: choice.minimumBalanceMinor,
             minimumBalanceDate: choice.minimumBalanceDate,
+            decidedBy: choice.decidedBy,
+            runnerUpOptionId: choice.runnerUpOptionId,
             workableCount: choice.workableCount,
             fits: choice.fits,
             rejections: choice.rejections,
@@ -724,6 +724,9 @@ const readTools: ReadTool[] = [
                 minimumBalanceAfterMinor: result.simulation.minimumBalanceAfterMinor,
                 minimumBalanceAfterDate: result.simulation.minimumBalanceAfterDate,
                 hardReserveViolated: result.simulation.hardReserveViolated,
+                feasible: result.simulation.feasible,
+                rejections: result.simulation.rejections,
+                reasons: result.simulation.reasons,
                 softReserveImpacts: result.simulation.softReserveImpacts,
                 cards: result.simulation.cards,
                 monthlyOutlook: result.simulation.monthlyOutlook,
@@ -775,7 +778,8 @@ const writeTools: WriteTool[] = [
   write({
     name: "mark_transaction_reviewed",
     title: "Mark reviewed",
-    description: "Approve one or more pending/imported transactions into the ledger.",
+    description:
+      "Approve transactions by id, as the Inbox's Approve button does: every id in status pending, imported or reviewed becomes `posted` (there is no separate 'reviewed' result; `reviewed` is what a rule's mark_reviewed action sets, and approving promotes it to posted too) and its suspected-duplicate flag is cleared. Posted, rejected, deleted and other users' ids are skipped. A pending row starts counting in account balances, reports and the forecast now (imported and reviewed rows already counted); the affected account balances, both legs of a transfer, are recomputed. Applies immediately when called; returns how many were approved.",
     risk: "write",
     requiredScope: "reviews:write",
     input: z.object({ ids: z.array(z.string().uuid()).min(1).max(100) }),
@@ -866,7 +870,8 @@ const writeTools: WriteTool[] = [
   write({
     name: "run_rule",
     title: "Run rule now",
-    description: "Manually execute a stored rule against recent transactions, applying its actions. Shows impact and requires confirmation.",
+    description:
+      "Run a stored rule now, as the Automations page's Run button does. It applies immediately when called (there is no separate confirmation over MCP; use propose_rule first to see the matches). Scope: every non-deleted transaction in status pending, imported, reviewed or posted, whatever its date (rejected rows are never touched), filtered by the rule's conditions. Each match gets the rule's actions: set_category sets the transaction's category, add_tag adds the tag, rename_merchant sets the merchant, mark_reviewed moves pending/imported rows to `reviewed`. The result counts matched (rows the conditions selected) and applied (rows actually changed: a match already in the target state — same category, merchant already renamed, tag already present, already reviewed or posted — is not counted). The run is recorded in get_rule_runs with trigger manual. Changes are ordinary ledger edits and are not undone by deleting the rule.",
     risk: "sensitive",
     requiredScope: "rules:write",
     input: z.object({ id: z.string().uuid() }),
@@ -885,7 +890,11 @@ const writeTools: WriteTool[] = [
     async execute(ctx, payload) {
       const p = payload as { id: string };
       const r = await runRuleCore(ctx.userId, p.id);
-      return { status: "completed" as ExecStatus, title: `Applied to ${r.applied}`, detail: `${r.matched} matched, ${r.applied} changed` };
+      return {
+        status: "completed" as ExecStatus,
+        title: `Applied to ${r.applied}`,
+        detail: `${r.matched} matched, ${r.applied} changed, ${r.matched - r.applied} already in the target state`,
+      };
     },
   }),
 

@@ -180,6 +180,8 @@ async function actionableCount(userId: string): Promise<number> {
 
 export interface RulePreviewResult {
   matchedCount: number;
+  /** Matched rows the actions would leave unchanged (already in the target state). */
+  alreadyInTargetCount: number;
   scannedCount: number;
   sample: Array<{
     id: string;
@@ -187,42 +189,24 @@ export interface RulePreviewResult {
     date: string;
     amountMinor: number;
     currencyCode: string;
+    categoryId: string | null;
+    status: (typeof transactions.$inferSelect)["status"];
+    /** False when this row is already in the target state. */
+    wouldChange: boolean;
     diff: RuleDiff;
   }>;
 }
 
-/** Dry-run a rule definition against the whole ledger. */
-export async function previewRuleDefinition(
-  userId: string,
-  definition: RuleDefinition,
-): Promise<RulePreviewResult> {
-  const diff = evaluateActions(definition.actions);
-  const sample: RulePreviewResult["sample"] = [];
-  let matchedCount = 0;
-
-  for await (const tx of candidateTransactions(userId, ruleFilter(definition))) {
-    if (!matchesRule(toRuleTransaction(tx), definition)) continue;
-    matchedCount += 1;
-    if (sample.length < 8) {
-      sample.push({
-        id: tx.id,
-        description: tx.description,
-        date: tx.date,
-        amountMinor: tx.amountMinor,
-        currencyCode: tx.currencyCode,
-        diff,
-      });
-    }
-  }
-
-  return { matchedCount, scannedCount: await actionableCount(userId), sample };
-}
-
-/** Apply one diff to one transaction. Returns true if anything changed. */
-async function applyDiff(
+/**
+ * The column updates a diff would make on one row, leaving out anything the
+ * row already has. Shared by the dry run and the real run, so "would change"
+ * and "applied" are judged by the same rule. Tags are handled separately
+ * because they live in their own table.
+ */
+function columnChanges(
   tx: typeof transactions.$inferSelect,
   diff: RuleDiff,
-): Promise<boolean> {
+): Partial<typeof transactions.$inferInsert> {
   const update: Partial<typeof transactions.$inferInsert> = {};
   if (diff.setCategoryId && diff.setCategoryId !== tx.categoryId) {
     update.categoryId = diff.setCategoryId;
@@ -239,6 +223,86 @@ async function applyDiff(
   if (diff.linkBillId && diff.linkBillId !== tx.billId) {
     update.billId = diff.linkBillId;
   }
+  return update;
+}
+
+/** Of `ids`, those that already carry every tag in `tagIds`. */
+async function idsWithAllTags(ids: string[], tagIds: string[]): Promise<Set<string>> {
+  const result = new Set<string>();
+  for (let i = 0; i < ids.length; i += SCAN_BATCH) {
+    const chunk = ids.slice(i, i + SCAN_BATCH);
+    const rows = await db
+      .select({ transactionId: transactionTags.transactionId, tagId: transactionTags.tagId })
+      .from(transactionTags)
+      .where(and(inArray(transactionTags.transactionId, chunk), inArray(transactionTags.tagId, tagIds)));
+    const have = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const set = have.get(row.transactionId) ?? new Set<string>();
+      set.add(row.tagId);
+      have.set(row.transactionId, set);
+    }
+    for (const [id, set] of have) if (tagIds.every((t) => set.has(t))) result.add(id);
+  }
+  return result;
+}
+
+/** Dry-run a rule definition against the whole ledger. */
+export async function previewRuleDefinition(
+  userId: string,
+  definition: RuleDefinition,
+): Promise<RulePreviewResult> {
+  const diff = evaluateActions(definition.actions);
+  const tagIds = [...new Set(diff.addTagIds ?? [])];
+  const sample: RulePreviewResult["sample"] = [];
+  let matchedCount = 0;
+  // Matched rows whose columns are already right; with add_tag they are only
+  // in the target state if they also carry every tag, checked after the scan.
+  const columnsAlreadyRight: string[] = [];
+
+  for await (const tx of candidateTransactions(userId, ruleFilter(definition))) {
+    if (!matchesRule(toRuleTransaction(tx), definition)) continue;
+    matchedCount += 1;
+    const columnsChange = Object.keys(columnChanges(tx, diff)).length > 0;
+    if (!columnsChange) columnsAlreadyRight.push(tx.id);
+    if (sample.length < 8) {
+      sample.push({
+        id: tx.id,
+        description: tx.description,
+        date: tx.date,
+        amountMinor: tx.amountMinor,
+        currencyCode: tx.currencyCode,
+        categoryId: tx.categoryId,
+        status: tx.status,
+        wouldChange: columnsChange,
+        diff,
+      });
+    }
+  }
+
+  const unchanged =
+    tagIds.length === 0
+      ? new Set(columnsAlreadyRight)
+      : await idsWithAllTags(columnsAlreadyRight, tagIds);
+  for (const row of sample) row.wouldChange = !unchanged.has(row.id);
+
+  return {
+    matchedCount,
+    alreadyInTargetCount: unchanged.size,
+    scannedCount: await actionableCount(userId),
+    sample,
+  };
+}
+
+/**
+ * Apply one diff to one transaction. Returns true only if something actually
+ * changed: a column that differed, or a tag the row did not have yet. A match
+ * already in the target state is not counted as applied.
+ */
+async function applyDiff(
+  tx: typeof transactions.$inferSelect,
+  diff: RuleDiff,
+): Promise<boolean> {
+  const update = columnChanges(tx, diff);
 
   let changed = false;
   if (Object.keys(update).length > 0) {
@@ -246,11 +310,12 @@ async function applyDiff(
     changed = true;
   }
   if (diff.addTagIds?.length) {
-    await db
+    const inserted = await db
       .insert(transactionTags)
       .values(diff.addTagIds.map((tagId) => ({ transactionId: tx.id, tagId })))
-      .onConflictDoNothing();
-    changed = true;
+      .onConflictDoNothing()
+      .returning({ tagId: transactionTags.tagId });
+    if (inserted.length > 0) changed = true;
   }
   return changed;
 }

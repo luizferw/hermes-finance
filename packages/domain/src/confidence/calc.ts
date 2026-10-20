@@ -55,7 +55,10 @@ export interface ConfidenceResult {
 }
 
 export interface ConfidenceInput {
-  /** Sum of positive (asset) balances on net-worth accounts, minor units. */
+  /**
+   * Net balance of the liquid (cash, wallet, bank) accounts, minor units.
+   * Overdrafts subtract, so this can be negative.
+   */
   liquidAssetsMinor: number;
   /** Trailing average monthly spend, minor units (0 when unknown). */
   avgMonthlySpendMinor: number;

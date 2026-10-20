@@ -254,6 +254,105 @@ export type RejectionCode =
   | "CREDIT_LIMIT_EXCEEDED"
   | "DEADLINE_EXCEEDED";
 
+/**
+ * The forecast already below the floor or the hard reserve before anything is
+ * bought. Reported whenever it happens, because every verdict measured against
+ * it reads differently: the bar is no longer "stay above the floor" but "do
+ * not lower the trough".
+ */
+export interface BaselineBreach {
+  minimumBalanceMinor: number;
+  minimumBalanceDate: DateString;
+  floorMinor: number;
+  hardReserveMinor: number;
+}
+
+interface Trough {
+  minimumBalanceMinor: number;
+  minimumBalanceDate: DateString;
+}
+
+/** Set when `before` already sits under the floor, or under a hard reserve above zero. */
+function baselineBreachOf(before: Trough, floorMinor: number, hardReserveMinor: number): BaselineBreach | undefined {
+  const short =
+    before.minimumBalanceMinor < floorMinor ||
+    (hardReserveMinor > 0 && before.minimumBalanceMinor < hardReserveMinor);
+  return short
+    ? {
+        minimumBalanceMinor: before.minimumBalanceMinor,
+        minimumBalanceDate: before.minimumBalanceDate,
+        floorMinor,
+        hardReserveMinor,
+      }
+    : undefined;
+}
+
+/**
+ * The balance constraints of PRD §22, judged the same way by every entry point —
+ * the comparator, a single simulation, a plan and the recommender.
+ *
+ * With a healthy baseline: NEGATIVE_BALANCE when the trough after falls below
+ * the floor, HARD_RESERVE_VIOLATED when it falls below the hard reserve. A hard
+ * reserve of zero is the floor itself, so it is never reported a second time.
+ *
+ * With the baseline already short, rejecting everything would answer nothing:
+ * a purchase whose settlements all land after the low point would be refused
+ * for a hole that was already there. So the bar becomes "do not lower the
+ * trough". A purchase that leaves it where it was passes; one that lowers it
+ * is rejected with whichever level it is under.
+ */
+function balanceVerdict(
+  before: Trough,
+  after: Trough,
+  floorMinor: number,
+  hardReserveMinor: number,
+): { rejections: RejectionCode[]; reasons: string[] } {
+  const rejections: RejectionCode[] = [];
+  const reasons: string[] = [];
+  const trough = `trough ${after.minimumBalanceMinor} on ${after.minimumBalanceDate}`;
+  const breach = baselineBreachOf(before, floorMinor, hardReserveMinor);
+
+  if (breach) {
+    const level =
+      before.minimumBalanceMinor < floorMinor
+        ? `the ${floorMinor} floor`
+        : `the hard reserve of ${hardReserveMinor}`;
+    reasons.push(
+      `the forecast already falls to ${before.minimumBalanceMinor} on ${before.minimumBalanceDate} before this purchase, below ${level}, so the bar is not lowering that trough`,
+    );
+    if (after.minimumBalanceMinor < before.minimumBalanceMinor) {
+      if (after.minimumBalanceMinor < floorMinor) rejections.push("NEGATIVE_BALANCE");
+      if (hardReserveMinor > 0 && after.minimumBalanceMinor < hardReserveMinor) {
+        rejections.push("HARD_RESERVE_VIOLATED");
+      }
+      reasons.push(
+        `lowers the trough from ${before.minimumBalanceMinor} to ${after.minimumBalanceMinor} on ${after.minimumBalanceDate}`,
+      );
+    } else {
+      reasons.push(`does not lower the trough (${trough})`);
+    }
+    return { rejections, reasons };
+  }
+
+  if (after.minimumBalanceMinor < floorMinor) {
+    rejections.push("NEGATIVE_BALANCE");
+    reasons.push(
+      `projected balance falls to ${after.minimumBalanceMinor} on ${after.minimumBalanceDate}, below the ${floorMinor} floor`,
+    );
+  }
+  if (hardReserveMinor > 0) {
+    if (after.minimumBalanceMinor < hardReserveMinor) {
+      rejections.push("HARD_RESERVE_VIOLATED");
+      reasons.push(`breaks the hard reserve of ${hardReserveMinor} (${trough})`);
+    } else {
+      reasons.push(`keeps the hard reserve of ${hardReserveMinor} (${trough})`);
+    }
+  } else if (rejections.length === 0) {
+    reasons.push(`stays at or above the ${floorMinor} floor (${trough})`);
+  }
+  return { rejections, reasons };
+}
+
 export interface PaymentOptionResult {
   id: string;
   label: string;
@@ -273,6 +372,12 @@ export interface PaymentOptionResult {
   creditLimitExceededMinor?: number;
   /** How much of the card's limit the option leaves in use at its busiest, when charged to a card. */
   cardUsage?: CardUsageSummary;
+  /**
+   * `creditLimitMinor − cardUsage.peakMinor`: the limit still free on the card's
+   * busiest day with this option. Undefined for an option on no card, which
+   * takes none of any limit and so ranks as having the most headroom.
+   */
+  cardHeadroomAtPeakMinor?: number;
   /** Date the option's last cash settlement lands. */
   lastPaymentDate?: string;
   installments: number;
@@ -298,10 +403,47 @@ export interface ComparePaymentOptionsInput extends SafeToSpendInput {
   cardActivity?: CardActivity;
 }
 
+/** The criteria options are ranked by, in the order they are applied. */
+export type ComparisonCriterion =
+  | "feasibility"
+  | "rejectionCount"
+  | "totalCostMinor"
+  | "minimumBalanceMinor"
+  | "peakMonthlyOutflowMinor"
+  | "lastPaymentDate"
+  | "softReserveShortfallMinor"
+  | "cardHeadroomAtPeakMinor"
+  | "id";
+
+export interface RankedOption {
+  /** 1 is best. */
+  rank: number;
+  optionId: string;
+  label: string;
+  feasible: boolean;
+  rejections: RejectionCode[];
+  /** The option ranked immediately above this one; null for the first. */
+  comparedWithOptionId: string | null;
+  /** The first criterion on which this option lost to that one; null for the first. */
+  decidedBy: ComparisonCriterion | null;
+  /** That comparison in words, with both raw values. */
+  explanation: string;
+}
+
 export interface PaymentComparison {
   options: PaymentOptionResult[];
   /** Undefined when every option breaks a hard constraint. */
   recommendedOptionId?: string;
+  /**
+   * Every option, best first: feasible ones by the comparator's criteria, then
+   * the infeasible ones by fewest rejections and the same criteria. Present
+   * whatever the status, so the least-bad option is always visible.
+   */
+  ranking: RankedOption[];
+  /** Set when nothing is feasible: the top of `ranking`. Never a recommendation. */
+  leastBadOptionId?: string;
+  /** Set when the forecast is already short before buying; see `BaselineBreach`. */
+  baselineBreach?: BaselineBreach;
   status: ComparisonStatus;
   /** Populated when `status` is not `OK`, explaining what blocked a recommendation. */
   blockers: string[];
@@ -378,6 +520,12 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
   assertMinorUnits(floorMinor, "minimumAllowedBalanceMinor");
   if (input.maxLastPaymentDate) assertValidDate(input.maxLastPaymentDate, "maxLastPaymentDate");
 
+  const baseline = calculateSafeToSpend({
+    hardReserveMinor: input.hardReserveMinor,
+    forecastInput: input.forecastInput,
+  });
+  const baselineBreach = baselineBreachOf(baseline, floorMinor, input.hardReserveMinor);
+
   const options = input.options.map((option): PaymentOptionResult => {
     const result = calculateSafeToSpend({
       hardReserveMinor: input.hardReserveMinor,
@@ -389,19 +537,7 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
     const { lastPaymentDate, peakMonthlyOutflowMinor } = summarizeOption(option);
     const softReserveImpacts = evaluateSoftReserves(result.minimumBalanceMinor, softReserves);
 
-    const rejections: RejectionCode[] = [];
-    const reasons: string[] = [];
-
-    if (result.minimumBalanceMinor < floorMinor) {
-      rejections.push("NEGATIVE_BALANCE");
-      reasons.push(`projected balance falls to ${result.minimumBalanceMinor} on ${result.minimumBalanceDate}, below the ${floorMinor} floor`);
-    }
-    if (result.hardReserveViolated) {
-      rejections.push("HARD_RESERVE_VIOLATED");
-      reasons.push(`breaks the hard reserve of ${input.hardReserveMinor} (trough ${result.minimumBalanceMinor} on ${result.minimumBalanceDate})`);
-    } else {
-      reasons.push(`keeps the hard reserve of ${input.hardReserveMinor} (trough ${result.minimumBalanceMinor} on ${result.minimumBalanceDate})`);
-    }
+    const { rejections, reasons } = balanceVerdict(baseline, result, floorMinor, input.hardReserveMinor);
 
     let creditLimitExceededMinor: number | undefined;
     let cardUsage: CardUsageSummary | undefined;
@@ -451,6 +587,7 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
       softReserveImpacts,
       creditLimitExceededMinor,
       cardUsage,
+      cardHeadroomAtPeakMinor: cardUsage ? cardUsage.creditLimitMinor - cardUsage.peakMinor : undefined,
       lastPaymentDate,
       installments: option.installments ?? 1,
       peakMonthlyOutflowMinor,
@@ -458,33 +595,146 @@ export function comparePaymentOptions(input: ComparePaymentOptionsInput): Paymen
     };
   });
 
-  const softShortfall = (option: PaymentOptionResult): number =>
-    option.softReserveImpacts.reduce((total, impact) => total + impact.shortfallMinor, 0);
-
-  const viable = [...options]
-    .filter((option) => option.feasible)
-    .sort(
-      (left, right) =>
-        left.totalCostMinor - right.totalCostMinor ||
-        right.minimumBalanceMinor - left.minimumBalanceMinor ||
-        left.peakMonthlyOutflowMinor - right.peakMonthlyOutflowMinor ||
-        (left.lastPaymentDate ?? "").localeCompare(right.lastPaymentDate ?? "") ||
-        softShortfall(left) - softShortfall(right) ||
-        left.id.localeCompare(right.id),
-    );
-
   if (options.length === 0) {
-    return { options, status: "INSUFFICIENT_DATA", blockers: ["no payment option was supplied"] };
+    return { options, ranking: [], status: "INSUFFICIENT_DATA", blockers: ["no payment option was supplied"] };
   }
-  if (viable.length === 0) {
+
+  const ranking = rankOptions(options);
+  const best = options.find((option) => option.id === ranking[0]!.optionId)!;
+  if (!best.feasible) {
     return {
       options,
+      ranking,
+      leastBadOptionId: best.id,
+      baselineBreach,
       status: "NO_FEASIBLE_OPTION",
       blockers: options.map((option) => `${option.label}: ${option.rejections.join(", ")}`),
     };
   }
 
-  return { options, recommendedOptionId: viable[0]!.id, status: "OK", blockers: [] };
+  return { options, ranking, recommendedOptionId: best.id, baselineBreach, status: "OK", blockers: [] };
+}
+
+const softShortfall = (option: PaymentOptionResult): number =>
+  option.softReserveImpacts.reduce((total, impact) => total + impact.shortfallMinor, 0);
+
+/** An option on no card takes none of any limit: it has the most headroom there is. */
+const headroom = (option: PaymentOptionResult): number =>
+  option.cardHeadroomAtPeakMinor ?? Number.POSITIVE_INFINITY;
+
+interface Criterion {
+  name: ComparisonCriterion;
+  /** Negative when `left` ranks first. */
+  compare: (left: PaymentOptionResult, right: PaymentOptionResult) => number;
+  /** The value shown in an explanation. */
+  value: (option: PaymentOptionResult) => string | number;
+  /** How the better value reads, for the explanation. */
+  better: string;
+}
+
+const byNumber = (difference: number) => (difference === 0 ? 0 : difference < 0 ? -1 : 1);
+
+/**
+ * The comparator's ranking, criterion by criterion. Feasible options first;
+ * among infeasible ones, fewer broken constraints first. Then: lowest total
+ * cost, highest trough, lowest peak monthly outflow, earliest last payment,
+ * lowest soft-reserve shortfall, most card headroom left at the card's peak
+ * (so a tie between two cards goes to the one left with more free limit rather
+ * than to whichever id sorts first), and the id last so the order is total.
+ */
+const CRITERIA: Criterion[] = [
+  {
+    name: "feasibility",
+    compare: (left, right) => Number(right.feasible) - Number(left.feasible),
+    value: (option) => (option.feasible ? "feasible" : "infeasible"),
+    better: "feasible",
+  },
+  {
+    name: "rejectionCount",
+    compare: (left, right) => left.rejections.length - right.rejections.length,
+    value: (option) => option.rejections.length,
+    better: "fewer broken constraints",
+  },
+  {
+    name: "totalCostMinor",
+    compare: (left, right) => left.totalCostMinor - right.totalCostMinor,
+    value: (option) => option.totalCostMinor,
+    better: "lower total cost",
+  },
+  {
+    name: "minimumBalanceMinor",
+    compare: (left, right) => right.minimumBalanceMinor - left.minimumBalanceMinor,
+    value: (option) => option.minimumBalanceMinor,
+    better: "higher minimum balance",
+  },
+  {
+    name: "peakMonthlyOutflowMinor",
+    compare: (left, right) => left.peakMonthlyOutflowMinor - right.peakMonthlyOutflowMinor,
+    value: (option) => option.peakMonthlyOutflowMinor,
+    better: "lower peak monthly outflow",
+  },
+  {
+    name: "lastPaymentDate",
+    compare: (left, right) => (left.lastPaymentDate ?? "").localeCompare(right.lastPaymentDate ?? ""),
+    value: (option) => option.lastPaymentDate ?? "none",
+    better: "earlier last payment",
+  },
+  {
+    name: "softReserveShortfallMinor",
+    compare: (left, right) => softShortfall(left) - softShortfall(right),
+    value: softShortfall,
+    better: "lower soft-reserve shortfall",
+  },
+  {
+    name: "cardHeadroomAtPeakMinor",
+    compare: (left, right) => byNumber(headroom(right) - headroom(left)),
+    value: (option) => option.cardHeadroomAtPeakMinor ?? "no card limit used",
+    better: "more card limit left free at the peak",
+  },
+  {
+    name: "id",
+    compare: (left, right) => left.id.localeCompare(right.id),
+    value: (option) => option.id,
+    better: "id sorts first",
+  },
+];
+
+function rankOptions(options: PaymentOptionResult[]): RankedOption[] {
+  const sorted = [...options].sort((left, right) => {
+    for (const criterion of CRITERIA) {
+      const result = criterion.compare(left, right);
+      if (result !== 0) return result;
+    }
+    return 0;
+  });
+  return sorted.map((option, index): RankedOption => {
+    const above = sorted[index - 1];
+    if (!above) {
+      return {
+        rank: 1,
+        optionId: option.id,
+        label: option.label,
+        feasible: option.feasible,
+        rejections: option.rejections,
+        comparedWithOptionId: null,
+        decidedBy: null,
+        explanation: option.feasible
+          ? "ranked first"
+          : "ranked first among options that all break a hard constraint: the least bad, not a recommendation",
+      };
+    }
+    const criterion = CRITERIA.find((candidate) => candidate.compare(above, option) !== 0)!;
+    return {
+      rank: index + 1,
+      optionId: option.id,
+      label: option.label,
+      feasible: option.feasible,
+      rejections: option.rejections,
+      comparedWithOptionId: above.id,
+      decidedBy: criterion.name,
+      explanation: `below ${above.label} on ${criterion.name} (${criterion.better}): ${criterion.value(above)} vs ${criterion.value(option)}`,
+    };
+  });
 }
 
 export interface SimulatePurchaseInput extends SafeToSpendInput {
@@ -500,9 +750,16 @@ export interface PurchaseSimulation {
   optionId: string;
   label: string;
   totalCostMinor: number;
-  /** Cash leaving the account on the first settlement date. */
+  /**
+   * Cash leaving the account on `firstSettlementDate` — the first settlement,
+   * which is only today for a non-card payment made today. For a card it is the
+   * first instalment, on the first statement's due date. The name is kept for
+   * compatibility.
+   */
   immediateImpactMinor: number;
-  /** Cash outflow the option adds, keyed by `YYYY-MM`. */
+  /** When the first cash settlement lands; undefined only for an option with none. */
+  firstSettlementDate?: DateString;
+  /** Cash outflow the option adds, keyed by `YYYY-MM`, in chronological order. */
   monthlyImpactMinor: Record<string, number>;
   safeToSpendBeforeMinor: number;
   safeToSpendAfterMinor: number;
@@ -512,15 +769,22 @@ export interface PurchaseSimulation {
   hardReserveViolated: boolean;
   softReserveImpacts: SoftReserveImpact[];
   creditLimitExceededMinor?: number;
-  /** Peak card utilization with the purchase, when the option is charged to a card. */
+  /**
+   * @deprecated Same number as `cardUsage.peakMinor` (limit in use on the
+   * card's busiest day with the purchase); kept for compatibility.
+   */
   cardUtilizationAfterMinor?: number;
   /** The card's limit at its busiest, without and with the purchase. */
   cardUsage?: CardUsageSummary;
+  /** `creditLimitMinor − cardUsage.peakMinor`, when charged to a card. */
+  cardHeadroomAtPeakMinor?: number;
   lastPaymentDate?: string;
   installments: number;
   feasible: boolean;
   rejections: RejectionCode[];
   reasons: string[];
+  /** Set when the forecast is already short before buying; see `BaselineBreach`. */
+  baselineBreach?: BaselineBreach;
   forecastAfter: Forecast;
 }
 
@@ -565,6 +829,7 @@ export function simulatePurchase(input: SimulatePurchaseInput): PurchaseSimulati
     label: after.label,
     totalCostMinor: after.totalCostMinor,
     immediateImpactMinor,
+    firstSettlementDate: firstDate,
     monthlyImpactMinor,
     safeToSpendBeforeMinor: before.safeToSpendMinor,
     safeToSpendAfterMinor: after.safeToSpendAfterMinor,
@@ -576,11 +841,13 @@ export function simulatePurchase(input: SimulatePurchaseInput): PurchaseSimulati
     creditLimitExceededMinor: after.creditLimitExceededMinor,
     cardUtilizationAfterMinor: after.cardUsage?.peakMinor,
     cardUsage: after.cardUsage,
+    cardHeadroomAtPeakMinor: after.cardHeadroomAtPeakMinor,
     lastPaymentDate: after.lastPaymentDate,
     installments: after.installments,
     feasible: after.feasible,
     rejections: after.rejections,
     reasons: after.reasons,
+    baselineBreach: comparison.baselineBreach,
     forecastAfter: after.forecast,
   };
 }
@@ -729,7 +996,7 @@ export interface PurchasePlanSimulation {
   softReserveImpacts: SoftReserveImpact[];
   /** One entry per card the plan charges, with every item's share summed. */
   cards: CardLoad[];
-  /** Cash the whole plan adds, keyed by `YYYY-MM`. */
+  /** Cash the whole plan adds, keyed by `YYYY-MM`, in chronological order. */
   monthlyImpactMinor: Record<string, number>;
   /**
    * Month by month, what the plan takes out and what the balance does — the
@@ -741,6 +1008,8 @@ export interface PurchasePlanSimulation {
   feasible: boolean;
   rejections: RejectionCode[];
   reasons: string[];
+  /** Set when the forecast is already short before buying; see `BaselineBreach`. */
+  baselineBreach?: BaselineBreach;
   forecastAfter: Forecast;
 }
 
@@ -790,25 +1059,7 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     forecastInput: { ...input.forecastInput, events: [...input.forecastInput.events, ...planEvents] },
   });
 
-  const rejections: RejectionCode[] = [];
-  const reasons: string[] = [];
-
-  if (after.minimumBalanceMinor < floorMinor) {
-    rejections.push("NEGATIVE_BALANCE");
-    reasons.push(
-      `projected balance falls to ${after.minimumBalanceMinor} on ${after.minimumBalanceDate}, below the ${floorMinor} floor`,
-    );
-  }
-  if (after.hardReserveViolated) {
-    rejections.push("HARD_RESERVE_VIOLATED");
-    reasons.push(
-      `breaks hard reserve of ${input.hardReserveMinor} (trough ${after.minimumBalanceMinor} on ${after.minimumBalanceDate})`,
-    );
-  } else {
-    reasons.push(
-      `keeps hard reserve ${input.hardReserveMinor} (trough ${after.minimumBalanceMinor} on ${after.minimumBalanceDate})`,
-    );
-  }
+  const { rejections, reasons } = balanceVerdict(before, after, floorMinor, input.hardReserveMinor);
 
   // Card limits are shared, so the plan's items are charged together rather
   // than checked one by one: two 60%-of-limit purchases both pass alone and
@@ -899,6 +1150,11 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
   }
 
   const settlementDates = planEvents.map((event) => event.expectedAt).sort();
+  // Keys land in item order above; an edited item moves to the end of the
+  // list, which used to put its early months after later ones.
+  const chronologicalImpact = Object.fromEntries(
+    Object.entries(monthlyImpactMinor).sort(([left], [right]) => left.localeCompare(right)),
+  );
 
   const outlookByMonth = new Map<string, MonthlyOutlookEntry>();
   for (const day of after.forecast.days) {
@@ -937,11 +1193,12 @@ export function simulatePurchasePlan(input: SimulatePurchasePlanInput): Purchase
     hardReserveViolated: after.hardReserveViolated,
     softReserveImpacts: evaluateSoftReserves(after.minimumBalanceMinor, softReserves),
     cards,
-    monthlyImpactMinor,
+    monthlyImpactMinor: chronologicalImpact,
     lastPaymentDate: settlementDates.at(-1),
     feasible: rejections.length === 0,
     rejections,
     reasons,
+    baselineBreach: baselineBreachOf(before, floorMinor, input.hardReserveMinor),
     forecastAfter: after.forecast,
   };
 }
@@ -1001,6 +1258,17 @@ export interface RecommendedChoice {
   /** Balance trough once this item is paid for this way. */
   minimumBalanceMinor: number;
   minimumBalanceDate: DateString;
+  /**
+   * The card's limit still free on its busiest day, with this choice and every
+   * earlier one on it. Undefined when not charged to a card.
+   */
+  cardHeadroomAtPeakMinor?: number;
+  /**
+   * The criterion that put this way ahead of the next-best workable one, and
+   * that one's id; undefined when it was the only workable way or nothing fit.
+   */
+  decidedBy?: RecommendationCriterion;
+  runnerUpOptionId?: string;
   /** How many ways of paying it were workable at all, this one included. */
   workableCount: number;
   /**
@@ -1040,9 +1308,9 @@ export interface PurchasePlanRecommendation {
   choices: RecommendedChoice[];
   /**
    * Set when the forecast is under water before any purchase. The list is not
-   * what broke; nothing could have been recommended against it.
+   * what broke; the bar for every item becomes not lowering that trough.
    */
-  baselineBreach?: { minimumBalanceMinor: number; minimumBalanceDate: DateString };
+  baselineBreach?: BaselineBreach;
   /** One entry per item no candidate worked for, as data rather than prose. */
   blockedItems: BlockedItem[];
   /** The basket verdict for the chosen set. Absent when nothing was chosen. */
@@ -1053,11 +1321,27 @@ export interface PurchasePlanRecommendation {
   blockers: string[];
 }
 
+/** The criteria a recommendation picks between workable ways by, in order. */
+export type RecommendationCriterion =
+  | "minimumBalanceMinor"
+  | "peakMonthlyOutflowMinor"
+  | "totalCostMinor"
+  | "installments"
+  | "cardHeadroomAtPeakMinor"
+  | "id";
+
+const freeLimit = (headroomMinor: number): string =>
+  Number.isFinite(headroomMinor) ? String(headroomMinor) : "no card";
+
 interface CandidateVerdict {
   option: PaymentOption;
   /** Trough of the whole basket if this candidate is added to what is chosen. */
   minimumBalanceMinor: number;
   minimumBalanceDate: DateString;
+  /** Limit free on the card's busiest day with this candidate; +∞ off-card. */
+  cardHeadroomAtPeakMinor: number;
+  /** The balance codes this candidate would break, judged by `balanceVerdict`. */
+  balanceRejections: RejectionCode[];
   breaksDeadline: boolean;
   breaksCard: boolean;
   breaksFloor: boolean;
@@ -1125,20 +1409,13 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     hardReserveMinor: input.hardReserveMinor,
     forecastInput: input.forecastInput,
   });
-  const alreadyShort =
-    baseline.minimumBalanceMinor < floorMinor || baseline.hardReserveViolated;
-  const baselineBreach = alreadyShort
-    ? {
-        minimumBalanceMinor: baseline.minimumBalanceMinor,
-        minimumBalanceDate: baseline.minimumBalanceDate,
-      }
-    : undefined;
   // Refusing to answer at all was the wrong call. Someone whose October is
   // already short still needs to know what their list would cost and when —
   // they just must not be told a purchase is fine when it deepens the hole.
   // So the bar becomes "do not make it worse": no candidate may push the
-  // trough below where it already sits. The breach is reported either way.
-  const effectiveFloorMinor = alreadyShort ? baseline.minimumBalanceMinor : floorMinor;
+  // trough below where it already sits (`balanceVerdict`, shared with every
+  // other entry point). The breach is reported either way.
+  const baselineBreach = baselineBreachOf(baseline, floorMinor, input.hardReserveMinor);
 
   const chosenEvents: ForecastEvent[] = [];
   // What the items already chosen charge to each card, so a later item is
@@ -1166,7 +1443,7 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         limitDate && item.purchaseDate && item.purchaseDate > limitDate,
       );
       const card = option.card;
-      const breaksCard = card
+      const usage = card
         ? cardUsageWith(
             card,
             input.cardActivity,
@@ -1175,11 +1452,16 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
               ...cardChargesFor(option, item.purchaseDate ?? option.purchaseDate ?? input.forecastInput.asOf),
             ],
             input.forecastInput,
-          ).exceededMinor > 0
-        : false;
-      const breaksFloor =
-        result.minimumBalanceMinor < effectiveFloorMinor ||
-        (!alreadyShort && result.hardReserveViolated);
+          )
+        : undefined;
+      const breaksCard = usage ? usage.exceededMinor > 0 : false;
+      const balanceRejections = balanceVerdict(
+        baseline,
+        result,
+        floorMinor,
+        input.hardReserveMinor,
+      ).rejections;
+      const breaksFloor = balanceRejections.length > 0;
       const breaksInstallmentCap =
         item.maxInstallments !== undefined && (option.installments ?? 1) > item.maxInstallments;
 
@@ -1187,6 +1469,10 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
         option,
         minimumBalanceMinor: result.minimumBalanceMinor,
         minimumBalanceDate: result.minimumBalanceDate,
+        cardHeadroomAtPeakMinor: usage
+          ? usage.creditLimitMinor - usage.peakMinor
+          : Number.POSITIVE_INFINITY,
+        balanceRejections,
         breaksDeadline,
         breaksCard,
         breaksFloor,
@@ -1202,13 +1488,29 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     // instalment count there was backwards: it handed the shortest plan the
     // win precisely when spreading was free, so a card whose first bill lands
     // after the low point came back as 2x instead of 12x.
-    const byPreference = (left: CandidateVerdict, right: CandidateVerdict) =>
-      right.minimumBalanceMinor - left.minimumBalanceMinor ||
-      summarizeOption(left.option).peakMonthlyOutflowMinor -
-        summarizeOption(right.option).peakMonthlyOutflowMinor ||
-      left.option.totalCostMinor - right.option.totalCostMinor ||
-      (left.option.installments ?? 1) - (right.option.installments ?? 1) ||
-      left.option.id.localeCompare(right.option.id);
+    //
+    // Card headroom comes before the id: two cards at the same instalment
+    // count tie on everything else, and letting the id decide piled a whole
+    // list onto one card up to 97.5% of its limit while another sat empty.
+    const preferenceCriteria: Array<[RecommendationCriterion, (left: CandidateVerdict, right: CandidateVerdict) => number]> = [
+      ["minimumBalanceMinor", (left, right) => right.minimumBalanceMinor - left.minimumBalanceMinor],
+      [
+        "peakMonthlyOutflowMinor",
+        (left, right) =>
+          summarizeOption(left.option).peakMonthlyOutflowMinor - summarizeOption(right.option).peakMonthlyOutflowMinor,
+      ],
+      ["totalCostMinor", (left, right) => left.option.totalCostMinor - right.option.totalCostMinor],
+      ["installments", (left, right) => (left.option.installments ?? 1) - (right.option.installments ?? 1)],
+      ["cardHeadroomAtPeakMinor", (left, right) => byNumber(right.cardHeadroomAtPeakMinor - left.cardHeadroomAtPeakMinor)],
+      ["id", (left, right) => left.option.id.localeCompare(right.option.id)],
+    ];
+    const byPreference = (left: CandidateVerdict, right: CandidateVerdict) => {
+      for (const [, compare] of preferenceCriteria) {
+        const result = compare(left, right);
+        if (result !== 0) return result;
+      }
+      return 0;
+    };
 
     const acceptable = verdicts.filter((verdict) => verdict.acceptable).sort(byPreference);
     const picked = acceptable[0];
@@ -1286,12 +1588,13 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
     // The least-bad candidate stands in when none worked, so every item is
     // answered and the basket picture below is the real one.
     const taken = picked ?? nearest;
-    const takenRejections: RejectionCode[] = [];
-    if (taken.breaksInstallmentCap || taken.breaksDeadline) takenRejections.push("DEADLINE_EXCEEDED");
+    const takenRejections: RejectionCode[] = [...taken.balanceRejections];
     if (taken.breaksCard) takenRejections.push("CREDIT_LIMIT_EXCEEDED");
-    if (taken.breaksFloor) {
-      takenRejections.push(alreadyShort ? "NEGATIVE_BALANCE" : "HARD_RESERVE_VIOLATED");
-    }
+    if (taken.breaksInstallmentCap || taken.breaksDeadline) takenRejections.push("DEADLINE_EXCEEDED");
+    const runnerUp = picked ? acceptable[1] : undefined;
+    const decidedBy = runnerUp
+      ? preferenceCriteria.find(([, compare]) => compare(taken, runnerUp) !== 0)?.[0]
+      : undefined;
     chosenEvents.push(...taken.option.cashEvents);
     chosenCardCharges.push(
       ...cardChargesFor(taken.option, item.purchaseDate ?? taken.option.purchaseDate ?? input.forecastInput.asOf),
@@ -1316,13 +1619,21 @@ export function recommendPurchasePlan(input: RecommendPurchasePlanInput): Purcha
       cardLabel: taken.option.card?.label,
       minimumBalanceMinor: taken.minimumBalanceMinor,
       minimumBalanceDate: taken.minimumBalanceDate,
+      cardHeadroomAtPeakMinor: Number.isFinite(taken.cardHeadroomAtPeakMinor)
+        ? taken.cardHeadroomAtPeakMinor
+        : undefined,
+      decidedBy,
+      runnerUpOptionId: runnerUp?.option.id,
       workableCount: acceptable.length,
       fits: Boolean(picked),
       rejections: takenRejections,
       reasons: picked
         ? [
             `leaves the balance at ${taken.minimumBalanceMinor} on ${taken.minimumBalanceDate}, the highest of ${acceptable.length} workable ${acceptable.length === 1 ? "way" : "ways"} to pay it`,
-            ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit but left less cash`] : []),
+            ...(runnersUp > 0 ? [`${runnersUp} other option${runnersUp === 1 ? "" : "s"} also fit`] : []),
+            ...(runnerUp && decidedBy
+              ? [`chosen over ${runnerUp.option.label} on ${decidedBy}${decidedBy === "cardHeadroomAtPeakMinor" ? ` (${freeLimit(taken.cardHeadroomAtPeakMinor)} vs ${freeLimit(runnerUp.cardHeadroomAtPeakMinor)} of limit left free at the peak)` : ""}`]
+              : []),
             ...(limitDate && lastPaymentDate ? [`paid off by ${lastPaymentDate}, within ${limitDate}`] : []),
           ]
         : [

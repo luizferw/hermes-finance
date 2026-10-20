@@ -61,6 +61,12 @@ export const listTransactionsSchema = z.object({
   q: z.string().max(200).optional(),
   accountId: z.string().uuid().optional(),
   categoryId: z.string().uuid().optional(),
+  /** Only transactions with no category (ignores categoryId). */
+  // Not z.coerce.boolean(): a query string "false" would coerce to true.
+  uncategorized: z
+    .union([z.boolean(), z.enum(["true", "false"]).transform((v) => v === "true")])
+    .optional(),
+  tagId: z.string().uuid().optional(),
   status: transactionStatusSchema.optional(),
   type: transactionTypeSchema.optional(),
   from: isoDateSchema.optional(),
